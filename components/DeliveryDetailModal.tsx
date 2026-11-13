@@ -2,6 +2,8 @@
 
 import React, { useState } from "react";
 import { Delivery, DeliveryStatus, Operator, AppSettings } from "@/lib/types";
+import { validateStateTransition } from "@/lib/state-machine";
+import { verifyDeliveryOtp } from "@/lib/storage";
 import {
   X,
   MapPin,
@@ -46,9 +48,21 @@ export function DeliveryDetailModal({
   const [enteredOtp, setEnteredOtp] = useState("");
   const [otpError, setOtpError] = useState("");
 
+  const [statusError, setStatusError] = useState("");
+
   const handleStatusChange = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!note.trim() && newStatus === delivery.status) return;
+    if (newStatus === delivery.status && !note.trim()) return;
+
+    if (newStatus !== delivery.status) {
+      const check = validateStateTransition(delivery.status, newStatus);
+      if (!check.valid) {
+        setStatusError(check.message || "Invalid state transition.");
+        return;
+      }
+    }
+    setStatusError("");
+
     onUpdateStatus(
       delivery.id,
       newStatus,
@@ -59,16 +73,15 @@ export function DeliveryDetailModal({
 
   const handleVerifyOtp = (e: React.FormEvent) => {
     e.preventDefault();
-    if (delivery.otp && delivery.otp !== enteredOtp.trim()) {
-      setOtpError("Incorrect 4-digit OTP. Please ask recipient for the code.");
+    if (!enteredOtp.trim()) return;
+
+    const res = verifyDeliveryOtp(delivery.id, enteredOtp.trim());
+    if (!res.success) {
+      setOtpError(res.message);
       return;
     }
     setOtpError("");
-    onUpdateStatus(
-      delivery.id,
-      "delivered",
-      `Proof of delivery confirmed via 4-digit Recipient OTP [${enteredOtp.trim()}].`
-    );
+    setEnteredOtp("");
   };
 
   const handleOperatorChange = (opId: string) => {
@@ -352,6 +365,11 @@ export function DeliveryDetailModal({
             <div style={{ fontSize: "12px", fontWeight: 700, color: "#1e40af", marginBottom: "8px" }}>
               Quick Status Transition & Rider Dispatch Log
             </div>
+            {statusError && (
+              <div style={{ fontSize: "11px", color: "#b91c1c", background: "#fee2e2", border: "1px solid #fecaca", padding: "6px 10px", borderRadius: "4px", marginBottom: "8px", fontWeight: 600 }}>
+                {statusError}
+              </div>
+            )}
             <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
               <select
                 className="select-filter"

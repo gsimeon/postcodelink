@@ -1,4 +1,5 @@
 import { AppSettings, Customer, Delivery, DeliveryEvent, Operator } from './types';
+import { validateStateTransition } from './state-machine';
 
 const STORAGE_KEYS = {
   DELIVERIES: 'postcodelink_deliveries_v1',
@@ -421,8 +422,19 @@ export function bulkAddDeliveries(newDeliveries: Delivery[]): void {
   saveDeliveries([...newDeliveries, ...current]);
 }
 
-export function updateDelivery(id: string, updates: Partial<Delivery>): Delivery | undefined {
+export function updateDelivery(id: string, updates: Partial<Delivery>): { delivery?: Delivery; error?: string } {
   const current = getStoredDeliveries();
+  const existing = current.find(item => item.id === id);
+  if (!existing) return { error: `Delivery with ID ${id} not found.` };
+
+  // Validate state machine transition if status is being updated
+  if (updates.status && updates.status !== existing.status) {
+    const check = validateStateTransition(existing.status, updates.status);
+    if (!check.valid) {
+      return { error: check.message };
+    }
+  }
+
   let updatedDelivery: Delivery | undefined;
   const updated = current.map(item => {
     if (item.id === id) {
@@ -436,32 +448,87 @@ export function updateDelivery(id: string, updates: Partial<Delivery>): Delivery
     return item;
   });
   saveDeliveries(updated);
-  return updatedDelivery;
+  return { delivery: updatedDelivery };
 }
 
-export function verifyDeliveryOtp(deliveryId: string, enteredOtp: string, note?: string): { success: boolean; message: string } {
+export function verifyDeliveryOtp(
+  deliveryId: string,
+  enteredOtp: string,
+  note?: string
+): { success: boolean; message: string; remainingAttempts?: number } {
   const current = getStoredDeliveries();
   const delivery = current.find(d => d.id === deliveryId);
-  if (!delivery) return { success: false, message: 'Delivery not found' };
+  if (!delivery) return { success: false, message: 'Delivery record not found.' };
 
-  if (delivery.otp && delivery.otp.trim() !== enteredOtp.trim()) {
-    return { success: false, message: 'Invalid 4-digit OTP. Ask recipient for the correct code.' };
+  // Check terminal state
+  if (delivery.status === 'delivered') {
+    return { success: false, message: 'This delivery is already marked as delivered.' };
+  }
+  if (delivery.status === 'cancelled') {
+    return { success: false, message: 'Cannot verify OTP on a cancelled delivery.' };
   }
 
+  // Check rate limiting / lockout
+  const now = new Date();
+  if (delivery.otpLockedUntil) {
+    const lockTime = new Date(delivery.otpLockedUntil);
+    if (lockTime > now) {
+      const minutesRemaining = Math.ceil((lockTime.getTime() - now.getTime()) / (60 * 1000));
+      return {
+        success: false,
+        message: `Verification locked due to multiple failed attempts. Try again in ${minutesRemaining} minute(s).`
+      };
+    }
+  }
+
+  const maxAttempts = delivery.otpMaxAttempts || 3;
+  const currentAttempts = delivery.otpAttempts || 0;
+
+  // Validate OTP code
+  const targetOtp = delivery.otp ? delivery.otp.trim() : '';
+  if (!targetOtp || targetOtp !== enteredOtp.trim()) {
+    const newAttempts = currentAttempts + 1;
+    if (newAttempts >= maxAttempts) {
+      const lockUntil = new Date(now.getTime() + 15 * 60 * 1000).toISOString(); // 15 min lock
+      updateDelivery(deliveryId, {
+        otpAttempts: newAttempts,
+        otpLockedUntil: lockUntil,
+      });
+      return {
+        success: false,
+        remainingAttempts: 0,
+        message: `Invalid 4-digit PIN. Maximum attempts exceeded. Verification locked for 15 minutes.`
+      };
+    } else {
+      updateDelivery(deliveryId, {
+        otpAttempts: newAttempts,
+      });
+      const remaining = maxAttempts - newAttempts;
+      return {
+        success: false,
+        remainingAttempts: remaining,
+        message: `Invalid 4-digit PIN. ${remaining} attempt(s) remaining before lockout.`
+      };
+    }
+  }
+
+  // Successful verification
   addDeliveryEvent(deliveryId, {
     status: 'delivered',
     actor: 'Courier Rider (OTP Verified)',
     actorRole: 'rider',
-    note: note || `Confirmed via 4-digit recipient OTP [${enteredOtp}]. Proof of delivery verified.`
+    note: note || `Confirmed via 4-digit recipient OTP [${enteredOtp}]. Proof of delivery authenticated.`
   });
 
   updateDelivery(deliveryId, {
     status: 'delivered',
     podVerified: true,
-    podNote: note || `OTP Verified Delivery (${enteredOtp})`
+    podNote: note || `OTP Verified Delivery (PIN: ${enteredOtp})`,
+    otpAttempts: 0,
+    otpLockedUntil: undefined,
   });
 
-  return { success: true, message: 'Delivery verified and marked completed successfully!' };
+  return { success: true, message: 'Proof of Delivery verified! Order marked completed.' };
 }
 
 export function addDeliveryEvent(deliveryId: string, event: Omit<DeliveryEvent, 'id' | 'deliveryId' | 'timestamp'>): void {

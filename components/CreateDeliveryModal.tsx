@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   Delivery,
   Operator,
@@ -13,6 +13,7 @@ import {
   cleanseAndStandardizeAddress,
   lookupPostcode
 } from "@/lib/nigeria-postcodes";
+import { generateDeliveryReference, generateSecureOtp } from "@/lib/reference-generator";
 import {
   X,
   MapPin,
@@ -45,37 +46,71 @@ export function CreateDeliveryModal({
   const [destinationAddress, setDestinationAddress] = useState(initialAddress);
   const [landmark, setLandmark] = useState("");
   const [state, setState] = useState("Lagos");
-  const [lga, setLga] = useState("Eti-Osa");
-  const [area, setArea] = useState("Lekki Phase 1");
-  const [postcode, setPostcode] = useState(initialPostcode || "105102");
+  const [lga, setLga] = useState("");
+  const [area, setArea] = useState("");
+  const [postcode, setPostcode] = useState(initialPostcode);
   const [packageDescription, setPackageDescription] = useState("Parcel (Standard)");
   const [fee, setFee] = useState<number>(3500);
   const [operatorId, setOperatorId] = useState("");
-  const [isVerified, setIsVerified] = useState(true);
-  const [errorMsg, setErrorMsg] = useState("");
-  const [resolutionNote, setResolutionNote] = useState("");
 
-  const lgas = getLgasForState(state);
+  // P0 FIX: Strict verification defaulting to false.
+  // Never default to true; recalculate verification on every address/state/postcode change.
+  const [isVerified, setIsVerified] = useState<boolean>(false);
+  const [errorMsg, setErrorMsg] = useState("");
+  const [resolutionNote, setResolutionNote] = useState("Enter delivery address to verify NIPOST digital postcode.");
+
   const areasInState = NIGERIA_POSTCODES.filter(
     (p) => p.state.toLowerCase() === state.toLowerCase()
   );
 
-  // Auto-detect postcode when address or area changes
-  useEffect(() => {
-    if (destinationAddress.trim().length > 6) {
-      const analysis = cleanseAndStandardizeAddress(destinationAddress);
-      if (analysis.matchedPostcode) {
-        setPostcode(analysis.matchedPostcode);
+  // Recalculate verification strictly based on input
+  const evaluateVerification = useCallback((addr: string, st: string, code: string) => {
+    const cleanAddr = addr.trim();
+    const cleanCode = code.trim();
+
+    // 1. If user entered a valid 6-digit code, verify against NIPOST registry
+    if (cleanCode.length === 6 && /^\d{6}$/.test(cleanCode)) {
+      const match = lookupPostcode(cleanCode);
+      if (match && match.state.toLowerCase() === st.toLowerCase()) {
         setIsVerified(true);
-        if (analysis.detectedState) setState(analysis.detectedState);
-        if (analysis.detectedLga) setLga(analysis.detectedLga);
-        if (analysis.detectedArea) setArea(analysis.detectedArea);
-        setResolutionNote(`Matched NIPOST 6-digit code ${analysis.matchedPostcode} for ${analysis.detectedArea}`);
+        setLga(match.lga);
+        setArea(match.districtOrArea);
+        setResolutionNote(`Verified NIPOST 6-digit code ${match.postcode} for ${match.districtOrArea}, ${match.state}`);
+        return;
       }
     }
-  }, [destinationAddress]);
 
-  // Handle area change
+    // 2. If address text is provided, attempt smart address cleansing
+    if (cleanAddr.length > 5) {
+      const analysis = cleanseAndStandardizeAddress(cleanAddr);
+      if (analysis.matchedPostcode && analysis.confidence === "high") {
+        if (!st || (analysis.detectedState && analysis.detectedState.toLowerCase() === st.toLowerCase())) {
+          setIsVerified(true);
+          setPostcode(analysis.matchedPostcode);
+          if (analysis.detectedState) setState(analysis.detectedState);
+          if (analysis.detectedLga) setLga(analysis.detectedLga);
+          if (analysis.detectedArea) setArea(analysis.detectedArea);
+          setResolutionNote(`Matched NIPOST 6-digit code ${analysis.matchedPostcode} for ${analysis.detectedArea}, ${analysis.detectedState}`);
+          return;
+        }
+      }
+    }
+
+    // 3. Fallback: unverified
+    setIsVerified(false);
+    if (cleanAddr.length > 5) {
+      setResolutionNote("Address unverified. No authoritative NIPOST code matched. Order will use manual landmark routing.");
+    } else {
+      setResolutionNote("Enter destination details to attempt postcode lookup.");
+    }
+  }, []);
+
+  // Trigger evaluation when address or state changes
+  useEffect(() => {
+    evaluateVerification(destinationAddress, state, postcode);
+  }, [destinationAddress, state, evaluateVerification]);
+
+  // Handle area selector change
   const handleAreaChange = (selectedArea: string) => {
     setArea(selectedArea);
     const found = NIGERIA_POSTCODES.find(
@@ -87,28 +122,32 @@ export function CreateDeliveryModal({
       setPostcode(found.postcode);
       setLga(found.lga);
       setIsVerified(true);
-      setResolutionNote(`Official NIPOST code ${found.postcode} (${found.zone} zone)`);
+      setResolutionNote(`Official NIPOST code ${found.postcode} verified for ${found.districtOrArea} (${found.zone} zone)`);
+    } else {
+      setIsVerified(false);
+      setResolutionNote("Area not found in verified registry. Address marked unverified.");
     }
   };
 
-  // Handle manual postcode entry
-  const handlePostcodeChange = (code: string) => {
-    setPostcode(code);
-    const clean = code.trim();
-    if (clean.length === 6 && /^\d+$/.test(clean)) {
+  // Handle direct postcode input
+  const handlePostcodeChange = (inputCode: string) => {
+    setPostcode(inputCode);
+    const clean = inputCode.trim();
+    if (clean.length === 6 && /^\d{6}$/.test(clean)) {
       const match = lookupPostcode(clean);
       if (match) {
         setIsVerified(true);
         setState(match.state);
         setLga(match.lga);
         setArea(match.districtOrArea);
-        setResolutionNote(`Verified NIPOST code for ${match.districtOrArea}, ${match.state}`);
+        setResolutionNote(`Verified NIPOST code ${match.postcode} (${match.districtOrArea}, ${match.state})`);
       } else {
         setIsVerified(false);
-        setResolutionNote("Custom 6-digit code outside primary digitized registry. Address stored as unverified.");
+        setResolutionNote(`Code ${clean} is not found in the verified NIPOST registry. Saved as unverified.`);
       }
     } else {
       setIsVerified(false);
+      setResolutionNote("Nigerian postcodes must be exactly 6 numeric digits.");
     }
   };
 
@@ -121,7 +160,7 @@ export function CreateDeliveryModal({
       setArea(cust.area);
       setState(cust.state);
       setPostcode(cust.postcode);
-      setIsVerified(true);
+      setIsVerified(Boolean(cust.postcode && lookupPostcode(cust.postcode)));
     }
   };
 
@@ -137,7 +176,10 @@ export function CreateDeliveryModal({
     }
 
     const assignedOperator = operators.find((op) => op.id === operatorId);
-    const deliveryId = `PL-${Math.floor(2050 + Math.random() * 800)}`;
+    
+    // P0 FIX: Collision-resistant reference and cryptographically secure OTP
+    const deliveryId = generateDeliveryReference();
+    const deliveryOtp = generateSecureOtp();
 
     const newDelivery: Delivery = {
       id: deliveryId,
@@ -158,6 +200,8 @@ export function CreateDeliveryModal({
       status: assignedOperator ? "assigned" : "pending_assignment",
       createdAt: "Just now",
       updatedAt: "Just now",
+      otp: deliveryOtp,
+      podVerified: false,
       events: [
         {
           id: `ev-${Date.now()}`,
@@ -298,10 +342,9 @@ export function CreateDeliveryModal({
                 value={state}
                 onChange={(e) => {
                   setState(e.target.value);
-                  const firstArea = NIGERIA_POSTCODES.find((p) => p.state === e.target.value);
-                  if (firstArea) {
-                    handleAreaChange(firstArea.districtOrArea);
-                  }
+                  setArea("");
+                  setPostcode("");
+                  setIsVerified(false);
                 }}
               >
                 {STATES_LIST.map((s) => (
@@ -313,11 +356,12 @@ export function CreateDeliveryModal({
             </div>
 
             <div className="form-group">
-              <label>Area / District *</label>
+              <label>Area / District (Select verified or leave blank for manual)</label>
               <select
                 value={area}
                 onChange={(e) => handleAreaChange(e.target.value)}
               >
+                <option value="">-- Choose area or let postcode auto-detect --</option>
                 {areasInState.map((a) => (
                   <option key={a.districtOrArea} value={a.districtOrArea}>
                     {a.districtOrArea} (NG-{a.postcode})
@@ -330,12 +374,12 @@ export function CreateDeliveryModal({
               <label>
                 National Postcode (6 digits)
                 {isVerified ? (
-                  <span style={{ color: "#16a34a", marginLeft: "6px", fontSize: "11px" }}>
-                    ✓ Verified
+                  <span style={{ color: "#16a34a", marginLeft: "6px", fontSize: "11px", fontWeight: 700 }}>
+                    ✓ NIPOST Verified
                   </span>
                 ) : (
-                  <span style={{ color: "#d97706", marginLeft: "6px", fontSize: "11px" }}>
-                    Manual / Unverified
+                  <span style={{ color: "#d97706", marginLeft: "6px", fontSize: "11px", fontWeight: 700 }}>
+                    ⚠ Unverified / Manual
                   </span>
                 )}
               </label>
@@ -349,26 +393,24 @@ export function CreateDeliveryModal({
             </div>
           </div>
 
-          {/* Postcode Intelligence Feedback */}
-          {resolutionNote && (
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "8px",
-                padding: "10px 14px",
-                background: isVerified ? "#f0fdf4" : "#fffbeb",
-                border: `1px solid ${isVerified ? "#bbf7d0" : "#fef3c7"}`,
-                borderRadius: "6px",
-                color: isVerified ? "#166534" : "#92400e",
-                fontSize: "11px",
-                margin: "4px 0 16px",
-              }}
-            >
-              {isVerified ? <ShieldCheck size={16} /> : <AlertCircle size={16} />}
-              <span>{resolutionNote}</span>
-            </div>
-          )}
+          {/* Postcode Intelligence Feedback Ribbon */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              padding: "10px 14px",
+              background: isVerified ? "#f0fdf4" : "#fffbeb",
+              border: `1px solid ${isVerified ? "#bbf7d0" : "#fef3c7"}`,
+              borderRadius: "6px",
+              color: isVerified ? "#166534" : "#92400e",
+              fontSize: "11px",
+              margin: "4px 0 16px",
+            }}
+          >
+            {isVerified ? <ShieldCheck size={16} /> : <AlertCircle size={16} />}
+            <span>{resolutionNote}</span>
+          </div>
 
           {/* Package & Dispatch Assignment */}
           <div className="form-grid">
@@ -412,7 +454,7 @@ export function CreateDeliveryModal({
           <div className="lookup-info">
             <MapPin size={17} style={{ flexShrink: 0 }} />
             <div>
-              <b>NIPOST Digital Routing Enabled</b>
+              <b>{isVerified ? "NIPOST Digital Routing Enabled" : "Manual Landmark Delivery Mode"}</b>
               <small>
                 {isVerified
                   ? "Destination successfully resolved to official NIPOST delivery office. Routing code will print on the consignment slip."
@@ -434,4 +476,3 @@ export function CreateDeliveryModal({
     </div>
   );
 }
-

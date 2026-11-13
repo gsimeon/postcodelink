@@ -46,6 +46,10 @@ export interface Delivery {
   updatedAt: string;
   events: DeliveryEvent[];
   otp?: string; // 4-digit Proof of Delivery confirmation code
+  otpAttempts?: number; // Failed verification attempt counter
+  otpMaxAttempts?: number; // Default 3 attempts before lockout
+  otpLockedUntil?: string; // ISO lockout timestamp
+  otpExpiresAt?: string; // Expiration timestamp
   podVerified?: boolean;
   podNote?: string;
   coordinates?: Coordinates;

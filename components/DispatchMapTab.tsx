@@ -122,9 +122,10 @@ export function DispatchMapTab({
             <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
               <Navigation size={18} color="#2563eb" />
               <h2 style={{ fontSize: "16px", margin: 0 }}>Interactive Dispatch Radar & Fleet Map</h2>
+              <span className="pill amber" style={{ fontSize: "9px" }}>Simulated Topology</span>
             </div>
             <p style={{ margin: "2px 0 0", fontSize: "11px", color: "#64748b" }}>
-              {currentConfig.title} · Visualizing {activeDeliveries.length} orders & {operators.filter(o => o.isAvailable).length} active couriers
+              {currentConfig.title} · Visualizing {activeDeliveries.length} orders & {operators.filter(o => o.isAvailable).length} couriers using geographic anchor points (Hardware GPS telemetry not connected).
             </p>
           </div>
 

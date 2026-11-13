@@ -89,6 +89,11 @@ export default function Home() {
   };
 
   const handleUpdateStatus = (deliveryId: string, newStatus: DeliveryStatus, note: string) => {
+    const res = updateDelivery(deliveryId, { status: newStatus });
+    if (res.error) {
+      setNotice(`Action blocked: ${res.error}`);
+      return;
+    }
     addDeliveryEvent(deliveryId, {
       status: newStatus,
       actor: "Godwin Simeon",
@@ -103,6 +108,7 @@ export default function Home() {
     if (result.success) {
       setNotice(`Proof of delivery verified for ${deliveryId}. Marked completed.`);
     }
+    return result;
   };
 
   const handleAssignOperator = (deliveryId: string, operatorId: string, operatorName: string) => {

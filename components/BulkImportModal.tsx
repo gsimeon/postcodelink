@@ -3,6 +3,7 @@
 import React, { useState } from "react";
 import { Delivery, Operator } from "@/lib/types";
 import { cleanseAndStandardizeAddress } from "@/lib/nigeria-postcodes";
+import { generateDeliveryReference, generateSecureOtp } from "@/lib/reference-generator";
 import {
   X,
   Upload,
@@ -67,8 +68,9 @@ export function BulkImportModal({
     const assignedOperator = operators.find((op) => op.id === defaultOperatorId);
 
     const newDeliveries: Delivery[] = parsedRows.map((row, idx) => {
-      const deliveryId = `PL-${Math.floor(2100 + Math.random() * 900)}`;
-      const isVerified = Boolean(row.analysis.matchedPostcode);
+      const deliveryId = generateDeliveryReference();
+      const deliveryOtp = generateSecureOtp();
+      const isVerified = Boolean(row.analysis.matchedPostcode && row.analysis.confidence === "high");
 
       return {
         id: deliveryId,
@@ -81,7 +83,7 @@ export function BulkImportModal({
         destinationState: row.analysis.detectedState || "Lagos",
         postcodeInput: row.analysis.matchedPostcode || "",
         postcodeStatus: isVerified ? "verified" : "unverified",
-        verifiedPostcode: row.analysis.matchedPostcode,
+        verifiedPostcode: isVerified ? row.analysis.matchedPostcode : undefined,
         packageDescription: row.packageDescription,
         fee: row.fee,
         operatorId: assignedOperator ? assignedOperator.id : undefined,
@@ -89,7 +91,7 @@ export function BulkImportModal({
         status: assignedOperator ? "assigned" : "pending_assignment",
         createdAt: "Just now",
         updatedAt: "Just now",
-        otp: String(Math.floor(1000 + Math.random() * 9000)),
+        otp: deliveryOtp,
         podVerified: false,
         coordinates: row.analysis.coordinates,
         estimatedDeliveryTime: "Same-day express dispatch",
