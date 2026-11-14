@@ -40,3 +40,4 @@ def api_cleanse_address(request: CleanseAddressRequest, db: Session = Depends(ge
         postcode_hint=request.postcode,
         db=db,
     )
+

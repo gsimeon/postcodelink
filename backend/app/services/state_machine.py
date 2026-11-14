@@ -24,3 +24,4 @@ def can_transition(current_status: DeliveryStatus, next_status: DeliveryStatus) 
         return True, f"Valid transition from {current_status.value} to {next_status.value}."
         
     return False, f"Invalid transition: cannot move delivery from '{current_status.value}' to '{next_status.value}'."
+

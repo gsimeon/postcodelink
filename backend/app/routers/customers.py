@@ -61,3 +61,4 @@ def api_create_customer(request: CustomerCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(new_cust)
     return new_cust
+

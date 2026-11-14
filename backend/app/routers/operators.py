@@ -58,3 +58,4 @@ def api_update_operator(operator_id: str, request: OperatorUpdate, db: Session =
     db.commit()
     db.refresh(op)
     return op
+

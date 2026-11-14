@@ -22,3 +22,4 @@ class Profile(Base):
     # Relationships
     operators = relationship("Operator", back_populates="profile", cascade="all, delete-orphan")
     deliveries = relationship("Delivery", back_populates="merchant", foreign_keys="Delivery.merchant_id")
+

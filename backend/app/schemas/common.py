@@ -10,3 +10,4 @@ class APIResponse(BaseModel, Generic[T]):
     data: Optional[T] = None
     message: Optional[str] = None
     error: Optional[str] = None
+

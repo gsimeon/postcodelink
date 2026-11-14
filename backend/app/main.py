@@ -79,3 +79,4 @@ def health(db: Session = Depends(get_db)):
         "database": "connected",
         "engine": engine.name,
     }
+

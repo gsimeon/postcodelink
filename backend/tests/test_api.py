@@ -213,3 +213,4 @@ def test_otp_verification_success():
     assert verify_res.status_code == 200
     assert verify_res.json()["status"] == "delivered"
     assert verify_res.json()["pod_verified"] is True
+

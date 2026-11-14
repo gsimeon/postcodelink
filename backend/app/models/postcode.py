@@ -15,3 +15,4 @@ class PostcodeDirectory(Base):
     lat = Column(Float, nullable=True)
     lng = Column(Float, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
+

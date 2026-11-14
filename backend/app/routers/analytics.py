@@ -53,3 +53,4 @@ def api_get_analytics_overview(db: Session = Depends(get_db)) -> Dict[str, Any]:
         "active_operators": active_operators,
         "total_customers": total_customers,
     }
+

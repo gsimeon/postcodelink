@@ -20,3 +20,4 @@ class DeliveryEvent(Base):
 
     # Relationship
     delivery = relationship("Delivery", back_populates="events")
+

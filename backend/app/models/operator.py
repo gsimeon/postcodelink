@@ -28,3 +28,4 @@ class Operator(Base):
     # Relationships
     profile = relationship("Profile", back_populates="operators")
     deliveries = relationship("Delivery", back_populates="assigned_operator", foreign_keys="Delivery.operator_id")
+

@@ -241,3 +241,4 @@ export const fastApiClient = {
     return await res.json();
   },
 };
+

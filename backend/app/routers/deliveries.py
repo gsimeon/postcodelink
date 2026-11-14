@@ -90,3 +90,4 @@ def api_update_status(delivery_id: str, request: DeliveryStatusUpdateRequest, db
 def api_verify_otp(delivery_id: str, request: DeliveryVerifyOTPRequest, db: Session = Depends(get_db)):
     """Confirm delivery via 6-digit recipient PIN with 3-attempt brute-force protection."""
     return verify_delivery_otp(db, delivery_id, request)
+

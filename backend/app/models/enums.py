@@ -31,3 +31,4 @@ class VehicleType(str, enum.Enum):
     VAN = "van"
     TRUCK = "truck"
     BICYCLE = "bicycle"
+

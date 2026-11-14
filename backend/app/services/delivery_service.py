@@ -327,3 +327,4 @@ def get_public_tracking(db: Session, delivery_id: str) -> DeliveryPublicTracking
         assigned_operator_name=operator_name,
         events=delivery.events,
     )
+
