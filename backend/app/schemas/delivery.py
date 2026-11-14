@@ -27,6 +27,7 @@ class DeliveryCreateRequest(BaseModel):
     destination_state: str
     postcode_input: Optional[str] = None
     postcode: Optional[str] = None
+    idempotency_key: Optional[str] = None
     package_description: str = Field(default="Standard Package", min_length=2)
     fee: float = Field(default=2500.0, ge=0)
     pickup_address: Optional[str] = None
@@ -63,6 +64,7 @@ class DeliveryVerifyOTPRequest(BaseModel):
 class DeliveryResponse(BaseModel):
     id: str
     tracking_token: str
+    idempotency_key: Optional[str] = None
     merchant_id: Optional[str] = None
     operator_id: Optional[str] = None
     recipient_name: str

@@ -113,7 +113,63 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
     # 11. Anambra State (Zone 4)
     {"code": "420001", "area": "Awka Central / Zik Avenue", "state": "Anambra", "lga": "Awka South", "lat": 6.2209, "lng": 7.0718},
     {"code": "430001", "area": "Onitsha Main Market / Old Market Rd", "state": "Anambra", "lga": "Onitsha North", "lat": 6.1512, "lng": 6.7821},
+
+    # 12. Verified Digital Building-Level Postcodes (Pilot Phase Registry)
+    {
+        "code": "LAG-IKJ-0012",
+        "area": "Ikeja Central Business District",
+        "state": "Lagos",
+        "lga": "Ikeja",
+        "lat": 6.5921,
+        "lng": 3.3541,
+        "postcode_type": "digital_location",
+        "building_reference": "Plot 4 Ikeja Commercial Plaza",
+        "provenance": "NIPOST Digital Address Register 2024",
+        "dataset_version": "2024.1",
+    },
+    {
+        "code": "LAG-LEK-0045",
+        "area": "Lekki Phase 1 / Admiralty",
+        "state": "Lagos",
+        "lga": "Eti-Osa",
+        "lat": 6.4421,
+        "lng": 3.4751,
+        "postcode_type": "digital_location",
+        "building_reference": "Admiralty Mall & Tower",
+        "provenance": "NIPOST Digital Address Register 2024",
+        "dataset_version": "2024.1",
+    },
+    {
+        "code": "ABJ-GAR-0101",
+        "area": "Garki District Area 2",
+        "state": "Abuja (FCT)",
+        "lga": "Municipal Area Council",
+        "lat": 9.0321,
+        "lng": 7.4891,
+        "postcode_type": "digital_location",
+        "building_reference": "Federal Commerce House",
+        "provenance": "NIPOST Digital Address Register 2024",
+        "dataset_version": "2024.1",
+    },
 ]
+
+
+def normalize_digital_postcode(code: Optional[str]) -> Optional[str]:
+    """Normalize and format Nigerian digital postcodes into canonical SSS-DDD-BBBB[B] format.
+    
+    Canonical format consists of:
+    - 3-letter State/Zone abbreviation (e.g. LAG, ABJ, KAN)
+    - 3-4 alphanumeric District/LGA code (e.g. IKJ, LEK, GAR)
+    - 4-5 alphanumeric Building/Location identifier (e.g. 0012, 0101)
+    Total length: 10 to 11 alphanumeric characters (12 to 13 characters with hyphens).
+    """
+    if not code or not isinstance(code, str):
+        return None
+    cleaned = code.strip().upper()
+    match = re.match(r"^([A-Z]{3})[\s\-]?([A-Z0-9]{3,4})[\s\-]?([A-Z0-9]{4,5})$", cleaned)
+    if match:
+        return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+    return None
 
 
 def normalize_string(text: Optional[str]) -> str:
@@ -180,27 +236,29 @@ def cleanse_address(
     norm_area_hint = normalize_string(area_hint)
     norm_state_hint = normalize_string(state_hint)
 
-    # 1. Digital Postcode (11-character building location) vs Conventional (6-digit area) detection
+    # 1. Digital Postcode (10-11 character building location) vs Conventional (6-digit area) detection
     extracted_code: Optional[str] = None
     is_digital_location: bool = False
+    is_digital_syntax: bool = False
 
     cleaned_hint = (postcode_hint or "").strip()
-    # Check alphanumeric digital postcode (e.g. LAG-IKJ-0012 or 10-12 alphanumeric characters)
-    alphanumeric_hint = re.sub(r"[^A-Za-z0-9]", "", cleaned_hint)
-    if (10 <= len(alphanumeric_hint) <= 12 and not alphanumeric_hint.isdigit()):
-        extracted_code = cleaned_hint
+    norm_digital = normalize_digital_postcode(cleaned_hint)
+    if norm_digital:
+        extracted_code = norm_digital
         is_digital_location = True
+        is_digital_syntax = True
     elif re.match(r"^\d{6}$", cleaned_hint):
         extracted_code = cleaned_hint
         is_digital_location = False
     else:
         # Search address string for digital pattern or 6-digit conventional
-        found_digital = re.findall(r"\b([A-Za-z0-9]{3,4}-[A-Za-z0-9]{3,4}-[A-Za-z0-9]{3,5})\b", clean_addr)
+        found_digital = re.findall(r"\b([A-Za-z]{3}[\s\-][A-Za-z0-9]{3,4}[\s\-][A-Za-z0-9]{4,5})\b", clean_addr)
         if found_digital:
-            alpha_d = re.sub(r"[^A-Za-z0-9]", "", found_digital[0])
-            if (10 <= len(alpha_d) <= 12) and not alpha_d.isdigit():
-                extracted_code = found_digital[0]
+            norm_found = normalize_digital_postcode(found_digital[0])
+            if norm_found:
+                extracted_code = norm_found
                 is_digital_location = True
+                is_digital_syntax = True
         if not extracted_code:
             found_codes = re.findall(r"\b(\d{6})\b", clean_addr)
             if found_codes:
@@ -248,9 +306,10 @@ def cleanse_address(
     for rec in candidates:
         score = 0
         norm_rec_area = normalize_string(rec["area"])
+        rec_code_norm = rec["code"].strip().upper()
 
         # Prioritize matching exact code
-        if extracted_code and rec["code"] == extracted_code:
+        if extracted_code and (rec_code_norm == extracted_code.upper() or rec["code"] == extracted_code):
             score += 100
 
         # Substring area matching
@@ -280,20 +339,48 @@ def cleanse_address(
 
     # Check postcode validity against reference registry
     if extracted_code:
-        matching_code_rec = next((r for r in candidates if r["code"] == extracted_code), None)
+        matching_code_rec = next((r for r in candidates if r["code"].strip().upper() == extracted_code.upper()), None)
         if matching_code_rec:
             postcode_valid = True
-            if not best_match or best_match["code"] != extracted_code:
+            if not best_match or best_match["code"].strip().upper() != extracted_code.upper():
                 best_match = matching_code_rec
                 matched_area = matching_code_rec["area"]
 
+    # CRITICAL: Separate format recognition from directory verification
+    # If a digital postcode matches syntax but is not in the directory, it cannot be verified!
+    if is_digital_syntax and not postcode_valid:
+        changes.append(
+            f"Digital building code '{extracted_code}' matches canonical NIPOST syntax, but was not found in the verified building directory."
+        )
+        return CleanseAddressResponse(
+            original_address=clean_addr,
+            formatted_address=clean_addr,
+            area=area_hint or "Unverified Location",
+            state=state_hint or "Lagos",
+            lga=None,
+            postcode=extracted_code,
+            postcode_type="digital_location",
+            resolution_level="building_location",
+            postcode_status="unverified",
+            confidence=0.0,
+            postcode_valid=False,
+            address_consistent=False,
+            dispatch_confidence=0.0,
+            source=source_name,
+            matched_record=None,
+            changes_made=changes,
+            provenance="NIPOST Digital Address Register 2024",
+        )
+
     # CASE 1: Exact postcode provided and matches reference record
-    if best_match and extracted_code and best_match["code"] == extracted_code:
+    if best_match and extracted_code and (best_match["code"].strip().upper() == extracted_code.strip().upper()):
         verified_code = best_match["code"]
         detected_state = best_match["state"]
         detected_lga = best_match.get("lga")
         matched_area_norm = normalize_string(best_match["area"])
         matched_lga_norm = normalize_string(detected_lga) if detected_lga else ""
+        rec_type = best_match.get("postcode_type", postcode_type)
+        rec_resolution = "building_location" if rec_type == "digital_location" else "area_district"
 
         # Strict Area Consistency Verification:
         # 1. Compare supplied area hint strictly against the matched postcode record
@@ -347,8 +434,8 @@ def cleanse_address(
                 state=detected_state,
                 lga=detected_lga,
                 postcode=verified_code,
-                postcode_type=postcode_type,
-                resolution_level=resolution_level,
+                postcode_type=rec_type,
+                resolution_level=rec_resolution,
                 postcode_status="verified",
                 confidence=0.95,
                 postcode_valid=True,

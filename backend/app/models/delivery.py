@@ -11,6 +11,7 @@ class Delivery(Base):
     __tablename__ = "deliveries"
 
     id = Column(String(32), primary_key=True, index=True)  # Human-readable reference: "PL-2026-AB12CD"
+    idempotency_key = Column(String(128), index=True, nullable=True)
     tracking_token = Column(String(64), unique=True, index=True, nullable=False, default=lambda: secrets.token_urlsafe(24))
     merchant_id = Column(String(36), ForeignKey("profiles.id", ondelete="SET NULL"), nullable=True, index=True)
     operator_id = Column(String(36), ForeignKey("operators.id", ondelete="SET NULL"), nullable=True, index=True)

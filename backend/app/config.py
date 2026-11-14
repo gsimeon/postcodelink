@@ -37,6 +37,31 @@ class Settings(BaseSettings):
     NIPOST_API_KEY: str = ""
     NIPOST_API_URL: str = ""
 
+    # Trusted Proxies for Rate Limiting & Real IP extraction
+    # Requests from IPs outside TRUSTED_PROXIES have X-Forwarded-For ignored to block spoofing
+    TRUSTED_PROXIES: List[str] = [
+        "127.0.0.1",
+        "::1",
+        "localhost",
+        "testclient",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+    ]
+
+    # SMS & WhatsApp Out-of-band Dispatch Gateway
+    SMS_PROVIDER: str = os.getenv("SMS_PROVIDER", "simulated").strip().lower()
+    TERMII_API_KEY: str = os.getenv("TERMII_API_KEY", "")
+    TERMII_SENDER_ID: str = os.getenv("TERMII_SENDER_ID", "PostcodeLnk")
+    TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")
+    TWILIO_AUTH_TOKEN: str = os.getenv("TWILIO_AUTH_TOKEN", "")
+    TWILIO_FROM_NUMBER: str = os.getenv("TWILIO_FROM_NUMBER", "")
+
+    # Background Outbox Retry Worker
+    OUTBOX_WORKER_ENABLED: bool = os.getenv("OUTBOX_WORKER_ENABLED", "false").lower() in ("true", "1")
+    OUTBOX_WORKER_INTERVAL_SECONDS: int = 5
+    OUTBOX_LEASE_TIMEOUT_MINUTES: int = 5
+
     @model_validator(mode="after")
     def validate_production_security(self):
         """Reject startup if running in production without explicit, secure SECRET_KEY."""

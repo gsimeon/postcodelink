@@ -14,6 +14,8 @@ class NotificationOutbox(Base):
     delivery_id = Column(String(32), ForeignKey("deliveries.id", ondelete="CASCADE"), nullable=False, index=True)
     channel = Column(String(32), nullable=False, default="SMS")
     recipient_phone = Column(String(32), nullable=False)
+    recipient_name = Column(String(128), nullable=True)
+    message_payload = Column(String(500), nullable=True)
     provider = Column(String(32), nullable=False, default="simulated")
     status = Column(
         SAEnum(NotificationDeliveryStatus, name="notificationdeliverystatus"),

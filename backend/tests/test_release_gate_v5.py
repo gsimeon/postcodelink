@@ -274,9 +274,10 @@ def test_outbox_leasing_and_exponential_backoff():
         db.commit()
         db.refresh(outbox_entry)
 
-        # Process outbox with worker lease
+        # Process outbox with worker lease (mocked transient network timeout)
         worker_id = "test-worker-alpha"
-        processed = process_notification_outbox(db, max_items=10, worker_id=worker_id)
+        with patch("httpx.post", side_effect=httpx.TimeoutException("Connection timed out after 10.0s")):
+            processed = process_notification_outbox(db, max_items=10, worker_id=worker_id)
         assert processed >= 1
 
         db.refresh(outbox_entry)
@@ -292,7 +293,8 @@ def test_outbox_leasing_and_exponential_backoff():
         outbox_entry.next_attempt_at = datetime.now(timezone.utc) - timedelta(minutes=1)
         db.commit()
 
-        process_notification_outbox(db, max_items=10, worker_id=worker_id)
+        with patch("httpx.post", side_effect=httpx.TimeoutException("Connection timed out after 10.0s")):
+            process_notification_outbox(db, max_items=10, worker_id=worker_id)
         db.refresh(outbox_entry)
         assert outbox_entry.status == NotificationDeliveryStatus.FAILED
         assert outbox_entry.failure_classification == "max_retries_exceeded"
