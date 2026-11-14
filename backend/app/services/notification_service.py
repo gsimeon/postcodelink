@@ -7,6 +7,7 @@ Enforces zero-knowledge PIN privacy:
 """
 import os
 import logging
+import httpx
 from abc import ABC, abstractmethod
 from typing import Optional
 from enum import Enum
@@ -71,16 +72,35 @@ class TermiiNotificationProvider(BaseNotificationProvider):
         pin: str,
     ) -> NotificationDispatchResult:
         masked = mask_phone(recipient_phone)
-        logger.info(
-            f"[Termii Gateway] Initiating SMS dispatch to {masked} for Order {delivery_id}. Sender: {self.sender_id}."
-        )
-        # In production, httpx.post("https://api.ng.termii.com/api/sms/send", json={...})
+        message = f"Your PostcodeLink delivery confirmation PIN is {pin}. Do not share this code."
+        try:
+            response = httpx.post(
+                "https://api.ng.termii.com/api/sms/send",
+                json={
+                    "api_key": self.api_key,
+                    "to": recipient_phone,
+                    "from": self.sender_id,
+                    "sms": message,
+                    "type": "plain",
+                    "channel": "generic",
+                },
+                timeout=10.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if str(payload.get("code", "")).lower() != "ok" or not payload.get("message_id"):
+                raise ValueError("Termii did not confirm message acceptance.")
+            result_status = NotificationDeliveryStatus.SENT
+        except (httpx.HTTPError, ValueError, TypeError):
+            logger.warning("[Termii Gateway] SMS dispatch failed for %s.", masked)
+            result_status = NotificationDeliveryStatus.FAILED
+
         return NotificationDispatchResult(
-            status=NotificationDeliveryStatus.SENT,
+            status=result_status,
             channel="Termii SMS Gateway (Nigeria)",
             recipient_masked=masked,
             provider="termii",
-            message_preview="Confirmation PIN dispatched directly to recipient mobile via Termii SMS.",
+            message_preview="Provider accepted the SMS request." if result_status == NotificationDeliveryStatus.SENT else "SMS provider did not confirm delivery.",
         )
 
 
@@ -100,15 +120,29 @@ class TwilioNotificationProvider(BaseNotificationProvider):
         pin: str,
     ) -> NotificationDispatchResult:
         masked = mask_phone(recipient_phone)
-        logger.info(
-            f"[Twilio Gateway] Initiating dispatch to {masked} for Order {delivery_id}."
-        )
+        message = f"Your PostcodeLink delivery confirmation PIN is {pin}. Do not share this code."
+        try:
+            response = httpx.post(
+                f"https://api.twilio.com/2010-04-01/Accounts/{self.account_sid}/Messages.json",
+                data={"To": recipient_phone, "From": self.from_number, "Body": message},
+                auth=(self.account_sid, self.auth_token),
+                timeout=10.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not payload.get("sid"):
+                raise ValueError("Twilio did not return a message SID.")
+            result_status = NotificationDeliveryStatus.SENT
+        except (httpx.HTTPError, ValueError, TypeError):
+            logger.warning("[Twilio Gateway] SMS dispatch failed for %s.", masked)
+            result_status = NotificationDeliveryStatus.FAILED
+
         return NotificationDispatchResult(
-            status=NotificationDeliveryStatus.SENT,
-            channel="Twilio Gateway",
+            status=result_status,
+            channel="Twilio SMS Gateway",
             recipient_masked=masked,
             provider="twilio",
-            message_preview="Confirmation PIN dispatched directly to recipient phone via Twilio.",
+            message_preview="Provider accepted the SMS request." if result_status == NotificationDeliveryStatus.SENT else "SMS provider did not confirm delivery.",
         )
 
 
