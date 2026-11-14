@@ -16,7 +16,6 @@ import {
   updateDelivery,
   deleteDelivery,
   addDeliveryEvent,
-  verifyDeliveryOtp,
   getStoredOperators,
   saveOperators,
   updateOperator,
@@ -101,14 +100,6 @@ export default function Home() {
       note,
     });
     setNotice(`Updated ${deliveryId} status to ${newStatus.replace("_", " ")}.`);
-  };
-
-  const handleVerifyOtp = (deliveryId: string, otp: string) => {
-    const result = verifyDeliveryOtp(deliveryId, otp);
-    if (result.success) {
-      setNotice(`Proof of delivery verified for ${deliveryId}. Marked completed.`);
-    }
-    return result;
   };
 
   const handleAssignOperator = (deliveryId: string, operatorId: string, operatorName: string) => {
@@ -249,7 +240,6 @@ export default function Home() {
             <TrackingPortalTab
               deliveries={deliveries}
               settings={settings}
-              onVerifyOtp={handleVerifyOtp}
             />
           )}
 
