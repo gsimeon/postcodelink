@@ -18,6 +18,7 @@ from backend.app.models.customer import Customer
 from backend.app.models.delivery import Delivery
 from backend.app.models.delivery_event import DeliveryEvent
 from backend.app.models.postcode import PostcodeDirectory
+from backend.app.models.notification_outbox import NotificationOutbox
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -35,10 +36,20 @@ target_metadata = Base.metadata
 # ... etc.
 
 
+def _get_database_url() -> str:
+    x_args = context.get_x_argument(as_dictionary=True)
+    db_url = x_args.get("dburl") or settings.DATABASE_URL
+    if db_url.startswith("postgresql://"):
+        try:
+            import psycopg
+        except ImportError:
+            db_url = db_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+    return db_url
+
+
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode."""
-    x_args = context.get_x_argument(as_dictionary=True)
-    url = x_args.get("dburl") or settings.DATABASE_URL
+    url = _get_database_url()
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -52,8 +63,7 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
-    x_args = context.get_x_argument(as_dictionary=True)
-    db_url = x_args.get("dburl") or settings.DATABASE_URL
+    db_url = _get_database_url()
     configuration = config.get_section(config.config_ini_section, {})
     configuration["sqlalchemy.url"] = db_url
     connectable = engine_from_config(

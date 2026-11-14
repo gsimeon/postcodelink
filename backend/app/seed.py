@@ -24,11 +24,11 @@ def seed_database():
 
     db = SessionLocal()
     try:
-        # 1. Seed Postcodes
-        existing_pc = db.query(PostcodeDirectory).count()
-        if existing_pc == 0:
-            logger.info("Seeding official Nigerian postcode directory...")
-            for pc in OFFICIAL_POSTCODES:
+        # 1. Seed Postcodes across all 11 covered Nigerian states
+        existing_codes = {p.code for p in db.query(PostcodeDirectory.code).all()}
+        inserted_count = 0
+        for pc in OFFICIAL_POSTCODES:
+            if pc["code"] not in existing_codes:
                 db_pc = PostcodeDirectory(
                     code=pc["code"],
                     area=pc["area"],
@@ -39,8 +39,11 @@ def seed_database():
                     is_active=True
                 )
                 db.add(db_pc)
+                existing_codes.add(pc["code"])
+                inserted_count += 1
+        if inserted_count > 0:
             db.commit()
-            logger.info(f"Seeded {len(OFFICIAL_POSTCODES)} postcodes.")
+            logger.info(f"Seeded {inserted_count} new official Nigerian postcodes (Total active: {len(existing_codes)}).")
 
         # 2. Seed Default Merchant, Admin, and Operator Profiles
         merchant = db.query(Profile).filter(Profile.email == "dispatch@postcodelink.ng").first()

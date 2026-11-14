@@ -58,3 +58,4 @@ class Delivery(Base):
     merchant = relationship("Profile", back_populates="deliveries", foreign_keys=[merchant_id])
     assigned_operator = relationship("Operator", back_populates="deliveries", foreign_keys=[operator_id])
     events = relationship("DeliveryEvent", back_populates="delivery", cascade="all, delete-orphan", order_by="DeliveryEvent.occurred_at.asc()")
+    outbox_notifications = relationship("NotificationOutbox", back_populates="delivery", cascade="all, delete-orphan")

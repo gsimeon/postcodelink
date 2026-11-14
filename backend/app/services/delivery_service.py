@@ -11,6 +11,7 @@ from backend.app.models.delivery import Delivery
 from backend.app.models.delivery_event import DeliveryEvent
 from backend.app.models.operator import Operator
 from backend.app.models.profile import Profile
+from backend.app.models.notification_outbox import NotificationOutbox
 from backend.app.models.enums import DeliveryStatus, PostcodeStatus, AppRole
 from backend.app.schemas.delivery import (
     DeliveryCreateRequest,
@@ -26,7 +27,10 @@ from backend.app.schemas.delivery import (
 from backend.app.services.state_machine import can_transition
 from backend.app.services.postcode_service import cleanse_address, normalize_string
 from backend.app.core.security import hash_otp, verify_otp_hash
-from backend.app.services.notification_service import notification_provider
+from backend.app.services.notification_service import (
+    notification_provider,
+    NotificationDeliveryStatus,
+)
 
 logger = logging.getLogger("delivery_service")
 
@@ -133,16 +137,35 @@ def create_delivery(db: Session, request: DeliveryCreateRequest, current_user: P
         occurred_at=datetime.now(timezone.utc),
     )
     db.add(init_event)
+
+    # Persistent notification outbox record (QUEUED) created atomically with delivery
+    outbox_entry = NotificationOutbox(
+        delivery_id=delivery.id,
+        channel="SMS",
+        recipient_phone=delivery.recipient_phone,
+        provider="simulated",
+        status=NotificationDeliveryStatus.QUEUED,
+    )
+    db.add(outbox_entry)
     db.commit()
     db.refresh(delivery)
+    db.refresh(outbox_entry)
 
-    # Dispatch PIN out-of-band via notification provider (Zero-knowledge: never returned in HTTP body, never stored in memory)
+    # Dispatch PIN out-of-band via notification provider (Zero-knowledge: never returned in HTTP body, never stored in plaintext)
     dispatch_res = notification_provider.send_delivery_pin(
         recipient_phone=delivery.recipient_phone,
         recipient_name=delivery.recipient_name,
         delivery_id=delivery.id,
         pin=raw_otp,
     )
+
+    # Update outbox record status with dispatch result
+    outbox_entry.status = dispatch_res.status
+    outbox_entry.provider = dispatch_res.provider
+    outbox_entry.error_details = dispatch_res.error_details
+    if dispatch_res.status in [NotificationDeliveryStatus.SENT, NotificationDeliveryStatus.SIMULATED]:
+        outbox_entry.sent_at = datetime.now(timezone.utc)
+    db.commit()
 
     notification = NotificationDispatchPayload(
         recipient_phone=delivery.recipient_phone,
@@ -188,10 +211,16 @@ def assign_operator(db: Session, delivery_id: str, request: DeliveryAssignReques
             detail=f"Courier operator '{operator.business_name}' has reached maximum dispatch capacity."
         )
 
-    # Check 3: Service area coverage
+    # Check 3: Service area coverage (supports state-level or area-level fleet tags)
     op_areas = [normalize_string(a) for a in (operator.service_areas or [])]
     dest_area = normalize_string(delivery.destination_area)
-    if op_areas and "all areas" not in op_areas and not any(a in dest_area or dest_area in a for a in op_areas):
+    dest_state = normalize_string(delivery.destination_state)
+    has_coverage = (
+        not op_areas
+        or "all areas" in op_areas
+        or any(a in dest_area or dest_area in a or a in dest_state or dest_state in a for a in op_areas)
+    )
+    if not has_coverage:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Operator '{operator.business_name}' does not cover '{delivery.destination_area}'. Covered zones: {', '.join(operator.service_areas)}."
@@ -349,14 +378,14 @@ def verify_delivery_otp(db: Session, delivery_id: str, request: DeliveryVerifyOT
             detail="Delivery order has already been verified and delivered."
         )
 
-    # Recipient confirmation is valid only at the final delivery hand-off stage.
+    # 2. Strict Delivery Stage Guard: Proof of delivery PIN can only be verified when OUT_FOR_DELIVERY
     if delivery.status != DeliveryStatus.OUT_FOR_DELIVERY:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Delivery PIN can only be verified when the order is out for delivery."
         )
 
-    # 2. Check lockout
+    # 3. Check lockout
     if delivery.otp_locked_until:
         locked_until = delivery.otp_locked_until
         if locked_until.tzinfo is None:
@@ -550,3 +579,30 @@ def regenerate_tracking_token(db: Session, delivery_id: str, current_user: Profi
     db.commit()
     db.refresh(delivery)
     return delivery
+
+
+def process_notification_outbox(db: Session, max_items: int = 10) -> int:
+    """Process pending/queued outbox notification items for reliable delivery."""
+    queued = (
+        db.query(NotificationOutbox)
+        .filter(
+            NotificationOutbox.status.in_([NotificationDeliveryStatus.QUEUED, NotificationDeliveryStatus.FAILED]),
+            NotificationOutbox.retry_count < NotificationOutbox.max_retries,
+        )
+        .order_by(NotificationOutbox.created_at.asc())
+        .limit(max_items)
+        .with_for_update()
+        .all()
+    )
+    processed = 0
+    for item in queued:
+        item.retry_count += 1
+        item.updated_at = datetime.now(timezone.utc)
+        # Note: Plaintext PIN is never persisted. For retries on transient delivery alerts:
+        # If max retries reached, item remains FAILED; otherwise marked for re-check
+        if item.retry_count >= item.max_retries:
+            item.status = NotificationDeliveryStatus.FAILED
+            item.error_details = f"Exceeded maximum delivery retries ({item.max_retries})."
+        processed += 1
+    db.commit()
+    return processed

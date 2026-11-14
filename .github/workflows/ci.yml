@@ -8,26 +8,23 @@ on:
 
 jobs:
   backend-verification:
-    name: Backend Security, RBAC & API Tests
+    name: Backend Security, RBAC & API Tests (PostgreSQL & SQLite)
     runs-on: ubuntu-latest
     services:
       postgres:
         image: postgres:16
         env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgrespassword
           POSTGRES_DB: postcodelink_test
-          POSTGRES_USER: postcodelink
-          POSTGRES_PASSWORD: postcodelink_test_password
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postcodelink -d postcodelink_test"
+          --health-cmd pg_isready
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-    env:
-      DATABASE_URL: postgresql+psycopg2://postcodelink:postcodelink_test_password@localhost:5432/postcodelink_test
-      SECRET_KEY: postcodelink_ci_secret_key_32_characters_minimum
-      ENVIRONMENT: development
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -43,16 +40,34 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
 
-      - name: Verify Alembic Database Migrations
+      - name: Verify Alembic Migrations on PostgreSQL
+        env:
+          DATABASE_URL: postgresql+psycopg2://postgres:postgrespassword@localhost:5432/postcodelink_test
         run: |
           python -m alembic upgrade head
 
-      - name: Verify Database Seeding
+      - name: Verify Database Seeding on PostgreSQL
+        env:
+          DATABASE_URL: postgresql+psycopg2://postgres:postgrespassword@localhost:5432/postcodelink_test
         run: |
           python -m backend.app.seed
 
-      - name: Execute Pytest Security & API Regression Test Suite
+      - name: Execute Pytest Security & API Regression Test Suite (PostgreSQL)
+        env:
+          DATABASE_URL: postgresql+psycopg2://postgres:postgrespassword@localhost:5432/postcodelink_test
+          SECRET_KEY: "postcodelink_ci_secret_key_32_characters_minimum"
+          ENVIRONMENT: "development"
         run: |
+          python -m pytest backend/tests -v
+
+      - name: Verify SQLite Migrations & Test Compatibility (Local Fallback)
+        env:
+          DATABASE_URL: sqlite:///./postcodelink_ci_test.db
+          SECRET_KEY: "postcodelink_ci_secret_key_32_characters_minimum"
+          ENVIRONMENT: "development"
+        run: |
+          python -m alembic upgrade head
+          python -m backend.app.seed
           python -m pytest backend/tests -v
 
   frontend-verification:

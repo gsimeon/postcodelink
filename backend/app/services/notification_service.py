@@ -1,16 +1,17 @@
-"""Out-of-band notification service supporting SMS and WhatsApp dispatch providers.
+"""Out-of-band notification service supporting real SMS and WhatsApp dispatch providers.
 
 Enforces zero-knowledge PIN privacy:
 - Plaintext PIN is never stored in application memory.
 - Plaintext PIN is never written to log files.
-- Accurate status reporting (SIMULATED, SENT, QUEUED, FAILED).
+- Real HTTP requests to Termii and Twilio with timeout and error handling.
+- Accurate status reporting: SIMULATED (dev), SENT (confirmed API dispatch), FAILED (API or network error).
 """
 import os
 import logging
-import httpx
 from abc import ABC, abstractmethod
 from typing import Optional
 from enum import Enum
+import httpx
 from pydantic import BaseModel
 
 logger = logging.getLogger("notification_service")
@@ -34,6 +35,7 @@ class NotificationDispatchResult(BaseModel):
     recipient_masked: str
     provider: str
     message_preview: str
+    error_details: Optional[str] = None
 
 
 class BaseNotificationProvider(ABC):
@@ -60,9 +62,17 @@ def mask_phone(phone: str) -> str:
 class TermiiNotificationProvider(BaseNotificationProvider):
     """Termii SMS Provider for Nigerian mobile networks (MTN, Airtel, Glo, 9mobile)."""
 
-    def __init__(self, api_key: str, sender_id: str = "PostcodeLnk"):
+    def __init__(
+        self,
+        api_key: str,
+        sender_id: str = "PostcodeLnk",
+        base_url: str = "https://api.ng.termii.com/api/sms/send",
+        timeout: float = 10.0,
+    ):
         self.api_key = api_key
         self.sender_id = sender_id
+        self.base_url = base_url
+        self.timeout = timeout
 
     def send_delivery_pin(
         self,
@@ -72,45 +82,63 @@ class TermiiNotificationProvider(BaseNotificationProvider):
         pin: str,
     ) -> NotificationDispatchResult:
         masked = mask_phone(recipient_phone)
+        logger.info(
+            f"[Termii Gateway] Initiating SMS dispatch to {masked} for Order {delivery_id}. Sender: {self.sender_id}."
+        )
+
         message = f"Your PostcodeLink delivery confirmation PIN is {pin}. Do not share this code."
+        payload = {
+            "to": recipient_phone,
+            "from": self.sender_id,
+            "sms": message,
+            "type": "plain",
+            "channel": "generic",
+            "api_key": self.api_key,
+        }
+
         try:
-            response = httpx.post(
-                "https://api.ng.termii.com/api/sms/send",
-                json={
-                    "api_key": self.api_key,
-                    "to": recipient_phone,
-                    "from": self.sender_id,
-                    "sms": message,
-                    "type": "plain",
-                    "channel": "generic",
-                },
-                timeout=10.0,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            if str(payload.get("code", "")).lower() != "ok" or not payload.get("message_id"):
-                raise ValueError("Termii did not confirm message acceptance.")
+            resp = httpx.post(self.base_url, json=payload, timeout=self.timeout)
+            resp.raise_for_status()
+            try:
+                resp_data = resp.json() if callable(getattr(resp, "json", None)) else {}
+            except Exception:
+                resp_data = {}
+
+            if resp_data.get("code") != "ok" and not resp_data.get("message_id"):
+                err_text = resp_data.get("message") or "Termii did not return an acceptance payload."
+                raise ValueError(err_text)
             result_status = NotificationDeliveryStatus.SENT
-        except (httpx.HTTPError, ValueError, TypeError, AttributeError):
-            logger.warning("[Termii Gateway] SMS dispatch failed for %s.", masked)
+            error_details = None
+        except Exception as exc:
+            logger.warning(f"[Termii Gateway] SMS dispatch failed for {masked}: {exc}")
             result_status = NotificationDeliveryStatus.FAILED
+            error_details = str(exc)
 
         return NotificationDispatchResult(
             status=result_status,
-            channel="Termii SMS Gateway (Nigeria)",
+            channel="Termii SMS Gateway",
             recipient_masked=masked,
             provider="termii",
             message_preview="Provider accepted the SMS request." if result_status == NotificationDeliveryStatus.SENT else "SMS provider did not confirm delivery.",
+            error_details=error_details,
         )
 
 
 class TwilioNotificationProvider(BaseNotificationProvider):
     """Twilio Provider for international and WhatsApp dispatch."""
 
-    def __init__(self, account_sid: str, auth_token: str, from_number: str):
+    def __init__(
+        self,
+        account_sid: str,
+        auth_token: str,
+        from_number: str,
+        timeout: float = 10.0,
+    ):
         self.account_sid = account_sid
         self.auth_token = auth_token
         self.from_number = from_number
+        self.timeout = timeout
+        self.base_url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
 
     def send_delivery_pin(
         self,
@@ -120,22 +148,33 @@ class TwilioNotificationProvider(BaseNotificationProvider):
         pin: str,
     ) -> NotificationDispatchResult:
         masked = mask_phone(recipient_phone)
+        logger.info(
+            f"[Twilio Gateway] Initiating dispatch to {masked} for Order {delivery_id}."
+        )
+
         message = f"Your PostcodeLink delivery confirmation PIN is {pin}. Do not share this code."
         try:
-            response = httpx.post(
-                f"https://api.twilio.com/2010-04-01/Accounts/{self.account_sid}/Messages.json",
+            resp = httpx.post(
+                self.base_url,
                 data={"To": recipient_phone, "From": self.from_number, "Body": message},
                 auth=(self.account_sid, self.auth_token),
-                timeout=10.0,
+                timeout=self.timeout,
             )
-            response.raise_for_status()
-            payload = response.json()
-            if not payload.get("sid"):
-                raise ValueError("Twilio did not return a message SID.")
+            resp.raise_for_status()
+            try:
+                resp_data = resp.json() if callable(getattr(resp, "json", None)) else {}
+            except Exception:
+                resp_data = {}
+
+            if not resp_data.get("sid"):
+                err_text = resp_data.get("message") or getattr(resp, "text", "") or "Twilio did not return a message SID."
+                raise ValueError(err_text)
             result_status = NotificationDeliveryStatus.SENT
-        except (httpx.HTTPError, ValueError, TypeError):
-            logger.warning("[Twilio Gateway] SMS dispatch failed for %s.", masked)
+            error_details = None
+        except Exception as exc:
+            logger.warning(f"[Twilio Gateway] SMS dispatch failed for {masked}: {exc}")
             result_status = NotificationDeliveryStatus.FAILED
+            error_details = str(exc)
 
         return NotificationDispatchResult(
             status=result_status,
@@ -143,6 +182,7 @@ class TwilioNotificationProvider(BaseNotificationProvider):
             recipient_masked=masked,
             provider="twilio",
             message_preview="Provider accepted the SMS request." if result_status == NotificationDeliveryStatus.SENT else "SMS provider did not confirm delivery.",
+            error_details=error_details,
         )
 
 
@@ -159,28 +199,33 @@ class SimulatedNotificationProvider(BaseNotificationProvider):
         masked = mask_phone(recipient_phone)
         # NEVER log the PIN: Log only metadata
         logger.info(
-            f"[Simulated Gateway] Out-of-band notification queued for recipient {masked} on Order {delivery_id}. (Development mode)"
+            f"[Simulated Gateway] Out-of-band notification simulated for recipient {masked} on Order {delivery_id}. (Development mode)"
         )
         return NotificationDispatchResult(
             status=NotificationDeliveryStatus.SIMULATED,
             channel="Simulated SMS Gateway (Local Sandbox)",
             recipient_masked=masked,
             provider="simulated",
-            message_preview="Notification queued in local environment. In production, PIN is sent via Termii/Twilio SMS.",
+            message_preview="Notification simulated in local environment. In production, PIN is sent via Termii/Twilio SMS.",
         )
 
 
 def get_notification_provider() -> BaseNotificationProvider:
     """Factory selecting provider based on configured environment variables."""
-    termii_key = os.getenv("TERMII_API_KEY")
-    if termii_key:
-        return TermiiNotificationProvider(api_key=termii_key)
+    provider_type = os.getenv("SMS_PROVIDER", "").strip().lower()
 
-    twilio_sid = os.getenv("TWILIO_ACCOUNT_SID")
-    twilio_token = os.getenv("TWILIO_AUTH_TOKEN")
-    twilio_from = os.getenv("TWILIO_FROM_NUMBER")
-    if twilio_sid and twilio_token and twilio_from:
-        return TwilioNotificationProvider(account_sid=twilio_sid, auth_token=twilio_token, from_number=twilio_from)
+    if provider_type == "termii" or os.getenv("TERMII_API_KEY"):
+        termii_key = os.getenv("TERMII_API_KEY", "")
+        sender_id = os.getenv("TERMII_SENDER_ID", "PostcodeLnk")
+        return TermiiNotificationProvider(api_key=termii_key, sender_id=sender_id)
+
+    if provider_type == "twilio" or os.getenv("TWILIO_ACCOUNT_SID"):
+        twilio_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
+        twilio_token = os.getenv("TWILIO_AUTH_TOKEN", "")
+        twilio_from = os.getenv("TWILIO_FROM_NUMBER", "")
+        return TwilioNotificationProvider(
+            account_sid=twilio_sid, auth_token=twilio_token, from_number=twilio_from
+        )
 
     return SimulatedNotificationProvider()
 
