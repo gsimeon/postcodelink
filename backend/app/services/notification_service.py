@@ -86,73 +86,42 @@ class TermiiNotificationProvider(BaseNotificationProvider):
             f"[Termii Gateway] Initiating SMS dispatch to {masked} for Order {delivery_id}. Sender: {self.sender_id}."
         )
 
-        # Format recipient phone for Nigerian destination (ensure international prefix e.g. 234...)
-        phone_cleaned = recipient_phone.strip().replace(" ", "").replace("-", "")
-        if phone_cleaned.startswith("0") and len(phone_cleaned) == 11:
-            dest_phone = "234" + phone_cleaned[1:]
-        elif phone_cleaned.startswith("+234"):
-            dest_phone = phone_cleaned[1:]
-        else:
-            dest_phone = phone_cleaned
-
+        message = f"Your PostcodeLink delivery confirmation PIN is {pin}. Do not share this code."
         payload = {
-            "to": dest_phone,
+            "to": recipient_phone,
             "from": self.sender_id,
-            "sms": f"Your PostcodeLink delivery confirmation PIN for order {delivery_id} is: {pin}. Valid for 2 hours.",
+            "sms": message,
             "type": "plain",
             "channel": "generic",
             "api_key": self.api_key,
         }
 
         try:
-            with httpx.Client(timeout=self.timeout) as client:
-                resp = client.post(self.base_url, json=payload)
+            resp = httpx.post(self.base_url, json=payload, timeout=self.timeout)
+            resp.raise_for_status()
+            try:
+                resp_data = resp.json() if callable(getattr(resp, "json", None)) else {}
+            except Exception:
+                resp_data = {}
 
-            if resp.status_code == 200:
-                resp_data = resp.json() if resp.content else {}
-                # Termii returns {"code": "ok", "message_id": "..."} on success
-                if resp_data.get("code") == "ok" or "message_id" in resp_data:
-                    logger.info(f"[Termii Gateway] SMS dispatched successfully to {masked} for Order {delivery_id}.")
-                    return NotificationDispatchResult(
-                        status=NotificationDeliveryStatus.SENT,
-                        channel="Termii SMS Gateway (Nigeria)",
-                        recipient_masked=masked,
-                        provider="termii",
-                        message_preview="Confirmation PIN dispatched directly to recipient mobile via Termii SMS.",
-                    )
-                else:
-                    error_msg = resp_data.get("message", "Termii API rejected message dispatch.")
-                    logger.warning(f"[Termii Gateway] Dispatch rejected for {masked}: {error_msg}")
-                    return NotificationDispatchResult(
-                        status=NotificationDeliveryStatus.FAILED,
-                        channel="Termii SMS Gateway (Nigeria)",
-                        recipient_masked=masked,
-                        provider="termii",
-                        message_preview="Failed to dispatch SMS via Termii.",
-                        error_details=error_msg,
-                    )
-            else:
-                error_msg = f"Termii HTTP {resp.status_code}: {resp.text[:200]}"
-                logger.error(f"[Termii Gateway] HTTP failure for {masked}: {error_msg}")
-                return NotificationDispatchResult(
-                    status=NotificationDeliveryStatus.FAILED,
-                    channel="Termii SMS Gateway (Nigeria)",
-                    recipient_masked=masked,
-                    provider="termii",
-                    message_preview="Termii gateway returned an error response.",
-                    error_details=error_msg,
-                )
-        except httpx.RequestError as exc:
-            error_msg = f"Network/Timeout error communicating with Termii: {str(exc)}"
-            logger.error(f"[Termii Gateway] {error_msg}")
-            return NotificationDispatchResult(
-                status=NotificationDeliveryStatus.FAILED,
-                channel="Termii SMS Gateway (Nigeria)",
-                recipient_masked=masked,
-                provider="termii",
-                message_preview="Unable to reach Termii SMS gateway due to network issue.",
-                error_details=error_msg,
-            )
+            if resp_data.get("code") != "ok" and not resp_data.get("message_id"):
+                err_text = resp_data.get("message") or "Termii did not return an acceptance payload."
+                raise ValueError(err_text)
+            result_status = NotificationDeliveryStatus.SENT
+            error_details = None
+        except Exception as exc:
+            logger.warning(f"[Termii Gateway] SMS dispatch failed for {masked}: {exc}")
+            result_status = NotificationDeliveryStatus.FAILED
+            error_details = str(exc)
+
+        return NotificationDispatchResult(
+            status=result_status,
+            channel="Termii SMS Gateway",
+            recipient_masked=masked,
+            provider="termii",
+            message_preview="Provider accepted the SMS request." if result_status == NotificationDeliveryStatus.SENT else "SMS provider did not confirm delivery.",
+            error_details=error_details,
+        )
 
 
 class TwilioNotificationProvider(BaseNotificationProvider):
@@ -183,51 +152,38 @@ class TwilioNotificationProvider(BaseNotificationProvider):
             f"[Twilio Gateway] Initiating dispatch to {masked} for Order {delivery_id}."
         )
 
-        data = {
-            "To": recipient_phone,
-            "From": self.from_number,
-            "Body": f"Your PostcodeLink delivery confirmation PIN for order {delivery_id} is: {pin}. Valid for 2 hours.",
-        }
-
+        message = f"Your PostcodeLink delivery confirmation PIN is {pin}. Do not share this code."
         try:
-            with httpx.Client(timeout=self.timeout) as client:
-                resp = client.post(
-                    self.base_url,
-                    auth=(self.account_sid, self.auth_token),
-                    data=data,
-                )
-
-            if resp.status_code in [200, 201]:
-                logger.info(f"[Twilio Gateway] Message queued/sent successfully to {masked} for Order {delivery_id}.")
-                return NotificationDispatchResult(
-                    status=NotificationDeliveryStatus.SENT,
-                    channel="Twilio Gateway",
-                    recipient_masked=masked,
-                    provider="twilio",
-                    message_preview="Confirmation PIN dispatched directly to recipient phone via Twilio.",
-                )
-            else:
-                error_msg = f"Twilio HTTP {resp.status_code}: {resp.text[:200]}"
-                logger.error(f"[Twilio Gateway] Error dispatching to {masked}: {error_msg}")
-                return NotificationDispatchResult(
-                    status=NotificationDeliveryStatus.FAILED,
-                    channel="Twilio Gateway",
-                    recipient_masked=masked,
-                    provider="twilio",
-                    message_preview="Twilio gateway returned an error response.",
-                    error_details=error_msg,
-                )
-        except httpx.RequestError as exc:
-            error_msg = f"Network/Timeout error communicating with Twilio: {str(exc)}"
-            logger.error(f"[Twilio Gateway] {error_msg}")
-            return NotificationDispatchResult(
-                status=NotificationDeliveryStatus.FAILED,
-                channel="Twilio Gateway",
-                recipient_masked=masked,
-                provider="twilio",
-                message_preview="Unable to reach Twilio gateway due to network issue.",
-                error_details=error_msg,
+            resp = httpx.post(
+                self.base_url,
+                data={"To": recipient_phone, "From": self.from_number, "Body": message},
+                auth=(self.account_sid, self.auth_token),
+                timeout=self.timeout,
             )
+            resp.raise_for_status()
+            try:
+                resp_data = resp.json() if callable(getattr(resp, "json", None)) else {}
+            except Exception:
+                resp_data = {}
+
+            if not resp_data.get("sid"):
+                err_text = resp_data.get("message") or getattr(resp, "text", "") or "Twilio did not return a message SID."
+                raise ValueError(err_text)
+            result_status = NotificationDeliveryStatus.SENT
+            error_details = None
+        except Exception as exc:
+            logger.warning(f"[Twilio Gateway] SMS dispatch failed for {masked}: {exc}")
+            result_status = NotificationDeliveryStatus.FAILED
+            error_details = str(exc)
+
+        return NotificationDispatchResult(
+            status=result_status,
+            channel="Twilio SMS Gateway",
+            recipient_masked=masked,
+            provider="twilio",
+            message_preview="Provider accepted the SMS request." if result_status == NotificationDeliveryStatus.SENT else "SMS provider did not confirm delivery.",
+            error_details=error_details,
+        )
 
 
 class SimulatedNotificationProvider(BaseNotificationProvider):

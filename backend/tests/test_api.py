@@ -601,12 +601,12 @@ def test_otp_verification_lockout_and_single_use():
     assert create_res.status_code == 201
     deliv_id = create_res.json()["delivery"]["id"]
 
-    # 1. Strict Stage Verification: Attempting verify-otp on PENDING order MUST fail with 400
+    # 1. Strict Stage Verification: Attempting verify-otp on PENDING order MUST fail with 409
     early_verify = client.post(f"/api/v1/deliveries/{deliv_id}/verify-otp", json={
         "otp": "123456"
     }, headers={"Authorization": f"Bearer {token}"})
-    assert early_verify.status_code == 400
-    assert "out_for_delivery" in early_verify.json()["detail"].lower()
+    assert early_verify.status_code == 409
+    assert "out for delivery" in early_verify.json()["detail"].lower()
 
     # Create & assign operator, then advance order to OUT_FOR_DELIVERY
     op_res = client.post("/api/v1/operators/", json={
@@ -718,11 +718,12 @@ def test_termii_notification_provider_http_dispatch():
     provider = TermiiNotificationProvider(api_key="test_termii_key_123", sender_id="PostcodeLnk")
 
     # 1. Success case: Termii returns {"code": "ok", "message_id": "998877"}
-    with patch("httpx.Client.post") as mock_post:
+    with patch("httpx.post") as mock_post:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.content = b'{"code": "ok", "message_id": "998877"}'
         mock_resp.json.return_value = {"code": "ok", "message_id": "998877"}
+        mock_resp.raise_for_status.return_value = None
         mock_post.return_value = mock_resp
 
         res = provider.send_delivery_pin("08012345678", "Amina Bello", "PL-2026-TEST", "456789")
@@ -731,11 +732,12 @@ def test_termii_notification_provider_http_dispatch():
         assert res.recipient_masked == "080****5678"
 
     # 2. Rejection case: Termii returns HTTP 200 with error payload
-    with patch("httpx.Client.post") as mock_post:
+    with patch("httpx.post") as mock_post:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.content = b'{"message": "Insufficient wallet balance"}'
         mock_resp.json.return_value = {"message": "Insufficient wallet balance"}
+        mock_resp.raise_for_status.return_value = None
         mock_post.return_value = mock_resp
 
         res = provider.send_delivery_pin("08012345678", "Amina Bello", "PL-2026-TEST", "456789")
@@ -743,12 +745,12 @@ def test_termii_notification_provider_http_dispatch():
         assert "Insufficient wallet balance" in (res.error_details or "")
 
     # 3. Network timeout case: httpx raises TimeoutException
-    with patch("httpx.Client.post") as mock_post:
+    with patch("httpx.post") as mock_post:
         mock_post.side_effect = httpx.TimeoutException("Connection timed out after 10.0s")
 
         res = provider.send_delivery_pin("08012345678", "Amina Bello", "PL-2026-TEST", "456789")
         assert res.status == NotificationDeliveryStatus.FAILED
-        assert "Timeout" in (res.error_details or "")
+        assert "timed out" in (res.error_details or "").lower()
 
 
 def test_twilio_notification_provider_http_dispatch():
@@ -765,11 +767,12 @@ def test_twilio_notification_provider_http_dispatch():
     )
 
     # 1. Success case: Twilio returns HTTP 201 Created
-    with patch("httpx.Client.post") as mock_post:
+    with patch("httpx.post") as mock_post:
         mock_resp = MagicMock()
         mock_resp.status_code = 201
         mock_resp.content = b'{"sid": "SM12345", "status": "queued"}'
         mock_resp.json.return_value = {"sid": "SM12345", "status": "queued"}
+        mock_resp.raise_for_status.return_value = None
         mock_post.return_value = mock_resp
 
         res = provider.send_delivery_pin("+2348012345678", "Amina Bello", "PL-2026-TEST", "654321")
@@ -777,10 +780,10 @@ def test_twilio_notification_provider_http_dispatch():
         assert res.provider == "twilio"
 
     # 2. Failure case: Twilio returns HTTP 400 Bad Request
-    with patch("httpx.Client.post") as mock_post:
+    with patch("httpx.post") as mock_post:
         mock_resp = MagicMock()
         mock_resp.status_code = 400
-        mock_resp.text = "Invalid 'To' Phone Number"
+        mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError("400 Bad Request", request=MagicMock(), response=mock_resp)
         mock_post.return_value = mock_resp
 
         res = provider.send_delivery_pin("+2348012345678", "Amina Bello", "PL-2026-TEST", "654321")
