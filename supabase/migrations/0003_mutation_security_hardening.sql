@@ -168,7 +168,7 @@ returns trigger
 language plpgsql
 security definer
 set search_path = ''
-as $
+as $$
 begin
   if auth.uid() is null or public.is_admin() then
     return new;
