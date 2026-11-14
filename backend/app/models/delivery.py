@@ -1,7 +1,7 @@
 """Delivery order model with cryptographic tracking token and concurrency locking."""
 import secrets
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Boolean, Float, Integer, DateTime, ForeignKey, Enum as SAEnum, Numeric
+from sqlalchemy import Column, String, Boolean, Float, Integer, DateTime, ForeignKey, Enum as SAEnum, Numeric, UniqueConstraint
 from sqlalchemy.orm import relationship
 from backend.app.database import Base
 from backend.app.models.enums import DeliveryStatus, PostcodeStatus
@@ -9,6 +9,9 @@ from backend.app.models.enums import DeliveryStatus, PostcodeStatus
 
 class Delivery(Base):
     __tablename__ = "deliveries"
+    __table_args__ = (
+        UniqueConstraint("merchant_id", "idempotency_key", name="uq_merchant_idempotency_key"),
+    )
 
     id = Column(String(32), primary_key=True, index=True)  # Human-readable reference: "PL-2026-AB12CD"
     idempotency_key = Column(String(128), index=True, nullable=True)

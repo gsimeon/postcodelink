@@ -57,7 +57,7 @@ class DeliveryAssignRequest(BaseModel):
 
 
 class DeliveryVerifyOTPRequest(BaseModel):
-    otp: str = Field(..., min_length=4, max_length=6)
+    otp: str = Field(..., pattern=r"^\d{6}$", description="Strict 6-digit numeric proof-of-delivery PIN")
     note: Optional[str] = None
 
 
