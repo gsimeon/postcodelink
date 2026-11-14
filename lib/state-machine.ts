@@ -12,11 +12,14 @@ import { DeliveryStatus } from './types';
  * cancelled -> (terminal state, immutable)
  */
 export const ALLOWED_TRANSITIONS: Record<DeliveryStatus, DeliveryStatus[]> = {
-  draft: ['pending_assignment', 'cancelled'],
-  pending_assignment: ['assigned', 'cancelled'],
-  assigned: ['in_transit', 'pending_assignment', 'cancelled'],
-  in_transit: ['delivered', 'failed'],
-  failed: ['pending_assignment', 'in_transit', 'cancelled'],
+  draft: ['pending', 'pending_assignment', 'cancelled'],
+  pending_assignment: ['assigned', 'cancelled', 'pending'],
+  pending: ['assigned', 'cancelled'],
+  assigned: ['picked_up', 'in_transit', 'pending', 'pending_assignment', 'cancelled'],
+  picked_up: ['in_transit', 'failed', 'cancelled'],
+  in_transit: ['out_for_delivery', 'delivered', 'failed', 'cancelled'],
+  out_for_delivery: ['delivered', 'failed'],
+  failed: ['out_for_delivery', 'in_transit', 'pending', 'cancelled'],
   delivered: [],
   cancelled: [],
 };

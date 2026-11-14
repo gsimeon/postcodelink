@@ -113,7 +113,63 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
     # 11. Anambra State (Zone 4)
     {"code": "420001", "area": "Awka Central / Zik Avenue", "state": "Anambra", "lga": "Awka South", "lat": 6.2209, "lng": 7.0718},
     {"code": "430001", "area": "Onitsha Main Market / Old Market Rd", "state": "Anambra", "lga": "Onitsha North", "lat": 6.1512, "lng": 6.7821},
+
+    # 12. Verified Digital Building-Level Postcodes (Pilot Phase Registry)
+    {
+        "code": "LAG-IKJ-0012",
+        "area": "Ikeja Central Business District",
+        "state": "Lagos",
+        "lga": "Ikeja",
+        "lat": 6.5921,
+        "lng": 3.3541,
+        "postcode_type": "digital_location",
+        "building_reference": "Plot 4 Ikeja Commercial Plaza",
+        "provenance": "NIPOST Digital Address Register 2024",
+        "dataset_version": "2024.1",
+    },
+    {
+        "code": "LAG-LEK-0045",
+        "area": "Lekki Phase 1 / Admiralty",
+        "state": "Lagos",
+        "lga": "Eti-Osa",
+        "lat": 6.4421,
+        "lng": 3.4751,
+        "postcode_type": "digital_location",
+        "building_reference": "Admiralty Mall & Tower",
+        "provenance": "NIPOST Digital Address Register 2024",
+        "dataset_version": "2024.1",
+    },
+    {
+        "code": "ABJ-GAR-0101",
+        "area": "Garki District Area 2",
+        "state": "Abuja (FCT)",
+        "lga": "Municipal Area Council",
+        "lat": 9.0321,
+        "lng": 7.4891,
+        "postcode_type": "digital_location",
+        "building_reference": "Federal Commerce House",
+        "provenance": "NIPOST Digital Address Register 2024",
+        "dataset_version": "2024.1",
+    },
 ]
+
+
+def normalize_digital_postcode(code: Optional[str]) -> Optional[str]:
+    """Normalize and format Nigerian digital postcodes into canonical SSS-DDD-BBBB[B] format.
+    
+    Canonical format consists of:
+    - 3-letter State/Zone abbreviation (e.g. LAG, ABJ, KAN)
+    - 3-4 alphanumeric District/LGA code (e.g. IKJ, LEK, GAR)
+    - 4-5 alphanumeric Building/Location identifier (e.g. 0012, 0101)
+    Total length: 10 to 11 alphanumeric characters (12 to 13 characters with hyphens).
+    """
+    if not code or not isinstance(code, str):
+        return None
+    cleaned = code.strip().upper()
+    match = re.match(r"^([A-Z]{3})[\s\-]?([A-Z0-9]{3,4})[\s\-]?([A-Z0-9]{4,5})$", cleaned)
+    if match:
+        return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+    return None
 
 
 def normalize_string(text: Optional[str]) -> str:
@@ -173,36 +229,87 @@ def cleanse_address(
     area_hint: Optional[str] = None,
     db: Optional[Session] = None,
 ) -> CleanseAddressResponse:
-    """Cleanse, disambiguate, and validate a Nigerian delivery address against official NIPOST records."""
+    """Cleanse, disambiguate, and validate a Nigerian delivery address against official NIPOST records (Database-first)."""
     target_addr = address or raw_address or ""
     clean_addr = target_addr.strip()
     norm_addr = normalize_string(clean_addr)
     norm_area_hint = normalize_string(area_hint)
     norm_state_hint = normalize_string(state_hint)
 
-    # 1. Extract 6-digit code from hint or text
+    # 1. Digital Postcode (10-11 character building location) vs Conventional (6-digit area) detection
     extracted_code: Optional[str] = None
-    if postcode_hint and re.match(r"^\d{6}$", postcode_hint.strip()):
-        extracted_code = postcode_hint.strip()
-    else:
-        found_codes = re.findall(r"\b(\d{6})\b", clean_addr)
-        if found_codes:
-            extracted_code = found_codes[0]
+    is_digital_location: bool = False
+    is_digital_syntax: bool = False
 
-    # 2. Score candidate reference postcodes
+    cleaned_hint = (postcode_hint or "").strip()
+    norm_digital = normalize_digital_postcode(cleaned_hint)
+    if norm_digital:
+        extracted_code = norm_digital
+        is_digital_location = True
+        is_digital_syntax = True
+    elif re.match(r"^\d{6}$", cleaned_hint):
+        extracted_code = cleaned_hint
+        is_digital_location = False
+    else:
+        # Search address string for digital pattern or 6-digit conventional
+        found_digital = re.findall(r"\b([A-Za-z]{3}[\s\-][A-Za-z0-9]{3,4}[\s\-][A-Za-z0-9]{4,5})\b", clean_addr)
+        if found_digital:
+            norm_found = normalize_digital_postcode(found_digital[0])
+            if norm_found:
+                extracted_code = norm_found
+                is_digital_location = True
+                is_digital_syntax = True
+        if not extracted_code:
+            found_codes = re.findall(r"\b(\d{6})\b", clean_addr)
+            if found_codes:
+                extracted_code = found_codes[0]
+                is_digital_location = False
+
+    postcode_type = "digital_location" if is_digital_location else "conventional_area"
+    resolution_level = "building_location" if is_digital_location else "area_district"
+
+    # 2. Database-First Candidates Selection
+    candidates = []
+    source_name = "local_nipost_reference_dataset"
+    if db is not None:
+        try:
+            db_records = db.query(PostcodeDirectory).filter(PostcodeDirectory.is_active == True).all()
+            if db_records:
+                candidates = [
+                    {
+                        "code": r.code,
+                        "area": r.area,
+                        "state": r.state,
+                        "lga": r.lga,
+                        "lat": r.lat,
+                        "lng": r.lng,
+                        "postcode_type": getattr(r, "postcode_type", "conventional_area"),
+                        "building_reference": getattr(r, "building_reference", None),
+                        "provenance": getattr(r, "provenance", "NIPOST Official Digital Postcode Directory"),
+                        "dataset_version": getattr(r, "dataset_version", "2024.2"),
+                    }
+                    for r in db_records
+                ]
+                source_name = "postgresql_postcode_directory"
+        except Exception:
+            candidates = []
+
+    if not candidates:
+        candidates = OFFICIAL_POSTCODES
+        source_name = "local_nipost_reference_dataset"
+
+    # 3. Score candidate reference postcodes
     best_match: Optional[Dict[str, Any]] = None
     highest_score = 0
     matched_area = ""
 
-    # Check candidates from database or memory list
-    candidates = OFFICIAL_POSTCODES
-
     for rec in candidates:
         score = 0
         norm_rec_area = normalize_string(rec["area"])
+        rec_code_norm = rec["code"].strip().upper()
 
-        # Prioritize matching exact 6-digit code
-        if extracted_code and rec["code"] == extracted_code:
+        # Prioritize matching exact code
+        if extracted_code and (rec_code_norm == extracted_code.upper() or rec["code"] == extracted_code):
             score += 100
 
         # Substring area matching
@@ -232,20 +339,48 @@ def cleanse_address(
 
     # Check postcode validity against reference registry
     if extracted_code:
-        matching_code_rec = next((r for r in candidates if r["code"] == extracted_code), None)
+        matching_code_rec = next((r for r in candidates if r["code"].strip().upper() == extracted_code.upper()), None)
         if matching_code_rec:
             postcode_valid = True
-            if not best_match or best_match["code"] != extracted_code:
+            if not best_match or best_match["code"].strip().upper() != extracted_code.upper():
                 best_match = matching_code_rec
                 matched_area = matching_code_rec["area"]
 
+    # CRITICAL: Separate format recognition from directory verification
+    # If a digital postcode matches syntax but is not in the directory, it cannot be verified!
+    if is_digital_syntax and not postcode_valid:
+        changes.append(
+            f"Digital building code '{extracted_code}' matches canonical NIPOST syntax, but was not found in the verified building directory."
+        )
+        return CleanseAddressResponse(
+            original_address=clean_addr,
+            formatted_address=clean_addr,
+            area=area_hint or "Unverified Location",
+            state=state_hint or "Lagos",
+            lga=None,
+            postcode=extracted_code,
+            postcode_type="digital_location",
+            resolution_level="building_location",
+            postcode_status="unverified",
+            confidence=0.0,
+            postcode_valid=False,
+            address_consistent=False,
+            dispatch_confidence=0.0,
+            source=source_name,
+            matched_record=None,
+            changes_made=changes,
+            provenance="NIPOST Digital Address Register 2024",
+        )
+
     # CASE 1: Exact postcode provided and matches reference record
-    if best_match and extracted_code and best_match["code"] == extracted_code:
+    if best_match and extracted_code and (best_match["code"].strip().upper() == extracted_code.strip().upper()):
         verified_code = best_match["code"]
         detected_state = best_match["state"]
         detected_lga = best_match.get("lga")
         matched_area_norm = normalize_string(best_match["area"])
         matched_lga_norm = normalize_string(detected_lga) if detected_lga else ""
+        rec_type = best_match.get("postcode_type", postcode_type)
+        rec_resolution = "building_location" if rec_type == "digital_location" else "area_district"
 
         # Strict Area Consistency Verification:
         # 1. Compare supplied area hint strictly against the matched postcode record
@@ -271,6 +406,15 @@ def cleanse_address(
                         and (not matched_lga_norm or other_lga_norm != matched_lga_norm)
                         and other_rec["code"] != verified_code
                     ):
+                        # If other area only appears as part of a street name and the address explicitly contains matched area, allow
+                        is_street_name = bool(
+                            re.search(
+                                rf"\b{re.escape(other_area_norm)}\s+(road|rd|street|st|close|cls|crescent|cres|avenue|ave|way|drive|dr|lane|ln|expressway|exp)\b",
+                                norm_addr,
+                            )
+                        )
+                        if is_street_name and (matched_area_norm in norm_addr or matched_lga_norm in norm_addr):
+                            continue
                         area_consistent = False
                         break
 
@@ -290,14 +434,17 @@ def cleanse_address(
                 state=detected_state,
                 lga=detected_lga,
                 postcode=verified_code,
+                postcode_type=rec_type,
+                resolution_level=rec_resolution,
                 postcode_status="verified",
                 confidence=0.95,
                 postcode_valid=True,
                 address_consistent=True,
                 dispatch_confidence=0.95,
-                source="local_nipost_reference_dataset",
+                source=source_name,
                 matched_record=PostcodeRecordSchema(**best_match),
                 changes_made=changes,
+                provenance=best_match.get("provenance", "NIPOST Official Digital Postcode Directory"),
             )
         else:
             # Conflict detected: Postcode is valid, but supplied area/state contradicts postcode directory!
@@ -312,14 +459,17 @@ def cleanse_address(
                 state=state_hint or detected_state,
                 lga=detected_lga,
                 postcode=verified_code,
+                postcode_type=postcode_type,
+                resolution_level=resolution_level,
                 postcode_status="conflict",
                 confidence=0.50,
                 postcode_valid=True,
                 address_consistent=False,
                 dispatch_confidence=0.45,
-                source="local_nipost_reference_dataset",
+                source=source_name,
                 matched_record=PostcodeRecordSchema(**best_match),
                 changes_made=changes,
+                provenance=best_match.get("provenance", "NIPOST Official Digital Postcode Directory"),
             )
 
     # CASE 2: Area recognized in address without explicit matching code (estimated postcode)
@@ -337,19 +487,22 @@ def cleanse_address(
             state=detected_state,
             lga=detected_lga,
             postcode=suggested_code,
+            postcode_type=postcode_type,
+            resolution_level=resolution_level,
             postcode_status="estimated",
             confidence=0.70,
             postcode_valid=postcode_valid,
             address_consistent=True,
             dispatch_confidence=0.68,
-            source="local_nipost_reference_dataset",
+            source=source_name,
             matched_record=PostcodeRecordSchema(**best_match),
             changes_made=changes,
+            provenance=best_match.get("provenance", "NIPOST Official Digital Postcode Directory"),
         )
 
     # CASE 3: Unrecognized address / No postcode match (UNVERIFIED)
     else:
-        changes.append("No matching NIPOST 6-digit postal record identified. Marked unverified with zero arbitrary fallback.")
+        changes.append("No matching NIPOST postal record identified. Marked unverified with zero arbitrary fallback.")
         return CleanseAddressResponse(
             original_address=clean_addr,
             formatted_address=clean_addr,
@@ -357,12 +510,15 @@ def cleanse_address(
             state=state_hint or "Lagos",
             lga=None,
             postcode="",
+            postcode_type=postcode_type,
+            resolution_level=resolution_level,
             postcode_status="unverified",
             confidence=0.20,
             postcode_valid=False,
             address_consistent=False,
             dispatch_confidence=0.0,
-            source="local_nipost_reference_dataset",
+            source=source_name,
             matched_record=None,
             changes_made=changes,
+            provenance="NIPOST Official Digital Postcode Directory",
         )

@@ -1,11 +1,15 @@
-"""Authentication router enforcing secure registration and role boundaries."""
+"""Authentication router enforcing secure registration, trusted proxy evaluation, and role boundaries."""
 import time
-from typing import Dict, Tuple
-from fastapi import APIRouter, Depends, HTTPException, status
+import ipaddress
+from datetime import datetime, timezone, timedelta
+from typing import Dict, Tuple, Optional
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
+from backend.app.config import settings
 from backend.app.database import get_db
 from backend.app.models.profile import Profile
+from backend.app.models.login_attempt import LoginAttempt
 from backend.app.models.enums import AppRole
 from backend.app.schemas.auth import (
     UserRegisterRequest,
@@ -19,10 +23,52 @@ from backend.app.core.auth_deps import get_current_user, require_roles
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-# In-memory tracking for failed login attempts: email -> (attempts_count, locked_until_epoch)
+# Legacy dictionary retained for test fixture compatibility; active rate limiting is database-persisted
 LOGIN_ATTEMPTS: Dict[str, Tuple[int, float]] = {}
 MAX_LOGIN_ATTEMPTS = 5
-LOCKOUT_DURATION_SECONDS = 900  # 15 minutes
+LOCKOUT_DURATION_MINUTES = 15
+
+
+def is_ip_in_trusted_proxy(ip_str: str, trusted_spec: str) -> bool:
+    """Check if an IP string belongs to a trusted proxy host or CIDR subnet."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        if "/" in trusted_spec:
+            return ip in ipaddress.ip_network(trusted_spec, strict=False)
+        return ip == ipaddress.ip_address(trusted_spec)
+    except ValueError:
+        return ip_str.lower() == trusted_spec.lower()
+
+
+def get_trusted_client_ip(request: Request) -> str:
+    """Extract real client IP only trusting X-Forwarded-For when direct request arrives via a configured trusted proxy."""
+    direct_ip = request.client.host if request.client else "127.0.0.1"
+    trusted_list = getattr(settings, "TRUSTED_PROXIES", ["127.0.0.1", "::1", "localhost", "testclient"])
+
+    # If the direct peer is NOT in trusted proxies, completely ignore X-Forwarded-For to defeat header spoofing
+    is_trusted = any(is_ip_in_trusted_proxy(direct_ip, proxy) for proxy in trusted_list)
+    if not is_trusted:
+        return direct_ip
+
+    # Peer is a trusted proxy: parse X-Forwarded-For chain from right to left
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        ips = [ip.strip() for ip in forwarded.split(",") if ip.strip()]
+        for ip in reversed(ips):
+            if not any(is_ip_in_trusted_proxy(ip, proxy) for proxy in trusted_list):
+                return ip
+        if ips:
+            return ips[0]
+
+    return direct_ip
+
+
+def cleanup_expired_login_attempts(db: Session, retention_days: int = 30) -> int:
+    """Purge login attempt audit records older than retention_days (Retention Policy)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    deleted = db.query(LoginAttempt).filter(LoginAttempt.attempted_at < cutoff).delete()
+    db.commit()
+    return deleted
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
@@ -87,43 +133,100 @@ def api_admin_create_user(
 
 
 @router.post("/login", response_model=TokenResponse)
-def api_login(request: UserLoginRequest, db: Session = Depends(get_db)):
-    """Authenticate with email and password to receive a JWT Bearer token with brute-force rate limiting."""
+def api_login(request: UserLoginRequest, req: Request, db: Session = Depends(get_db)):
+    """Authenticate with email and password to receive a JWT Bearer token with trusted-proxy rate limiting."""
     clean_email = request.email.strip().lower()
-    now = time.time()
+    client_ip = get_trusted_client_ip(req)
 
-    # 1. Check if email is currently locked out
-    if clean_email in LOGIN_ATTEMPTS:
-        attempts, locked_until = LOGIN_ATTEMPTS[clean_email]
-        if locked_until > now:
-            rem_mins = max(1, int((locked_until - now + 59) // 60))
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"Too many failed login attempts. Account is temporarily locked. Try again in {rem_mins} minute(s)."
-            )
+    now = datetime.now(timezone.utc)
+    window_start = now - timedelta(minutes=LOCKOUT_DURATION_MINUTES)
+
+    # 1. IP-level flood protection (max 30 failed attempts across all accounts from same IP in 15 mins)
+    ip_failed_count = (
+        db.query(LoginAttempt)
+        .filter(
+            LoginAttempt.ip_address == client_ip,
+            LoginAttempt.attempted_at >= window_start,
+            LoginAttempt.is_successful == False,
+        )
+        .count()
+    )
+    if ip_failed_count >= 30:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed requests from your network. Please try again in 15 minutes."
+        )
+
+    # 2. Account-level lockout check: 5 failed attempts in 15 mins
+    account_failed_count = (
+        db.query(LoginAttempt)
+        .filter(
+            LoginAttempt.email == clean_email,
+            LoginAttempt.attempted_at >= window_start,
+            LoginAttempt.is_successful == False,
+        )
+        .count()
+    )
+    if account_failed_count >= MAX_LOGIN_ATTEMPTS:
+        latest_attempt = (
+            db.query(LoginAttempt)
+            .filter(LoginAttempt.email == clean_email, LoginAttempt.is_successful == False)
+            .order_by(LoginAttempt.attempted_at.desc())
+            .first()
+        )
+        if latest_attempt:
+            att_time = latest_attempt.attempted_at
+            if att_time.tzinfo is None:
+                att_time = att_time.replace(tzinfo=timezone.utc)
+            lockout_expiry = att_time + timedelta(minutes=LOCKOUT_DURATION_MINUTES)
+            if now < lockout_expiry:
+                rem_mins = max(1, int((lockout_expiry - now).total_seconds() + 59) // 60)
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Too many failed login attempts. Account is temporarily locked. Try again in {rem_mins} minute(s)."
+                )
 
     profile = db.query(Profile).filter(Profile.email == clean_email).first()
     if not profile or not verify_password(request.password, profile.hashed_password):
-        # Record failed attempt
-        attempts, _ = LOGIN_ATTEMPTS.get(clean_email, (0, 0.0))
-        attempts += 1
-        if attempts >= MAX_LOGIN_ATTEMPTS:
-            LOGIN_ATTEMPTS[clean_email] = (attempts, now + LOCKOUT_DURATION_SECONDS)
+        # Record failed attempt in persistent database
+        failed_record = LoginAttempt(
+            email=clean_email,
+            ip_address=client_ip,
+            is_successful=False,
+            attempted_at=now,
+            user_agent=req.headers.get("user-agent"),
+        )
+        db.add(failed_record)
+        db.commit()
+
+        new_failed_count = account_failed_count + 1
+        if new_failed_count >= MAX_LOGIN_ATTEMPTS:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Too many failed login attempts. Account is temporarily locked for 15 minutes."
             )
         else:
-            LOGIN_ATTEMPTS[clean_email] = (attempts, 0.0)
-            remaining = MAX_LOGIN_ATTEMPTS - attempts
+            remaining = MAX_LOGIN_ATTEMPTS - new_failed_count
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=f"Invalid email or password. {remaining} attempt(s) remaining.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-    # Success: reset attempt counter
-    LOGIN_ATTEMPTS.pop(clean_email, None)
+    # Success: record success and clear prior failed attempts for this email
+    success_record = LoginAttempt(
+        email=clean_email,
+        ip_address=client_ip,
+        is_successful=True,
+        attempted_at=now,
+        user_agent=req.headers.get("user-agent"),
+    )
+    db.add(success_record)
+    db.query(LoginAttempt).filter(
+        LoginAttempt.email == clean_email,
+        LoginAttempt.is_successful == False,
+    ).delete()
+    db.commit()
 
     token = create_access_token({"sub": profile.id, "email": profile.email, "role": profile.role.value})
     return TokenResponse(

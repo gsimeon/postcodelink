@@ -1,4 +1,5 @@
 """PostcodeLink Nigeria - FastAPI Main Application."""
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends
@@ -9,6 +10,7 @@ from sqlalchemy import text
 from backend.app.config import settings
 from backend.app.database import engine, Base, get_db
 from backend.app.seed import seed_database
+from backend.app.workers.outbox_worker import run_outbox_worker_loop
 from backend.app.routers import (
     auth,
     deliveries,
@@ -23,12 +25,7 @@ logger = logging.getLogger("uvicorn")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan context manager running startup database checks and controlled development seeding.
-    
-    Production Standard:
-    - In production, schema migrations are executed strictly via Alembic ('alembic upgrade head').
-    - Base.metadata.create_all() is disabled in production to eliminate competing schema authorities.
-    """
+    """Lifespan context manager running startup database checks, development seeding, and background outbox worker."""
     if settings.ENVIRONMENT == "production":
         logger.info(
             "Production environment: Skipping automatic DDL. Schema managed strictly via Alembic migrations ('alembic upgrade head')."
@@ -46,14 +43,31 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.warning(f"Database seed note: {e}")
 
+    # Start asynchronous outbox retry worker if enabled
+    worker_task = None
+    stop_event = asyncio.Event()
+    if settings.OUTBOX_WORKER_ENABLED:
+        logger.info("Starting background Outbox Dispatch Worker...")
+        worker_task = asyncio.create_task(
+            run_outbox_worker_loop(stop_event, poll_interval=settings.OUTBOX_WORKER_INTERVAL_SECONDS)
+        )
+
     yield
+
     logger.info("Shutting down PostcodeLink API...")
+    if worker_task:
+        logger.info("Stopping Outbox Worker...")
+        stop_event.set()
+        try:
+            await asyncio.wait_for(worker_task, timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
 
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
-    description="Authoritative Nigerian postal code linking, dispatch routing, and tamper-resistant delivery tracking API.",
+    description="Nigeria address intelligence, digital postcode resolution, and reliable last-mile delivery tracking API.",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",

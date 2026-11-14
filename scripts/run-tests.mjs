@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-// 1. Test State Machine
+// 1. Test Canonical Production State Machine
 const ALLOWED_TRANSITIONS = {
-  draft: ['pending_assignment', 'cancelled'],
-  pending_assignment: ['assigned', 'cancelled'],
-  assigned: ['in_transit', 'pending_assignment', 'cancelled'],
-  in_transit: ['delivered', 'failed'],
-  failed: ['pending_assignment', 'in_transit', 'cancelled'],
+  pending: ['assigned', 'cancelled'],
+  assigned: ['picked_up', 'in_transit', 'pending', 'cancelled'],
+  picked_up: ['in_transit', 'failed', 'cancelled'],
+  in_transit: ['out_for_delivery', 'delivered', 'failed', 'cancelled'],
+  out_for_delivery: ['delivered', 'failed'],
+  failed: ['out_for_delivery', 'in_transit', 'cancelled'],
   delivered: [],
   cancelled: [],
 };
@@ -26,13 +27,14 @@ function validateStateTransition(currentStatus, targetStatus) {
   return { valid: true };
 }
 
-test('State Machine: allows valid status progressions', () => {
-  assert.equal(validateStateTransition('draft', 'pending_assignment').valid, true);
-  assert.equal(validateStateTransition('pending_assignment', 'assigned').valid, true);
-  assert.equal(validateStateTransition('assigned', 'in_transit').valid, true);
-  assert.equal(validateStateTransition('in_transit', 'delivered').valid, true);
-  assert.equal(validateStateTransition('in_transit', 'failed').valid, true);
-  assert.equal(validateStateTransition('failed', 'pending_assignment').valid, true);
+test('State Machine: allows valid status progressions matching canonical backend lifecycle', () => {
+  assert.equal(validateStateTransition('pending', 'assigned').valid, true);
+  assert.equal(validateStateTransition('assigned', 'picked_up').valid, true);
+  assert.equal(validateStateTransition('picked_up', 'in_transit').valid, true);
+  assert.equal(validateStateTransition('in_transit', 'out_for_delivery').valid, true);
+  assert.equal(validateStateTransition('out_for_delivery', 'delivered').valid, true);
+  assert.equal(validateStateTransition('out_for_delivery', 'failed').valid, true);
+  assert.equal(validateStateTransition('failed', 'out_for_delivery').valid, true);
 });
 
 test('State Machine: blocks invalid or illegal status progressions', () => {
@@ -45,9 +47,9 @@ test('State Machine: blocks invalid or illegal status progressions', () => {
   const fromCancelled = validateStateTransition('cancelled', 'assigned');
   assert.equal(fromCancelled.valid, false);
 
-  // Jump from draft directly to delivered is invalid
-  const jumpDraft = validateStateTransition('draft', 'delivered');
-  assert.equal(jumpDraft.valid, false);
+  // Jump from pending directly to delivered is invalid
+  const jumpPending = validateStateTransition('pending', 'delivered');
+  assert.equal(jumpPending.valid, false);
 });
 
 // 2. Test Reference & OTP Generation

@@ -11,6 +11,7 @@ class Delivery(Base):
     __tablename__ = "deliveries"
 
     id = Column(String(32), primary_key=True, index=True)  # Human-readable reference: "PL-2026-AB12CD"
+    idempotency_key = Column(String(128), index=True, nullable=True)
     tracking_token = Column(String(64), unique=True, index=True, nullable=False, default=lambda: secrets.token_urlsafe(24))
     merchant_id = Column(String(36), ForeignKey("profiles.id", ondelete="SET NULL"), nullable=True, index=True)
     operator_id = Column(String(36), ForeignKey("operators.id", ondelete="SET NULL"), nullable=True, index=True)
@@ -26,7 +27,7 @@ class Delivery(Base):
     destination_state = Column(String(100), nullable=False)
     postcode_input = Column(String(20), nullable=False)
     postcode_status = Column(SAEnum(PostcodeStatus), nullable=False, default=PostcodeStatus.UNVERIFIED)
-    verified_postcode = Column(String(10), nullable=True)
+    verified_postcode = Column(String(20), nullable=True)
     
     # Package & Fee (Stored as Numeric with 2 decimal precision)
     package_description = Column(String(500), nullable=False)

@@ -22,9 +22,22 @@ client = TestClient(app)
 @pytest.fixture(autouse=True)
 def reset_login_attempts():
     """Ensure clean login attempt tracking between test executions."""
+    from backend.app.models.login_attempt import LoginAttempt
     LOGIN_ATTEMPTS.clear()
+    db = SessionLocal()
+    try:
+        db.query(LoginAttempt).delete()
+        db.commit()
+    finally:
+        db.close()
     yield
     LOGIN_ATTEMPTS.clear()
+    db = SessionLocal()
+    try:
+        db.query(LoginAttempt).delete()
+        db.commit()
+    finally:
+        db.close()
 
 
 def get_auth_token(email: str, password: str) -> str:

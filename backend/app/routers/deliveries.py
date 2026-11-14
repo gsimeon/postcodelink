@@ -1,4 +1,5 @@
 """Deliveries router with authentication, tenant isolation, and RBAC."""
+import secrets
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Query, status, HTTPException
 from sqlalchemy.orm import Session
@@ -17,6 +18,8 @@ from backend.app.schemas.delivery import (
     DeliveryVerifyOTPRequest,
     DeliveryResponse,
     DeliveryPublicTrackingResponse,
+    DeliveryBulkCreateResponse,
+    BulkItemResult,
 )
 from backend.app.services.delivery_service import (
     create_delivery,
@@ -25,6 +28,7 @@ from backend.app.services.delivery_service import (
     verify_delivery_otp,
     get_public_tracking,
     regenerate_tracking_token,
+    resend_delivery_pin,
 )
 from backend.app.core.auth_deps import get_current_user, require_roles
 
@@ -41,18 +45,62 @@ def api_create_delivery(
     return create_delivery(db, request, current_user)
 
 
-@router.post("/bulk", response_model=List[DeliveryResponse], status_code=status.HTTP_201_CREATED)
+@router.post("/bulk", response_model=DeliveryBulkCreateResponse, status_code=status.HTTP_201_CREATED)
 def api_bulk_create_deliveries(
     items: List[DeliveryCreateRequest],
+    batch_id: Optional[str] = Query(None),
     current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
     db: Session = Depends(get_db),
 ):
-    """Batch import delivery orders into the authenticated merchant's account."""
-    created_items = []
-    for item in items:
-        res = create_delivery(db, item, current_user)
-        created_items.append(res.delivery)
-    return created_items
+    """Batch import delivery orders into the authenticated merchant's account with atomic per-item reporting."""
+    batch_identifier = batch_id or f"batch-{secrets.token_hex(6)}"
+    results: List[BulkItemResult] = []
+    success_count = 0
+    failure_count = 0
+
+    for idx, item in enumerate(items):
+        try:
+            with db.begin_nested():
+                res = create_delivery(db, item, current_user, async_notification=True, commit=False)
+                results.append(
+                    BulkItemResult(
+                        index=idx,
+                        success=True,
+                        reference=res.delivery.id,
+                        delivery=res.delivery,
+                    )
+                )
+                success_count += 1
+        except Exception as exc:
+            err_msg = str(getattr(exc, "detail", exc))
+            results.append(
+                BulkItemResult(
+                    index=idx,
+                    success=False,
+                    error=err_msg,
+                )
+            )
+            failure_count += 1
+
+    db.commit()
+
+    return DeliveryBulkCreateResponse(
+        batch_id=batch_identifier,
+        total_items=len(items),
+        successful_count=success_count,
+        failed_count=failure_count,
+        results=results,
+    )
+
+
+@router.post("/{delivery_id}/resend-pin", response_model=DeliveryCreateResponse)
+def api_resend_delivery_pin(
+    delivery_id: str,
+    current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
+    db: Session = Depends(get_db),
+):
+    """Securely regenerate and resend a proof-of-delivery confirmation PIN out-of-band."""
+    return resend_delivery_pin(db, delivery_id, current_user)
 
 
 @router.get("/", response_model=List[DeliveryResponse])

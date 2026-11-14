@@ -20,6 +20,7 @@ class Operator(Base):
     rating = Column(Float, nullable=False, default=5.0)
     completed_deliveries = Column(Integer, nullable=False, default=0)
     active_deliveries_count = Column(Integer, nullable=False, default=0)
+    max_active_deliveries = Column(Integer, nullable=False, default=15)
     current_lat = Column(Float, nullable=True)
     current_lng = Column(Float, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)

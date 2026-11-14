@@ -1,10 +1,12 @@
 """Delivery service handling business logic, concurrency-safe transactions, and strict privacy."""
 import secrets
 import logging
+import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 
 from backend.app.config import settings
 from backend.app.models.delivery import Delivery
@@ -29,6 +31,7 @@ from backend.app.services.postcode_service import cleanse_address, normalize_str
 from backend.app.core.security import hash_otp, verify_otp_hash
 from backend.app.services.notification_service import (
     notification_provider,
+    get_notification_provider,
     NotificationDeliveryStatus,
 )
 
@@ -70,8 +73,32 @@ def generate_otp() -> str:
     return f"{secrets.randbelow(900000) + 100000}"
 
 
-def create_delivery(db: Session, request: DeliveryCreateRequest, current_user: Profile) -> DeliveryCreateResponse:
-    """Create a new delivery with centralized postcode validation and secure out-of-band PIN dispatch."""
+def create_delivery(
+    db: Session,
+    request: DeliveryCreateRequest,
+    current_user: Profile,
+    async_notification: bool = False,
+    commit: bool = True,
+) -> DeliveryCreateResponse:
+    """Create a new delivery with centralized postcode validation, idempotency guards, and secure out-of-band PIN dispatch."""
+    # 1. Idempotency Guard: prevent duplicate orders on network retries
+    if getattr(request, "idempotency_key", None):
+        clean_key = request.idempotency_key.strip()
+        existing = db.query(Delivery).filter(
+            Delivery.merchant_id == current_user.id,
+            Delivery.idempotency_key == clean_key,
+        ).first()
+        if existing:
+            return DeliveryCreateResponse(
+                delivery=DeliveryResponse.model_validate(existing),
+                notification_dispatch=NotificationDispatchPayload(
+                    recipient_phone=existing.recipient_phone,
+                    status="IDEMPOTENT_REPLAY",
+                    channel="Idempotency Cache",
+                    message_preview=f"Idempotent replay: Delivery {existing.id} already created.",
+                ),
+            )
+
     ref_id = generate_reference(db)
     raw_otp = generate_otp()
     otp_hash_val = hash_otp(raw_otp)
@@ -101,6 +128,7 @@ def create_delivery(db: Session, request: DeliveryCreateRequest, current_user: P
 
     delivery = Delivery(
         id=ref_id,
+        idempotency_key=request.idempotency_key.strip() if getattr(request, "idempotency_key", None) else None,
         tracking_token=tracking_token,
         merchant_id=current_user.id,  # Strictly derived from authenticated merchant
         recipient_name=request.recipient_name.strip(),
@@ -143,36 +171,50 @@ def create_delivery(db: Session, request: DeliveryCreateRequest, current_user: P
         delivery_id=delivery.id,
         channel="SMS",
         recipient_phone=delivery.recipient_phone,
-        provider="simulated",
+        recipient_name=delivery.recipient_name,
+        message_payload=f"Hello {delivery.recipient_name}, your delivery {delivery.id} confirmation PIN is issued.",
+        provider=settings.SMS_PROVIDER,
+        notification_type="otp_delivery_pin",
         status=NotificationDeliveryStatus.QUEUED,
     )
     db.add(outbox_entry)
-    db.commit()
-    db.refresh(delivery)
-    db.refresh(outbox_entry)
+    if commit:
+        db.commit()
+        db.refresh(delivery)
+        db.refresh(outbox_entry)
+    else:
+        db.flush()
 
-    # Dispatch PIN out-of-band via notification provider (Zero-knowledge: never returned in HTTP body, never stored in plaintext)
-    dispatch_res = notification_provider.send_delivery_pin(
-        recipient_phone=delivery.recipient_phone,
-        recipient_name=delivery.recipient_name,
-        delivery_id=delivery.id,
-        pin=raw_otp,
-    )
+    if async_notification:
+        notification = NotificationDispatchPayload(
+            recipient_phone=delivery.recipient_phone,
+            status=NotificationDeliveryStatus.QUEUED.value,
+            channel="Asynchronous Outbox Queue",
+            message_preview="Queued in durable outbox for asynchronous dispatch.",
+        )
+    else:
+        # Dispatch PIN out-of-band via notification provider (Zero-knowledge: never returned in HTTP body, never stored in plaintext)
+        dispatch_res = notification_provider.send_delivery_pin(
+            recipient_phone=delivery.recipient_phone,
+            recipient_name=delivery.recipient_name,
+            delivery_id=delivery.id,
+            pin=raw_otp,
+        )
 
-    # Update outbox record status with dispatch result
-    outbox_entry.status = dispatch_res.status
-    outbox_entry.provider = dispatch_res.provider
-    outbox_entry.error_details = dispatch_res.error_details
-    if dispatch_res.status in [NotificationDeliveryStatus.SENT, NotificationDeliveryStatus.SIMULATED]:
-        outbox_entry.sent_at = datetime.now(timezone.utc)
-    db.commit()
+        # Update outbox record status with dispatch result
+        outbox_entry.status = dispatch_res.status
+        outbox_entry.provider = dispatch_res.provider
+        outbox_entry.error_details = dispatch_res.error_details
+        if dispatch_res.status in [NotificationDeliveryStatus.SENT, NotificationDeliveryStatus.SIMULATED]:
+            outbox_entry.sent_at = datetime.now(timezone.utc)
+        db.commit()
 
-    notification = NotificationDispatchPayload(
-        recipient_phone=delivery.recipient_phone,
-        status=dispatch_res.status.value,
-        channel=dispatch_res.channel,
-        message_preview=dispatch_res.message_preview,
-    )
+        notification = NotificationDispatchPayload(
+            recipient_phone=delivery.recipient_phone,
+            status=dispatch_res.status.value,
+            channel=dispatch_res.channel,
+            message_preview=dispatch_res.message_preview,
+        )
 
     return DeliveryCreateResponse(
         delivery=DeliveryResponse.model_validate(delivery),
@@ -204,11 +246,12 @@ def assign_operator(db: Session, delivery_id: str, request: DeliveryAssignReques
             detail=f"Courier operator '{operator.business_name}' is currently unavailable for new dispatches."
         )
 
-    # Check 2: Capacity limit (max 15 active dispatches)
-    if operator.active_deliveries_count >= 15:
+    # Check 2: Capacity limit (configurable max active dispatches)
+    max_cap = getattr(operator, "max_active_deliveries", 15)
+    if operator.active_deliveries_count >= max_cap:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Courier operator '{operator.business_name}' has reached maximum dispatch capacity."
+            detail=f"Courier operator '{operator.business_name}' has reached maximum dispatch capacity ({max_cap})."
         )
 
     # Check 3: Service area coverage (supports state-level or area-level fleet tags)
@@ -581,28 +624,200 @@ def regenerate_tracking_token(db: Session, delivery_id: str, current_user: Profi
     return delivery
 
 
-def process_notification_outbox(db: Session, max_items: int = 10) -> int:
-    """Process pending/queued outbox notification items for reliable delivery."""
-    queued = (
+def resend_delivery_pin(db: Session, delivery_id: str, current_user: Profile) -> DeliveryCreateResponse:
+    """Securely regenerate and dispatch a fresh proof-of-delivery PIN out-of-band."""
+    delivery = db.query(Delivery).filter(Delivery.id == delivery_id).with_for_update().first()
+    if not delivery:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delivery order not found.")
+
+    if current_user.role != AppRole.ADMIN and delivery.merchant_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Not authorized to resend PIN for this delivery."
+        )
+
+    if delivery.status in [DeliveryStatus.DELIVERED, DeliveryStatus.CANCELLED]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot resend PIN: delivery order is already in '{delivery.status.value}' terminal status."
+        )
+
+    # Generate fresh cryptographically secure 6-digit PIN
+    raw_pin = f"{secrets.randbelow(900000) + 100000}"
+    delivery.otp_hash = hash_otp(raw_pin)
+    delivery.otp_attempts = 0
+    delivery.otp_locked_until = None
+    delivery.otp_expires_at = datetime.now(timezone.utc) + timedelta(hours=2)
+    delivery.version += 1
+
+    # Atomic Outbox Entry
+    outbox_entry = NotificationOutbox(
+        delivery_id=delivery.id,
+        channel="SMS",
+        recipient_phone=delivery.recipient_phone,
+        provider="simulated",
+        status=NotificationDeliveryStatus.QUEUED,
+        notification_type="otp_resend",
+        idempotency_key=f"resend-{delivery.id}-{uuid.uuid4().hex[:12]}",
+    )
+    db.add(outbox_entry)
+    db.commit()
+    db.refresh(delivery)
+    db.refresh(outbox_entry)
+
+    # Dispatch fresh PIN out-of-band via notification provider
+    dispatch_res = notification_provider.send_delivery_pin(
+        recipient_phone=delivery.recipient_phone,
+        recipient_name=delivery.recipient_name,
+        delivery_id=delivery.id,
+        pin=raw_pin,
+    )
+
+    outbox_entry.status = dispatch_res.status
+    outbox_entry.provider = dispatch_res.provider
+    outbox_entry.error_details = dispatch_res.error_details
+    if dispatch_res.status in [NotificationDeliveryStatus.SENT, NotificationDeliveryStatus.SIMULATED]:
+        outbox_entry.sent_at = datetime.now(timezone.utc)
+    else:
+        outbox_entry.failure_classification = "provider_rejection" if "rejection" in (dispatch_res.error_details or "").lower() else "transient_network_error"
+
+    event = DeliveryEvent(
+        delivery_id=delivery.id,
+        status=delivery.status,
+        actor_name=current_user.full_name,
+        actor_role=current_user.role.value,
+        note=f"Resent confirmation PIN out-of-band via {dispatch_res.channel} ({dispatch_res.status.value}).",
+        occurred_at=datetime.now(timezone.utc),
+    )
+    db.add(event)
+    db.commit()
+    db.refresh(delivery)
+
+    notification = NotificationDispatchPayload(
+        recipient_phone=delivery.recipient_phone,
+        status=dispatch_res.status.value,
+        channel=dispatch_res.channel,
+        message_preview=dispatch_res.message_preview,
+    )
+
+    return DeliveryCreateResponse(
+        delivery=DeliveryResponse.model_validate(delivery),
+        notification_dispatch=notification,
+    )
+
+
+def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Optional[str] = None) -> int:
+    """Process pending/queued outbox notification items with row-level leasing, backoff, and error classification."""
+    now = datetime.now(timezone.utc)
+    assigned_worker = worker_id or f"worker-{secrets.token_hex(4)}"
+
+    # Determine dialect for SKIP LOCKED support
+    bind = db.get_bind()
+    is_postgres = bind is not None and getattr(bind.dialect, "name", "") == "postgresql"
+
+    query = (
         db.query(NotificationOutbox)
         .filter(
             NotificationOutbox.status.in_([NotificationDeliveryStatus.QUEUED, NotificationDeliveryStatus.FAILED]),
             NotificationOutbox.retry_count < NotificationOutbox.max_retries,
+            or_(
+                NotificationOutbox.next_attempt_at.is_(None),
+                NotificationOutbox.next_attempt_at <= now,
+            ),
+            or_(
+                NotificationOutbox.locked_at.is_(None),
+                NotificationOutbox.locked_at <= now - timedelta(minutes=5),
+            ),
         )
         .order_by(NotificationOutbox.created_at.asc())
         .limit(max_items)
-        .with_for_update()
-        .all()
     )
+
+    if is_postgres:
+        queued = query.with_for_update(skip_locked=True).all()
+    else:
+        queued = query.with_for_update().all()
+
     processed = 0
     for item in queued:
+        # Acquire processing lease
+        item.locked_at = now
+        item.locked_by = assigned_worker
         item.retry_count += 1
-        item.updated_at = datetime.now(timezone.utc)
-        # Note: Plaintext PIN is never persisted. For retries on transient delivery alerts:
-        # If max retries reached, item remains FAILED; otherwise marked for re-check
-        if item.retry_count >= item.max_retries:
+        item.updated_at = now
+
+        # Select provider based on item configuration
+        provider_name = item.provider if item.provider in ["termii", "twilio", "simulated"] else settings.SMS_PROVIDER
+        active_provider = get_notification_provider(provider_name)
+
+        dispatch_res = None
+        # Handle PIN notification types
+        if item.notification_type in ["otp_delivery_pin", "otp", "otp_resend"]:
+            deliv = db.query(Delivery).filter(Delivery.id == item.delivery_id).first()
+            if not deliv or deliv.status in [DeliveryStatus.DELIVERED, DeliveryStatus.CANCELLED]:
+                item.status = NotificationDeliveryStatus.FAILED
+                item.failure_classification = "terminal_order"
+                item.error_details = "Delivery is in terminal status (delivered/cancelled) or not found."
+                item.locked_at = None
+                item.locked_by = None
+                processed += 1
+                continue
+
+            # Zero-knowledge: generate fresh PIN, rotate hash in DB, dispatch out-of-band
+            fresh_pin = generate_otp()
+            deliv.otp_hash = hash_otp(fresh_pin)
+            deliv.otp_attempts = 0
+            deliv.otp_locked_until = None
+            deliv.version += 1
+            db.flush()
+
+            dispatch_res = active_provider.send_delivery_pin(
+                recipient_phone=item.recipient_phone,
+                recipient_name=item.recipient_name or deliv.recipient_name,
+                delivery_id=item.delivery_id,
+                pin=fresh_pin,
+            )
+        else:
+            status_text = item.message_payload or f"Update for delivery {item.delivery_id}"
+            dispatch_res = active_provider.send_status_alert(
+                recipient_phone=item.recipient_phone,
+                recipient_name=item.recipient_name or "Recipient",
+                delivery_id=item.delivery_id,
+                status_message=status_text,
+            )
+
+        # Inspect provider response
+        item.status = dispatch_res.status
+        item.provider = dispatch_res.provider
+        if dispatch_res.status in [NotificationDeliveryStatus.SENT, NotificationDeliveryStatus.SIMULATED]:
+            item.sent_at = now
+            item.error_details = None
+            item.failure_classification = None
+        else:
             item.status = NotificationDeliveryStatus.FAILED
-            item.error_details = f"Exceeded maximum delivery retries ({item.max_retries})."
+            item.error_details = dispatch_res.error_details
+            err = (dispatch_res.error_details or "").lower()
+            if "invalid" in err or "format" in err or "phone" in err:
+                item.failure_classification = "invalid_phone"
+                # Permanent failure: do not retry
+                item.retry_count = item.max_retries
+            elif "wallet" in err or "balance" in err or "rejection" in err or "unauthorized" in err:
+                item.failure_classification = "provider_rejection"
+            else:
+                item.failure_classification = "transient_network_error"
+
+            if item.retry_count >= item.max_retries:
+                item.status = NotificationDeliveryStatus.FAILED
+                item.failure_classification = "max_retries_exceeded"
+                item.error_details = f"Exceeded maximum delivery retries ({item.max_retries}). Last error: {dispatch_res.error_details}"
+            else:
+                backoff_seconds = 30 * (2 ** (item.retry_count - 1))
+                item.next_attempt_at = now + timedelta(seconds=backoff_seconds)
+
+        # Release lease
+        item.locked_at = None
+        item.locked_by = None
         processed += 1
+
     db.commit()
     return processed

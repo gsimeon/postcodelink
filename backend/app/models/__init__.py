@@ -8,6 +8,7 @@ from backend.app.models.delivery import Delivery
 from backend.app.models.delivery_event import DeliveryEvent
 from backend.app.models.postcode import PostcodeDirectory
 from backend.app.models.notification_outbox import NotificationOutbox
+from backend.app.models.login_attempt import LoginAttempt
 
 __all__ = [
     "Base",
@@ -22,5 +23,6 @@ __all__ = [
     "DeliveryEvent",
     "PostcodeDirectory",
     "NotificationOutbox",
+    "LoginAttempt",
 ]
 

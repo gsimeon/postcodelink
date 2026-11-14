@@ -11,6 +11,7 @@ class OperatorBase(BaseModel):
     vehicle_type: VehicleType = VehicleType.MOTORCYCLE
     service_areas: List[str] = Field(default_factory=list)
     is_available: bool = True
+    max_active_deliveries: int = Field(default=15, ge=1, le=100)
     current_lat: Optional[float] = None
     current_lng: Optional[float] = None
 
@@ -25,6 +26,7 @@ class OperatorUpdate(BaseModel):
     vehicle_type: Optional[VehicleType] = None
     service_areas: Optional[List[str]] = None
     is_available: Optional[bool] = None
+    max_active_deliveries: Optional[int] = Field(default=None, ge=1, le=100)
     current_lat: Optional[float] = None
     current_lng: Optional[float] = None
 
