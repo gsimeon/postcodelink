@@ -50,6 +50,7 @@ import { AnalyticsTab } from "@/components/AnalyticsTab";
 import { SettingsTab } from "@/components/SettingsTab";
 import { CreateDeliveryModal } from "@/components/CreateDeliveryModal";
 import { DeliveryDetailModal } from "@/components/DeliveryDetailModal";
+import { AuthModal } from "@/components/AuthModal";
 
 function mapFastAPIDelivery(fd: FastAPIDelivery): Delivery {
   let mappedStatus: DeliveryStatus = "draft";
@@ -141,6 +142,7 @@ export default function Home() {
   const [currentProfile, setCurrentProfile] = useState<FastAPIProfile | null>(null);
 
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
   const [prefillAddress, setPrefillAddress] = useState("");
   const [prefillPostcode, setPrefillPostcode] = useState("");
   const [selectedInspectDelivery, setSelectedInspectDelivery] = useState<Delivery | null>(null);
@@ -508,19 +510,19 @@ export default function Home() {
             ) : (
               <button
                 type="button"
-                onClick={() => handleExplicitLogin("dispatch@postcodelink.ng", "MerchantPass123!")}
+                onClick={() => setShowAuthModal(true)}
                 style={{
-                  padding: "4px 10px",
-                  background: "#e0e7ff",
-                  color: "#3730a3",
-                  border: "1px solid #c7d2fe",
+                  padding: "4px 12px",
+                  background: "#2563eb",
+                  color: "#ffffff",
+                  border: "none",
                   borderRadius: "4px",
                   cursor: "pointer",
                   fontSize: "11px",
                   fontWeight: 600,
                 }}
               >
-                Sign In as Merchant (dispatch@postcodelink.ng)
+                Sign In
               </button>
             )}
           </div>
@@ -635,6 +637,14 @@ export default function Home() {
           onClose={() => setSelectedInspectDelivery(null)}
           onUpdateStatus={handleUpdateStatus}
           onAssignOperator={handleAssignOperator}
+        />
+      )}
+
+      {showAuthModal && (
+        <AuthModal
+          isOpen={showAuthModal}
+          onClose={() => setShowAuthModal(false)}
+          onSuccess={loadData}
         />
       )}
     </main>

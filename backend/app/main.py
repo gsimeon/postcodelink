@@ -23,16 +23,29 @@ logger = logging.getLogger("uvicorn")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan context manager running startup database initialization and controlled seeding."""
-    logger.info("Initializing PostcodeLink Nigeria Database...")
-    Base.metadata.create_all(bind=engine)
+    """Lifespan context manager running startup database checks and controlled development seeding.
     
-    # Controlled seeding: only seed if explicitly enabled and not in production
-    if settings.SEED_DEMO_DATA and settings.ENVIRONMENT != "production":
-        try:
-            seed_database()
-        except Exception as e:
-            logger.warning(f"Database seed note: {e}")
+    Production Standard:
+    - In production, schema migrations are executed strictly via Alembic ('alembic upgrade head').
+    - Base.metadata.create_all() is disabled in production to eliminate competing schema authorities.
+    """
+    if settings.ENVIRONMENT == "production":
+        logger.info(
+            "Production environment: Skipping automatic DDL. Schema managed strictly via Alembic migrations ('alembic upgrade head')."
+        )
+        if settings.SEED_DEMO_DATA:
+            raise RuntimeError(
+                "Fatal Security Error: SEED_DEMO_DATA cannot be enabled in production environment."
+            )
+    else:
+        logger.info("Development/Test environment: Initializing local tables if not existing...")
+        Base.metadata.create_all(bind=engine)
+        if settings.SEED_DEMO_DATA:
+            try:
+                seed_database()
+            except Exception as e:
+                logger.warning(f"Database seed note: {e}")
+
     yield
     logger.info("Shutting down PostcodeLink API...")
 

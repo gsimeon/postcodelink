@@ -29,6 +29,7 @@ class PostcodeLookupResponse(BaseModel):
 
 class CleanseAddressRequest(BaseModel):
     address: str = Field(..., min_length=3)
+    area: Optional[str] = None
     state: Optional[str] = None
     postcode: Optional[str] = None
 
@@ -40,8 +41,12 @@ class CleanseAddressResponse(BaseModel):
     state: str
     lga: Optional[str] = None
     postcode: str
-    postcode_status: str  # verified | unverified | estimated | invalid
+    postcode_status: str  # verified | unverified | estimated | conflict | invalid
     confidence: float
+    # Explicit three-dimension validation
+    postcode_valid: bool = False
+    address_consistent: bool = False
+    dispatch_confidence: float = 0.0
     source: str
     matched_record: Optional[PostcodeRecordSchema] = None
     changes_made: List[str] = []

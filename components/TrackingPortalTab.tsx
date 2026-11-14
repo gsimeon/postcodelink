@@ -46,7 +46,9 @@ export function TrackingPortalTab({
   const [challengeError, setChallengeError] = useState("");
 
   const delivery = deliveries.find(
-    (d) => d.id.toLowerCase() === searchedRef.trim().toLowerCase()
+    (d) =>
+      d.id.toLowerCase() === searchedRef.trim().toLowerCase() ||
+      ((d as any).tracking_token && (d as any).tracking_token === searchedRef.trim())
   );
 
   const handleSearch = (e: React.FormEvent) => {

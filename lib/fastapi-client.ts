@@ -402,13 +402,36 @@ export const fastApiClient = {
     return await res.json();
   },
 
-  async cleanseAddress(address: string, state?: string, postcode?: string) {
+  async cleanseAddress(address: string, state?: string, area?: string, postcode?: string) {
     const res = await fetch(`${API_V1}/postcodes/cleanse`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ address, state, postcode }),
+      body: JSON.stringify({ address, state, area, postcode }),
     });
     if (!res.ok) throw new Error('Failed to cleanse address');
+    return await res.json();
+  },
+
+  async getTracking(trackingToken: string): Promise<FastAPIPublicTracking> {
+    const res = await fetch(`${API_V1}/deliveries/track/${encodeURIComponent(trackingToken)}`, {
+      cache: 'no-store',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Tracking record not found');
+    }
+    return await res.json();
+  },
+
+  async regenerateTrackingToken(deliveryId: string): Promise<FastAPIDelivery> {
+    const res = await fetch(`${API_V1}/deliveries/${encodeURIComponent(deliveryId)}/regenerate-token`, {
+      method: 'POST',
+      headers: getHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to regenerate tracking token');
+    }
     return await res.json();
   },
 };

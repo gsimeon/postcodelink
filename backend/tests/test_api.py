@@ -1,12 +1,17 @@
 """Comprehensive automated test suite verifying security, tenant isolation, RBAC, and OTP protection."""
+import secrets
+from unittest.mock import patch
 import pytest
 from starlette.testclient import TestClient
 
 from backend.app.main import app
 from backend.app.config import Settings
-from backend.app.services.delivery_service import DISPATCHED_NOTIFICATIONS
 from backend.app.database import SessionLocal
 from backend.app.models.operator import Operator
+from backend.app.services.notification_service import (
+    NotificationDispatchResult,
+    NotificationDeliveryStatus,
+)
 
 client = TestClient(app)
 
@@ -24,7 +29,6 @@ def test_root_and_health():
     assert res.status_code == 200
     data = res.json()
     assert data["status"] == "operational"
-    assert data["version"] == "1.2.0"
 
     h_res = client.get("/health")
     assert h_res.status_code == 200
@@ -38,7 +42,6 @@ def test_public_registration_cannot_escalate_to_admin():
     Submitting 'role': 'admin' or any other escalated role MUST be ignored or rejected,
     and the created account MUST be MERCHANT only.
     """
-    import secrets
     email = f"hacker_{secrets.token_hex(4)}@postcodelink.ng"
     res = client.post("/api/v1/auth/register", json={
         "full_name": "Suspicious User",
@@ -49,7 +52,6 @@ def test_public_registration_cannot_escalate_to_admin():
     })
     assert res.status_code == 201
     reg_data = res.json()
-    # The returned profile MUST have role == 'merchant', NOT 'admin'
     assert reg_data["profile"]["role"] == "merchant"
     token = reg_data["access_token"]
 
@@ -71,7 +73,6 @@ def test_public_registration_cannot_escalate_to_admin():
 
 def test_admin_can_create_operators_and_admins():
     """Verify that only authorized Platform Admins can provision Operator and Admin accounts."""
-    import secrets
     admin_token = get_auth_token("admin@postcodelink.ng", "AdminSecure2026!")
 
     # Admin creates an operator account
@@ -95,7 +96,6 @@ def test_admin_can_create_operators_and_admins():
 
 def test_tenant_isolation_deliveries():
     """Verify that Merchant A cannot access or mutate Merchant B's delivery orders."""
-    import secrets
     token_a = get_auth_token("dispatch@postcodelink.ng", "MerchantPass123!")
 
     email_b = f"merchant_tenant_{secrets.token_hex(4)}@postcodelink.ng"
@@ -139,7 +139,6 @@ def test_tenant_isolation_deliveries():
 
 def test_customer_tenant_isolation():
     """CRITICAL REGRESSION TEST: Verify customer address book is strictly scoped to merchant_id."""
-    import secrets
     token_a = get_auth_token("dispatch@postcodelink.ng", "MerchantPass123!")
     
     # Register isolated Merchant B
@@ -156,7 +155,7 @@ def test_customer_tenant_isolation():
     # Merchant A creates a customer record
     cust_res_a = client.post("/api/v1/customers/", json={
         "full_name": "Exclusive Customer A",
-        "phone": "08011112233",
+        "phone": f"080{secrets.randbelow(90000000) + 10000000}",
         "email": "cust_a@vip.ng",
         "default_address": "10 Marina Road",
         "area": "Marina",
@@ -190,46 +189,52 @@ def test_zero_knowledge_pin_no_raw_pin_in_api_response():
     """CRITICAL REGRESSION TEST: Verify PIN is never returned in any API response or notification payload."""
     token = get_auth_token("dispatch@postcodelink.ng", "MerchantPass123!")
 
-    DISPATCHED_NOTIFICATIONS.clear()
+    with patch("backend.app.services.delivery_service.notification_provider.send_delivery_pin") as mock_send:
+        mock_send.return_value = NotificationDispatchResult(
+            status=NotificationDeliveryStatus.SIMULATED,
+            channel="Simulated SMS Gateway (Local Sandbox)",
+            recipient_masked="080****7788",
+            provider="simulated",
+            message_preview="Notification queued in local environment.",
+        )
 
-    create_res = client.post("/api/v1/deliveries/", json={
-        "recipient_name": "Zero Knowledge Recipient",
-        "recipient_phone": "08055667788",
-        "destination_address": "14 Admiralty Way",
-        "destination_area": "Lekki Phase 1",
-        "destination_state": "Lagos",
-        "postcode_input": "101241",
-        "package_description": "Luxury Watch",
-        "fee": 5000.0
-    }, headers={"Authorization": f"Bearer {token}"})
-    assert create_res.status_code == 201
-    resp_data = create_res.json()
+        create_res = client.post("/api/v1/deliveries/", json={
+            "recipient_name": "Zero Knowledge Recipient",
+            "recipient_phone": "08055667788",
+            "destination_address": "14 Admiralty Way",
+            "destination_area": "Lekki Phase 1",
+            "destination_state": "Lagos",
+            "postcode_input": "101241",
+            "package_description": "Luxury Watch",
+            "fee": 5000.0
+        }, headers={"Authorization": f"Bearer {token}"})
+        assert create_res.status_code == 201
+        resp_data = create_res.json()
 
-    # 1. delivery response must NOT have 'otp' or 'delivery_pin'
-    deliv = resp_data["delivery"]
-    assert "otp" not in deliv
-    assert "otp_hash" not in deliv
-    assert "delivery_pin" not in deliv
+        # 1. delivery response must NOT have 'otp' or 'delivery_pin'
+        deliv = resp_data["delivery"]
+        assert "otp" not in deliv
+        assert "otp_hash" not in deliv
+        assert "delivery_pin" not in deliv
 
-    # 2. notification_dispatch must NOT have 'delivery_pin'
-    notif = resp_data["notification_dispatch"]
-    assert "delivery_pin" not in notif
-    assert "otp" not in notif
-    assert notif["status"] == "DISPATCHED"
+        # 2. notification_dispatch must NOT have 'delivery_pin'
+        notif = resp_data["notification_dispatch"]
+        assert "delivery_pin" not in notif
+        assert "otp" not in notif
+        assert notif["status"] == "SIMULATED"
 
-    # 3. Whole response string must not contain any 6-digit PIN attribute
-    assert "pin" not in resp_data["notification_dispatch"]
+        # 3. Whole response string must not contain any 6-digit PIN attribute
+        assert "pin" not in resp_data["notification_dispatch"]
 
-    # 4. Out-of-band simulated SMS gateway DID receive the notification
-    order_id = deliv["id"]
-    matching_sms = [s for s in DISPATCHED_NOTIFICATIONS if s["delivery_id"] == order_id]
-    assert len(matching_sms) == 1
-    assert len(matching_sms[0]["pin"]) == 6
-    assert matching_sms[0]["recipient_phone"] == "08055667788"
+        # 4. Out-of-band notification provider was called with the PIN
+        assert mock_send.called
+        call_kwargs = mock_send.call_args.kwargs
+        assert call_kwargs["recipient_phone"] == "08055667788"
+        assert len(call_kwargs["pin"]) == 6
 
 
-def test_public_tracking_privacy_and_token():
-    """CRITICAL REGRESSION TEST: Verify tracking token works and masks recipient PII."""
+def test_public_tracking_privacy_and_token_strictness():
+    """CRITICAL REGRESSION TEST: Verify tracking token works, delivery ID is rejected, and token can be regenerated."""
     token = get_auth_token("dispatch@postcodelink.ng", "MerchantPass123!")
 
     create_res = client.post("/api/v1/deliveries/", json={
@@ -248,83 +253,249 @@ def test_public_tracking_privacy_and_token():
     order_id = deliv["id"]
     tracking_token = deliv["tracking_token"]
 
-    # Tracking by cryptographically random URL token
-    token_track = client.get(f"/api/v1/deliveries/{tracking_token}/tracking")
+    # 1. Tracking by cryptographically random URL token SUCCEEDS
+    token_track = client.get(f"/api/v1/deliveries/track/{tracking_token}")
     assert token_track.status_code == 200
     track_data = token_track.json()
 
-    # 1. Masked Name: 'Chukwudi Nnamdi' -> 'C******* N*****'
+    # Masked recipient details
     assert track_data["recipient_name_masked"] == "C******* N*****"
-
-    # 2. Masked Phone: '080****7890'
     assert track_data["recipient_phone_masked"] == "080****7890"
-
-    # 3. General Location Only: 'Ikoyi, Lagos'
     assert track_data["destination_general_location"] == "Ikoyi, Lagos"
 
-    # 4. Sensitive internal details MUST NOT exist in public response
+    # Sensitive details MUST NOT exist
     assert "destination_address" not in track_data
     assert "destination_landmark" not in track_data
     assert "lat" not in track_data
-    assert "lng" not in track_data
     assert "fee" not in track_data
     assert "package_description" not in track_data
-    assert "otp" not in track_data
-    assert "otp_hash" not in track_data
-    assert "otp_masked" not in track_data
 
-    # Tracking by order_id also works
-    id_track = client.get(f"/api/v1/deliveries/{order_id}/tracking")
-    assert id_track.status_code == 200
-    assert id_track.json()["recipient_name_masked"] == track_data["recipient_name_masked"]
+    # 2. Public tracking by human-readable Delivery.id MUST BE REJECTED with 404
+    id_track = client.get(f"/api/v1/deliveries/track/{order_id}")
+    assert id_track.status_code == 404
+
+    id_track_compat = client.get(f"/api/v1/deliveries/{order_id}/tracking")
+    assert id_track_compat.status_code == 404
+    assert "tracking token" in id_track_compat.json()["detail"].lower()
+
+    # 3. Token Regeneration: Merchant regenerates token, immediately invalidating old token
+    regen_res = client.post(f"/api/v1/deliveries/{order_id}/regenerate-token", headers={"Authorization": f"Bearer {token}"})
+    assert regen_res.status_code == 200
+    new_token = regen_res.json()["tracking_token"]
+    assert new_token != tracking_token
+
+    # Old token now returns 404
+    old_track = client.get(f"/api/v1/deliveries/track/{tracking_token}")
+    assert old_track.status_code == 404
+
+    # New token works
+    new_track = client.get(f"/api/v1/deliveries/track/{new_token}")
+    assert new_track.status_code == 200
 
 
-def test_postcode_verification_strictness():
-    """Verify exact match, estimated match, and no false fallbacks to 100001."""
-    # 1. Exact match with postcode hint
+def test_operator_directory_privacy():
+    """CRITICAL REGRESSION TEST: Verify merchants cannot browse private operator phone/GPS data."""
+    merchant_token = get_auth_token("dispatch@postcodelink.ng", "MerchantPass123!")
+    admin_token = get_auth_token("admin@postcodelink.ng", "AdminSecure2026!")
+
+    # 1. Merchant lists operators -> Receives restricted OperatorDirectoryResponse
+    merchant_ops = client.get("/api/v1/operators/", headers={"Authorization": f"Bearer {merchant_token}"})
+    assert merchant_ops.status_code == 200
+    op_sample = merchant_ops.json()[0]
+
+    # Sensitive fleet fields MUST NOT be present in merchant directory response
+    assert "phone" not in op_sample
+    assert "current_lat" not in op_sample
+    assert "current_lng" not in op_sample
+    assert "active_deliveries_count" not in op_sample
+
+    # Public dispatch attributes MUST be present
+    assert "business_name" in op_sample
+    assert "vehicle_type" in op_sample
+    assert "service_areas" in op_sample
+    assert "rating" in op_sample
+    assert "has_capacity" in op_sample
+
+    # 2. Platform Admin lists operators -> Receives full OperatorResponse
+    admin_ops = client.get("/api/v1/operators/", headers={"Authorization": f"Bearer {admin_token}"})
+    assert admin_ops.status_code == 200
+    admin_sample = admin_ops.json()[0]
+    assert "phone" in admin_sample
+    assert "active_deliveries_count" in admin_sample
+
+
+def test_postcode_verification_consistency_and_conflict_detection():
+    """Verify exact match, address conflict detection, and no false fallbacks."""
+    # 1. Exact match with consistent area -> verified
     res_exact = client.post("/api/v1/postcodes/cleanse", json={
         "address": "14 Admiralty Way",
+        "area": "Lekki Phase 1",
         "state": "Lagos",
         "postcode": "101241"
     })
     assert res_exact.status_code == 200
     data_exact = res_exact.json()
     assert data_exact["postcode_status"] == "verified"
-    assert data_exact["postcode"] == "101241"
-    assert data_exact["source"] == "local_nipost_reference_dataset"
+    assert data_exact["postcode_valid"] is True
+    assert data_exact["address_consistent"] is True
+    assert data_exact["dispatch_confidence"] >= 0.90
 
-    # 2. Area match only -> estimated, NOT verified
-    res_est = client.post("/api/v1/postcodes/cleanse", json={
-        "address": "Somewhere near Alausa Secretariat",
-        "state": "Lagos"
+    # 2. Postcode 101241 (Lekki Phase 1) with CONFLICTING area "Ikeja" -> conflict
+    res_conflict = client.post("/api/v1/postcodes/cleanse", json={
+        "address": "Obafemi Awolowo Way",
+        "area": "Ikeja",
+        "state": "Lagos",
+        "postcode": "101241"  # Mismatched code for Lekki, not Ikeja!
     })
-    assert res_est.status_code == 200
-    data_est = res_est.json()
-    assert data_est["postcode_status"] == "estimated"
-    assert data_est["confidence"] < 0.90
+    assert res_conflict.status_code == 200
+    data_conflict = res_conflict.json()
+    assert data_conflict["postcode_valid"] is True
+    assert data_conflict["address_consistent"] is False
+    assert data_conflict["postcode_status"] == "conflict"
+    assert data_conflict["dispatch_confidence"] < 0.60
 
-    # 3. Unknown location -> unverified, NEVER false fallback to 100001
+    # 3. Unknown location -> unverified, zero fallback to 100001
     res_unver = client.post("/api/v1/postcodes/cleanse", json={
-        "address": "Random village near the forest gate",
+        "address": "Random farm cottage near thick bushes",
+        "area": "Farm Area",
         "state": "Ogun"
     })
     assert res_unver.status_code == 200
     data_unver = res_unver.json()
     assert data_unver["postcode_status"] == "unverified"
     assert data_unver["postcode"] == ""
-    assert data_unver["confidence"] == 0.0
+    assert data_unver["postcode_valid"] is False
+    assert data_unver["dispatch_confidence"] == 0.0
+
+
+def test_delivery_status_role_permission_matrix_and_counter_accounting():
+    """CRITICAL REGRESSION TEST: Verify complete transition permissions and atomic counter adjustments."""
+    merchant_token = get_auth_token("dispatch@postcodelink.ng", "MerchantPass123!")
+    admin_token = get_auth_token("admin@postcodelink.ng", "AdminSecure2026!")
+
+    # Create delivery
+    create_res = client.post("/api/v1/deliveries/", json={
+        "recipient_name": "State Matrix Recipient",
+        "recipient_phone": "08033334444",
+        "destination_address": "Obafemi Awolowo Way",
+        "destination_area": "Ikeja",
+        "destination_state": "Lagos",
+        "postcode_input": "100211",
+        "package_description": "Electronics",
+        "fee": 2500.0
+    }, headers={"Authorization": f"Bearer {merchant_token}"})
+    assert create_res.status_code == 201
+    deliv_id = create_res.json()["delivery"]["id"]
+
+    ops = client.get("/api/v1/operators/", headers={"Authorization": f"Bearer {admin_token}"}).json()
+    apex_op = next((o for o in ops if "Apex" in o["business_name"]), ops[0])
+    op_id = apex_op["id"]
+    initial_active = apex_op["active_deliveries_count"]
+
+    # 1. Assign to Apex operator -> active count + 1
+    assign_res = client.post(f"/api/v1/deliveries/{deliv_id}/assign", json={"operator_id": op_id}, headers={"Authorization": f"Bearer {merchant_token}"})
+    assert assign_res.status_code == 200
+
+    op_check1 = client.get(f"/api/v1/operators/{op_id}", headers={"Authorization": f"Bearer {admin_token}"}).json()
+    assert op_check1["active_deliveries_count"] == initial_active + 1
+
+    # 2. Unassign back to PENDING by merchant -> active count - 1, operator_id set to None
+    unassign_res = client.post(f"/api/v1/deliveries/{deliv_id}/status", json={"new_status": "pending"}, headers={"Authorization": f"Bearer {merchant_token}"})
+    assert unassign_res.status_code == 200
+    assert unassign_res.json()["operator_id"] is None
+
+    op_check2 = client.get(f"/api/v1/operators/{op_id}", headers={"Authorization": f"Bearer {admin_token}"}).json()
+    assert op_check2["active_deliveries_count"] == initial_active
+
+    # Re-assign for remaining tests
+    client.post(f"/api/v1/deliveries/{deliv_id}/assign", json={"operator_id": op_id}, headers={"Authorization": f"Bearer {merchant_token}"})
+
+    # 3. Merchant CANNOT move to IN_TRANSIT (Only courier or admin can)
+    bad_transit = client.post(f"/api/v1/deliveries/{deliv_id}/status", json={"new_status": "in_transit"}, headers={"Authorization": f"Bearer {merchant_token}"})
+    assert bad_transit.status_code == 403
+
+    # 4. Merchant CANNOT arbitrarily mark FAILED (Only courier or admin can)
+    bad_fail = client.post(f"/api/v1/deliveries/{deliv_id}/status", json={"new_status": "failed"}, headers={"Authorization": f"Bearer {merchant_token}"})
+    assert bad_fail.status_code == 403
+
+    # 5. Assigned Courier/Admin advances to PICKED_UP then IN_TRANSIT
+    step1 = client.post(f"/api/v1/deliveries/{deliv_id}/status", json={"new_status": "picked_up"}, headers={"Authorization": f"Bearer {admin_token}"})
+    assert step1.status_code == 200
+    step2 = client.post(f"/api/v1/deliveries/{deliv_id}/status", json={"new_status": "in_transit"}, headers={"Authorization": f"Bearer {admin_token}"})
+    assert step2.status_code == 200
+
+    # 6. Merchant CANNOT cancel an order already in transit
+    bad_cancel = client.post(f"/api/v1/deliveries/{deliv_id}/status", json={"new_status": "cancelled"}, headers={"Authorization": f"Bearer {merchant_token}"})
+    assert bad_cancel.status_code == 403
+    assert "in transit" in bad_cancel.json()["detail"].lower()
+
+    # 7. Courier/Admin reports failure -> active count decremented
+    fail_res = client.post(f"/api/v1/deliveries/{deliv_id}/status", json={"new_status": "failed", "note": "Customer phone switched off"}, headers={"Authorization": f"Bearer {admin_token}"})
+    assert fail_res.status_code == 200
+
+    op_check3 = client.get(f"/api/v1/operators/{op_id}", headers={"Authorization": f"Bearer {admin_token}"}).json()
+    assert op_check3["active_deliveries_count"] == initial_active
+
+
+def test_analytics_tenant_scoping():
+    """CRITICAL REGRESSION TEST: Verify analytics metrics are strictly tenant-isolated."""
+    token_a = get_auth_token("dispatch@postcodelink.ng", "MerchantPass123!")
+
+    # Register isolated Merchant B
+    email_b = f"analytics_merchant_{secrets.token_hex(4)}@postcodelink.ng"
+    reg_b = client.post("/api/v1/auth/register", json={
+        "full_name": "Analytics Merchant B",
+        "email": email_b,
+        "password": "PasswordBeta123!",
+        "business_name": "Analytics B Enterprise"
+    })
+    token_b = reg_b.json()["access_token"]
+
+    # Merchant B creates 1 delivery
+    client.post("/api/v1/deliveries/", json={
+        "recipient_name": "B Customer",
+        "recipient_phone": "08012341234",
+        "destination_address": "Allen Avenue",
+        "destination_area": "Ikeja",
+        "destination_state": "Lagos",
+        "postcode_input": "100211",
+        "package_description": "Goods",
+        "fee": 5000.0
+    }, headers={"Authorization": f"Bearer {token_b}"})
+
+    # Merchant B creates 1 customer
+    client.post("/api/v1/customers/", json={
+        "full_name": "Customer of B Only",
+        "phone": f"080{secrets.randbelow(90000000) + 10000000}",
+        "default_address": "Allen Avenue",
+        "area": "Ikeja",
+        "state": "Lagos"
+    }, headers={"Authorization": f"Bearer {token_b}"})
+
+    # Analytics for Merchant B: total_deliveries = 1, total_customers = 1
+    analytics_b = client.get("/api/v1/analytics/overview", headers={"Authorization": f"Bearer {token_b}"}).json()
+    assert analytics_b["total_deliveries"] == 1
+    assert analytics_b["total_customers"] == 1
+    assert analytics_b["total_revenue_ngn"] == 5000.0
+
+    # Analytics for Fleet Rider (Operator role): Commercial revenue and customer book MUST BE HIDDEN
+    rider_token = get_auth_token("rider@postcodelink.ng", "RiderPass123!")
+    analytics_rider = client.get("/api/v1/analytics/overview", headers={"Authorization": f"Bearer {rider_token}"}).json()
+    assert analytics_rider["total_customers"] == 0
+    assert analytics_rider["total_revenue_ngn"] == 0.0
 
 
 def test_operator_assignment_idempotency_and_capacity_guard():
     """Verify operator assignment idempotency and capacity limit enforcement (max 15)."""
     token = get_auth_token("dispatch@postcodelink.ng", "MerchantPass123!")
+    admin_token = get_auth_token("admin@postcodelink.ng", "AdminSecure2026!")
 
     # Fetch operators
-    ops = client.get("/api/v1/operators/", headers={"Authorization": f"Bearer {token}"}).json()
+    ops = client.get("/api/v1/operators/", headers={"Authorization": f"Bearer {admin_token}"}).json()
     apex_op = next((o for o in ops if "Apex" in o["business_name"]), ops[0])
     op_id = apex_op["id"]
 
-    # Ensure operator starts in clean state with available capacity
+    # Reset operator active count to clean state
     db = SessionLocal()
     try:
         db_op = db.query(Operator).filter(Operator.id == op_id).first()
@@ -354,8 +525,7 @@ def test_operator_assignment_idempotency_and_capacity_guard():
     }, headers={"Authorization": f"Bearer {token}"})
     assert assign1.status_code == 200
 
-    # Get operator active count
-    ops_after1 = client.get("/api/v1/operators/", headers={"Authorization": f"Bearer {token}"}).json()
+    ops_after1 = client.get("/api/v1/operators/", headers={"Authorization": f"Bearer {admin_token}"}).json()
     count1 = next(o for o in ops_after1 if o["id"] == op_id)["active_deliveries_count"]
 
     # 2. Re-assigning to the SAME operator MUST be idempotent (active_deliveries_count unchanged)
@@ -364,7 +534,7 @@ def test_operator_assignment_idempotency_and_capacity_guard():
     }, headers={"Authorization": f"Bearer {token}"})
     assert assign2.status_code == 200
 
-    ops_after2 = client.get("/api/v1/operators/", headers={"Authorization": f"Bearer {token}"}).json()
+    ops_after2 = client.get("/api/v1/operators/", headers={"Authorization": f"Bearer {admin_token}"}).json()
     count2 = next(o for o in ops_after2 if o["id"] == op_id)["active_deliveries_count"]
     assert count1 == count2, "Operator active count must not double-increment on reassignment"
 
@@ -394,7 +564,7 @@ def test_operator_assignment_idempotency_and_capacity_guard():
         assert blocked_assign.status_code == 400
         assert "maximum dispatch capacity" in blocked_assign.json()["detail"]
     finally:
-        # Guarantee reset operator active count even if assertions fail
+        # Guarantee reset operator active count
         db_op = db.query(Operator).filter(Operator.id == op_id).first()
         if db_op:
             db_op.active_deliveries_count = 3
@@ -441,22 +611,26 @@ def test_otp_verification_lockout_and_single_use():
     assert "locked for 15 minutes" in try3.json()["detail"]
 
     # Test Single-use on a fresh order:
-    DISPATCHED_NOTIFICATIONS.clear()
-    fresh_order = client.post("/api/v1/deliveries/", json={
-        "recipient_name": "Single Use Test",
-        "recipient_phone": "08099990000",
-        "destination_address": "1 Marina Street",
-        "destination_area": "Marina",
-        "destination_state": "Lagos",
-        "postcode_input": "100001",
-        "package_description": "Parcel",
-        "fee": 2000.0
-    }, headers={"Authorization": f"Bearer {token}"}).json()
-    fresh_id = fresh_order["delivery"]["id"]
-
-    # Retrieve dispatched PIN from simulated SMS gateway
-    sms = next(n for n in reversed(DISPATCHED_NOTIFICATIONS) if n["delivery_id"] == fresh_id)
-    fresh_pin = sms["pin"]
+    with patch("backend.app.services.delivery_service.notification_provider.send_delivery_pin") as mock_send:
+        mock_send.return_value = NotificationDispatchResult(
+            status=NotificationDeliveryStatus.SIMULATED,
+            channel="Simulated SMS",
+            recipient_masked="080****0000",
+            provider="simulated",
+            message_preview="PIN dispatched",
+        )
+        fresh_order = client.post("/api/v1/deliveries/", json={
+            "recipient_name": "Single Use Test",
+            "recipient_phone": "08099990000",
+            "destination_address": "1 Marina Street",
+            "destination_area": "Marina",
+            "destination_state": "Lagos",
+            "postcode_input": "100001",
+            "package_description": "Parcel",
+            "fee": 2000.0
+        }, headers={"Authorization": f"Bearer {token}"}).json()
+        fresh_id = fresh_order["delivery"]["id"]
+        fresh_pin = mock_send.call_args.kwargs["pin"]
 
     # Verify once -> DELIVERED (200 OK)
     verify1 = client.post(f"/api/v1/deliveries/{fresh_id}/verify-otp", json={

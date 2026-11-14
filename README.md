@@ -6,43 +6,62 @@ PostcodeLink bridges the gap between customer addresses (often described with in
 
 ---
 
-## Architecture & Security Hardening (v1.2.0 Production Standard)
+## Architecture & Security Hardening (v1.3.0 Release Gate Standard)
 
-Following an in-depth security and architectural audit of the FastAPI backend and Next.js frontend, the platform has completed enterprise-grade hardening:
+Following an in-depth security and architectural audit of the FastAPI backend and Next.js frontend, the platform has completed enterprise-grade hardening covering all Release Gate requirements:
 
 ### 1. P0 — Authentication & Privilege Escalation Immunity
 - **Public Registration Role Lockdown**: Public registration (`POST /api/v1/auth/register`) strictly sets account role to `merchant`. Client-supplied role attributes are discarded.
+- **Interactive Auth Flow**: Replaced demo one-click credentials with an interactive `AuthModal` supporting both registration and credential login with JWT storage.
 - **Controlled Account Provisioning**: Operator couriers and additional platform administrators can only be provisioned by authenticated Platform Admins via `POST /api/v1/auth/admin/create-user`.
-- **Production Secret Guard**: In `production` environments, the API refuses startup if `SECRET_KEY` is missing, default, or shorter than 32 characters.
+- **Production Secret & Migration Guard**: In `production` environments, the API refuses startup if `SECRET_KEY` is missing, default, or shorter than 32 characters. `Base.metadata.create_all` is disabled in production to guarantee Alembic migration integrity.
 
-### 2. P0 — Complete Multi-Tenant Isolation
+### 2. P0 — Complete Multi-Tenant Isolation & Analytics Scoping
 - **Customer Directory Isolation**: Customer records are strictly scoped by `merchant_id` with a database-level composite unique constraint `(merchant_id, phone)`. Merchants can only list, read, or delete recipient entries belonging to their account.
 - **Delivery Order Isolation**: Merchants are prevented from viewing or modifying orders belonging to other merchants. Courier operators only access deliveries dispatched to their specific fleet.
-- **No Hardcoded Client Credentials**: Next.js client authentication uses explicit session tokens without silent hardcoded demo merchant fallbacks.
+- **Tenant-Scoped Analytics**: Merchant analytics only aggregate deliveries and unique customer records owned by the authenticated merchant. Operator analytics are strictly filtered to assigned orders and completely withhold merchant commercial revenue figures.
 
-### 3. P0 — Zero-Knowledge Delivery PIN (OTP) & Out-of-Band Dispatch
-- **Zero-Knowledge API Boundary**: The plaintext 6-digit confirmation PIN is **never** returned in any HTTP response payload—not in delivery creation, order detail, status logs, or notification preview payloads.
-- **Out-of-Band SMS / WhatsApp Dispatch**: The generated PIN is dispatched exclusively to the simulated or live SMS/WhatsApp gateway (`dispatch_outbound_notification`) directly to the recipient's phone number.
+### 3. P0 — Zero-Knowledge Delivery PIN Privacy & Pluggable Notification Outbox
+- **Zero-Knowledge API Boundary**: The plaintext confirmation PIN is **never** returned in any API response payload—not in delivery creation, order detail, status logs, or notification preview payloads.
+- **No In-Memory or Log Retention**: Removed in-memory notification lists and eliminated PIN logging in application logs. Phone numbers are strictly masked (`080****7890`) in all server log outputs.
+- **Pluggable Notification Adapter**: Implemented `notification_service.py` with provider abstraction supporting:
+  - `TermiiNotificationProvider` (Nigerian SMS/WhatsApp routes)
+  - `TwilioNotificationProvider` (Global SMS)
+  - `SimulatedNotificationProvider` (Local development mock)
+- **Accurate Outbox Status Reporting**: Dispatches report accurate states (`SIMULATED`, `SENT`, `QUEUED`, `FAILED`) rather than claiming artificial delivery.
 - **Cryptographic Storage & Single-Use Revocation**: Stored using SHA-256 with order-specific salt. Upon successful delivery confirmation, the hash is immediately overwritten with `REVOKED_AND_VERIFIED`, preventing replay attacks.
 - **Concurrency-Safe Lockout**: Verifications acquire row-level locks (`with_for_update()`). Brute-force protection limits failed attempts to 3, after which a 15-minute lockout is enforced.
 
-### 4. P0 — Privacy-Preserving Public Tracking Portal
-- **Tokenized URL Access**: Public tracking routes accept cryptographically random URL tokens (`tracking_token`) or delivery IDs.
+### 4. P0 — Privacy-Preserving Token-Only Public Tracking Portal
+- **Strict Cryptographic Token Enforceability**: The public tracking endpoint (`GET /api/v1/deliveries/track/{tracking_token}`) strictly enforces 32-byte cryptographic hex tokens. Attempting to query with human-readable delivery IDs (`PL-...`) returns HTTP 404 to block sequential enumeration and scraping.
+- **Token Revocation & Regeneration**: Merchants and administrators can revoke leaked tracking links and generate fresh tokens via `POST /api/v1/deliveries/{id}/regenerate-token`.
 - **PII Masking**: Recipient names (`C******* N*****`) and phone numbers (`080****7890`) are masked on public views.
 - **Internal Data Shielding**: Exact street addresses, landmarks, GPS coordinates, fulfillment fees, package descriptions, and internal rider/admin audit notes are withheld from unauthenticated tracking responses.
 
-### 5. P0 — Centralized Strict Postcode Verification
-- **No False Positives or Fallbacks**: Normalized through `cleanse_address`. An address is marked `verified` only when an exact 6-digit code matches the reference registry.
-- **Estimated vs Unverified**: Area-only matches receive `estimated` status (never `verified`). Unknown addresses receive `unverified` and empty postcodes with **zero fallback to 100001**.
+### 5. P0 — Operator Fleet Privacy & Telemetry Masking
+- **Restricted Merchant Directory View**: When merchants list or inspect fleet couriers, sensitive driver contact details (phone numbers, full names), exact real-time GPS coordinates, and internal active delivery counts are redacted via `OperatorDirectoryResponse`. Merchants only receive `has_capacity: bool` and public vehicle metadata.
+- **Full Telemetry for Admins Only**: Unrestricted fleet contact details, GPS tracking coordinates, and active workload counts are strictly reserved for Platform Administrators (`OperatorResponse`).
+- **Contextual Courier Contact on Assigned Orders**: Once an order is assigned, only the assigned operator's contact is exposed to the merchant strictly on that specific delivery record (`OperatorAssignedResponse`).
 
-### 6. Operational Fleet Guards & Lifecycle State Machine
-- **Assignment Idempotency**: Reassigning an order to the same operator is idempotent and does not double-count active delivery quotas.
-- **Operator Capacity Guard**: Assignments are rejected with HTTP 400 if an operator reaches the maximum active dispatch capacity (15 active orders).
-- **Role-Enforced Status Transitions**: Order status progression (`PICKED_UP`, `IN_TRANSIT`, `OUT_FOR_DELIVERY`) requires assigned operator or admin credentials; cancellations require merchant ownership or admin authority. Terminal states (`DELIVERED`, `CANCELLED`) reject modifications. Optimistic locking is enforced via the `version` column.
+### 6. P0 — Centralized Postcode Verification, Area Consistency & Provenance
+- **NIPOST Reference Provenance**: Documented and verified against the official Nigerian Postal Service standard (NIPOST National Postcode Directory Edition v2024.1).
+- **Multi-Factor Consistency Checks**: Address cleansing (`cleanse_address`) accepts `area_hint` and returns `postcode_valid`, `address_consistent`, and `dispatch_confidence`.
+- **Conflict Detection**: If a valid postcode is paired with a conflicting administrative zone (e.g., Lekki postcode with an Ikeja area), the engine flags it as `conflict` and lowers confidence below 0.60, preventing false `verified` status badges.
+- **No False Positives or Fallbacks**: Area-only matches receive `estimated` status (never `verified`). Unknown addresses receive `unverified` and empty postcodes with **zero fallback to 100001**.
 
-### 7. Database Migrations via Alembic
-- Integrated Alembic migrations in `backend/alembic/` supporting SQLite for development and PostgreSQL for production.
-- Initial baseline migration `1789ba72611e` version-controls all relational schemas, indexes, and constraints.
+### 7. P0 — Complete Role-Transition Matrix & Operator Workload Accounting
+- **Role Permission Enforcement**:
+  - `PENDING` (Unassignment): Only merchant owner or admin can unassign a courier back to pending.
+  - `PICKED_UP`, `IN_TRANSIT`, `OUT_FOR_DELIVERY`: Strictly assigned courier or platform admin.
+  - `FAILED`: Strictly assigned courier or platform admin.
+  - `CANCELLED`: Deliveries in transit can only be cancelled by platform administrators; pending/assigned deliveries can be cancelled by merchant owner or admin.
+  - `DELIVERED`: Terminal status achievable strictly through the recipient PIN verification endpoint.
+- **Atomic Counter Accounting**: Operator `active_deliveries_count` is decremented atomically with row-level locks whenever an order is unassigned back to `PENDING`, marked `FAILED`, `CANCELLED`, or successfully `DELIVERED`.
+
+### 8. Continuous Integration & Automated Testing Pipeline
+- **GitHub Actions Workflow**: Added `.github/workflows/ci.yml` running automated tests on every push and pull request to `main`:
+  - Python 3.12 environment with Alembic migrations, PostgreSQL readiness check, and 14/14 passing Pytest integration/security tests.
+  - Node.js 22 environment with 6/6 passing unit tests and a verified Next.js 15 production build (`next build`).
 
 ---
 
@@ -175,13 +194,14 @@ All state modifications are enforced server-side by the lifecycle state machine:
   - `GET /` — API root, service status, version info.
   - `GET /health` — Verifies database engine and connection health.
 - **Deliveries**:
-  - `POST /api/v1/deliveries/` — Create new delivery with automated NIPOST verification.
-  - `GET /api/v1/deliveries/` — List deliveries (with search and status filters).
+  - `POST /api/v1/deliveries/` — Create new delivery with automated NIPOST verification and outbox PIN dispatch.
+  - `GET /api/v1/deliveries/` — List deliveries (scoped to authenticated merchant/courier).
   - `GET /api/v1/deliveries/{id}` — Full merchant/operator delivery details.
-  - `GET /api/v1/deliveries/{id}/tracking` — Public recipient tracking view with masked PIN.
-  - `POST /api/v1/deliveries/{id}/assign` — Assign courier fleet operator.
-  - `POST /api/v1/deliveries/{id}/status` — Advance lifecycle status with state machine validation.
-  - `POST /api/v1/deliveries/{id}/verify-otp` — Verify recipient PIN and confirm delivery.
+  - `GET /api/v1/deliveries/track/{tracking_token}` — Strict token-only public recipient tracking portal.
+  - `POST /api/v1/deliveries/{id}/regenerate-token` — Regenerate and revoke public tracking URL token.
+  - `POST /api/v1/deliveries/{id}/assign` — Assign courier fleet operator with capacity check.
+  - `POST /api/v1/deliveries/{id}/status` — Advance lifecycle status with complete role permission matrix.
+  - `POST /api/v1/deliveries/{id}/verify-otp` — Verify recipient PIN and confirm delivery (single-use revocation).
 - **Postcodes & Address Cleanser**:
   - `GET /api/v1/postcodes/lookup` — Search official postcodes by area, state, or 6-digit code.
   - `POST /api/v1/postcodes/cleanse` — Normalize and standardize messy addresses against postal records.
@@ -250,7 +270,7 @@ Interactive OpenAPI documentation is live at **`http://127.0.0.1:8000/docs`** an
    # Or: backend/venv/Scripts/python -m backend.app.seed
    ```
 
-3. Run FastAPI automated security & API test suite (11/11 tests passing):
+3. Run FastAPI automated security & API test suite (14/14 tests passing):
    ```bash
    npm run backend:test
    # Or: backend/venv/Scripts/python -m pytest backend/tests -v

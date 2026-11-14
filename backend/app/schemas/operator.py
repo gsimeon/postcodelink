@@ -29,6 +29,34 @@ class OperatorUpdate(BaseModel):
     current_lng: Optional[float] = None
 
 
+class OperatorDirectoryResponse(BaseModel):
+    """Restricted operator directory for merchant dispatch views.
+    
+    Protects fleet privacy: omits personal telephone numbers, exact GPS coordinates,
+    and internal delivery counters.
+    """
+    id: str
+    business_name: str
+    vehicle_type: VehicleType
+    service_areas: List[str] = Field(default_factory=list)
+    is_available: bool
+    rating: float
+    has_capacity: bool = True
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OperatorAssignedResponse(BaseModel):
+    """Operator details revealed to a merchant only after delivery assignment."""
+    id: str
+    business_name: str
+    phone: str
+    vehicle_type: VehicleType
+    rating: float
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class OperatorResponse(OperatorBase):
     id: str
     profile_id: Optional[str] = None

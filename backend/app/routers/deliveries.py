@@ -24,6 +24,7 @@ from backend.app.services.delivery_service import (
     update_delivery_status,
     verify_delivery_otp,
     get_public_tracking,
+    regenerate_tracking_token,
 )
 from backend.app.core.auth_deps import get_current_user, require_roles
 
@@ -114,13 +115,33 @@ def api_get_delivery(
     return delivery
 
 
-@router.get("/{identifier}/tracking", response_model=DeliveryPublicTrackingResponse)
-def api_get_tracking(identifier: str, db: Session = Depends(get_db)):
-    """Public customer tracking portal endpoint by delivery ID or tracking token.
+@router.get("/track/{tracking_token}", response_model=DeliveryPublicTrackingResponse)
+def api_get_public_tracking(tracking_token: str, db: Session = Depends(get_db)):
+    """Public customer tracking portal endpoint strictly by 32-character tracking token.
     
     Protects privacy: masks name and phone, hides exact street address and coordinates.
+    Rejects predictable delivery references.
+    """
+    return get_public_tracking(db, tracking_token)
+
+
+@router.get("/{identifier}/tracking", response_model=DeliveryPublicTrackingResponse)
+def api_get_tracking(identifier: str, db: Session = Depends(get_db)):
+    """Public customer tracking portal endpoint by tracking token.
+    
+    Note: Requires the cryptographically secure tracking token. Human-readable delivery IDs are rejected.
     """
     return get_public_tracking(db, identifier)
+
+
+@router.post("/{delivery_id}/regenerate-token", response_model=DeliveryResponse)
+def api_regenerate_tracking_token(
+    delivery_id: str,
+    current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
+    db: Session = Depends(get_db),
+):
+    """Regenerate public tracking URL token, immediately revoking the previous tracking link."""
+    return regenerate_tracking_token(db, delivery_id, current_user)
 
 
 @router.post("/{delivery_id}/assign", response_model=DeliveryResponse)

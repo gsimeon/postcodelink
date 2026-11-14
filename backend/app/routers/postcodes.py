@@ -37,6 +37,7 @@ def api_cleanse_address(request: CleanseAddressRequest, db: Session = Depends(ge
     return cleanse_address(
         address=request.address,
         state_hint=request.state,
+        area_hint=request.area,
         postcode_hint=request.postcode,
         db=db,
     )

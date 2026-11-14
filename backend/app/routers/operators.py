@@ -1,25 +1,57 @@
-"""Operators / Courier fleets router with RBAC."""
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+"""Operators / Courier fleets router with RBAC and fleet data privacy."""
+from typing import List, Union, Optional
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 
 from backend.app.database import get_db
 from backend.app.models.operator import Operator
 from backend.app.models.profile import Profile
 from backend.app.models.enums import AppRole
-from backend.app.schemas.operator import OperatorCreate, OperatorUpdate, OperatorResponse
+from backend.app.schemas.operator import (
+    OperatorCreate,
+    OperatorUpdate,
+    OperatorResponse,
+    OperatorDirectoryResponse,
+)
 from backend.app.core.auth_deps import get_current_user, require_roles
 
 router = APIRouter(prefix="/operators", tags=["operators"])
 
 
-@router.get("/", response_model=List[OperatorResponse])
+@router.get("/", response_model=Union[List[OperatorResponse], List[OperatorDirectoryResponse]])
 def api_list_operators(
+    available_only: bool = Query(False),
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """List all registered logistics operators."""
-    return db.query(Operator).order_by(Operator.completed_deliveries.desc()).all()
+    """List logistics operators.
+    
+    - Admins: Receive full fleet management telemetry (phone, GPS, active workloads).
+    - Merchants: Receive privacy-preserved dispatch directory (business name, rating, vehicle, service zones).
+    """
+    query = db.query(Operator)
+    if available_only:
+        query = query.filter(Operator.is_available == True)
+
+    operators = query.order_by(Operator.completed_deliveries.desc()).all()
+
+    if current_user.role == AppRole.ADMIN:
+        return operators
+
+    # Return privacy-preserved directory for merchants and other users
+    directory = [
+        OperatorDirectoryResponse(
+            id=op.id,
+            business_name=op.business_name,
+            vehicle_type=op.vehicle_type,
+            service_areas=op.service_areas or [],
+            is_available=op.is_available,
+            rating=op.rating,
+            has_capacity=(op.active_deliveries_count < 15),
+        )
+        for op in operators
+    ]
+    return directory
 
 
 @router.post("/", response_model=OperatorResponse, status_code=status.HTTP_201_CREATED)
@@ -45,17 +77,29 @@ def api_create_operator(
     return op
 
 
-@router.get("/{operator_id}", response_model=OperatorResponse)
+@router.get("/{operator_id}", response_model=Union[OperatorResponse, OperatorDirectoryResponse])
 def api_get_operator(
     operator_id: str,
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get single operator details."""
+    """Get single operator details. Full details for Admin or fleet owner; directory view for merchants."""
     op = db.query(Operator).filter(Operator.id == operator_id).first()
     if not op:
         raise HTTPException(status_code=404, detail="Operator not found.")
-    return op
+
+    if current_user.role == AppRole.ADMIN or op.profile_id == current_user.id:
+        return op
+
+    return OperatorDirectoryResponse(
+        id=op.id,
+        business_name=op.business_name,
+        vehicle_type=op.vehicle_type,
+        service_areas=op.service_areas or [],
+        is_available=op.is_available,
+        rating=op.rating,
+        has_capacity=(op.active_deliveries_count < 15),
+    )
 
 
 @router.patch("/{operator_id}", response_model=OperatorResponse)
