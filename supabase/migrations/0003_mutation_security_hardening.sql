@@ -185,7 +185,7 @@ begin
 
   return new;
 end;
-$;
+$$;
 
 drop trigger if exists operators_guard_mutation on public.operators;
 create trigger operators_guard_mutation
