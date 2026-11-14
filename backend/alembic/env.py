@@ -20,6 +20,7 @@ from backend.app.models.delivery_event import DeliveryEvent
 from backend.app.models.postcode import PostcodeDirectory
 from backend.app.models.notification_outbox import NotificationOutbox
 from backend.app.models.login_attempt import LoginAttempt
+from backend.app.models.api_key import ApiKey
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

@@ -1,7 +1,7 @@
 """Application configuration using Pydantic Settings."""
 import os
 import secrets
-from typing import List
+from typing import List, Any, Optional
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -27,15 +27,32 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
     
+    # Outbox Payload Cryptography: Dedicated authenticated encryption key (distinct from SECRET_KEY)
+    OUTBOX_ENCRYPTION_KEY: str = os.getenv(
+        "OUTBOX_ENCRYPTION_KEY",
+        "postcodelink_dev_outbox_enc_key_" + secrets.token_hex(16)
+    )
+    OUTBOX_PREVIOUS_ENCRYPTION_KEYS: Optional[str] = os.getenv("OUTBOX_PREVIOUS_ENCRYPTION_KEYS", None)
+    
+    # Process Role: Segregate HTTP serving ("api") from background dispatch ("worker") or unified ("all_in_one")
+    PROCESS_ROLE: str = os.getenv("PROCESS_ROLE", "api")
+    
     # Delivery PIN / OTP Security
     OTP_MAX_ATTEMPTS: int = 3
     OTP_LOCKOUT_MINUTES: int = 15
     OTP_EXPIRE_HOURS: int = 24
     
-    # Seeding & External Integrations: SEED_DEMO_DATA defaults to True in dev only
-    SEED_DEMO_DATA: bool = os.getenv("SEED_DEMO_DATA", "false").lower() in ("true", "1") or (os.getenv("ENVIRONMENT", "development") == "development")
-    NIPOST_API_KEY: str = ""
-    NIPOST_API_URL: str = ""
+    # Seeding & External Integrations
+    # SEED_DEMO_DATA seeds the reference postcode dataset in development (strictly forbidden in production)
+    # SEED_DEMO_ACCOUNTS seeds default merchant/admin/operator profiles (strictly forbidden in production)
+    SEED_DEMO_DATA: bool = False
+    SEED_DEMO_ACCOUNTS: bool = False
+    
+    # Official NIPOST API Gateway Integration
+    NIPOST_API_BASE_URL: str = os.getenv("NIPOST_API_BASE_URL", os.getenv("NIPOST_API_URL", ""))
+    NIPOST_API_URL: str = os.getenv("NIPOST_API_URL", os.getenv("NIPOST_API_BASE_URL", ""))
+    NIPOST_API_KEY: str = os.getenv("NIPOST_API_KEY", "")
+    NIPOST_TIMEOUT_SECONDS: float = 5.0
 
     # Trusted Proxies for Rate Limiting & Real IP extraction
     # Requests from IPs outside TRUSTED_PROXIES have X-Forwarded-For ignored to block spoofing
@@ -62,13 +79,28 @@ class Settings(BaseSettings):
     OUTBOX_WORKER_INTERVAL_SECONDS: int = 5
     OUTBOX_LEASE_TIMEOUT_MINUTES: int = 5
 
+    @model_validator(mode="before")
+    @classmethod
+    def set_environment_defaults(cls, data: Any) -> Any:
+        """Default SEED_DEMO_DATA to True in non-production environments unless explicitly overridden."""
+        if isinstance(data, dict):
+            env = data.get("ENVIRONMENT") or os.getenv("ENVIRONMENT", "development")
+            if env != "production" and "SEED_DEMO_DATA" not in data:
+                data["SEED_DEMO_DATA"] = True
+        return data
+
     @model_validator(mode="after")
     def validate_production_security(self):
-        """Reject startup if running in production with weak secret, simulated provider, or disabled worker."""
+        """Reject startup if running in production with weak secrets, simulated provider, or insecure defaults."""
         if self.ENVIRONMENT == "production":
             raw_secret = self.SECRET_KEY
             if not raw_secret or len(raw_secret) < 32 or raw_secret.startswith("postcodelink_dev"):
                 raise ValueError("Fatal Security Error: In production, SECRET_KEY must be set to a strong secret (at least 32 characters).")
+
+            # Process role validation
+            role = (self.PROCESS_ROLE or "").strip().lower()
+            if role not in ["api", "worker", "all_in_one"]:
+                raise ValueError(f"Fatal Production Configuration Error: PROCESS_ROLE must be 'api', 'worker', or 'all_in_one', got '{self.PROCESS_ROLE}'.")
 
             # Production SMS Gateway validation
             provider = (self.SMS_PROVIDER or "").strip().lower()
@@ -86,6 +118,21 @@ class Settings(BaseSettings):
             # Worker validation
             if not self.OUTBOX_WORKER_ENABLED:
                 raise ValueError("Fatal Production Configuration Error: OUTBOX_WORKER_ENABLED must be true in production to ensure durable delivery notification dispatch.")
+
+            # Dedicated outbox encryption key validation
+            raw_outbox_key = self.OUTBOX_ENCRYPTION_KEY
+            if not raw_outbox_key or len(raw_outbox_key) < 32 or raw_outbox_key.startswith("postcodelink_dev"):
+                raise ValueError("Fatal Security Error: In production, OUTBOX_ENCRYPTION_KEY must be set to a dedicated strong secret (at least 32 characters).")
+
+            if raw_outbox_key == raw_secret:
+                raise ValueError("Fatal Security Error: OUTBOX_ENCRYPTION_KEY must be distinct from SECRET_KEY to ensure cryptographic domain separation.")
+
+            # Demo account seeding is strictly forbidden in production
+            if self.SEED_DEMO_ACCOUNTS:
+                raise ValueError("Fatal Security Error: SEED_DEMO_ACCOUNTS cannot be enabled in production environment.")
+
+            if self.SEED_DEMO_DATA:
+                raise ValueError("Fatal Security Error: SEED_DEMO_DATA cannot be enabled in production environment.")
 
         return self
 

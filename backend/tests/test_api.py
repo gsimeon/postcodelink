@@ -728,10 +728,11 @@ def test_production_config_secret_guard():
             SECRET_KEY="postcodelink_dev_secret_key_12345"
         )
 
-    # Valid secret, provider, credentials, and worker in production passes
+    # Valid secret, provider, credentials, outbox key, and worker in production passes
     valid_prod_settings = Settings(
         ENVIRONMENT="production",
         SECRET_KEY="a_very_strong_production_secret_key_that_is_at_least_32_chars_long",
+        OUTBOX_ENCRYPTION_KEY="another_very_strong_production_outbox_key_32_chars!",
         SMS_PROVIDER="termii",
         TERMII_API_KEY="valid_termii_api_key_test_12345",
         OUTBOX_WORKER_ENABLED=True,

@@ -1,69 +1,77 @@
-# PostcodeLink Nigeria — Delivery Operations & Digital Postcode Platform
+# PostcodeLink Nigeria — Delivery Operations & National Digital Postcode Platform
 
-A modern Next.js 15 delivery operations and address disambiguation platform tailored for Nigerian e-commerce merchants, last-mile logistics riders, and courier operators.
+A modern Next.js 15 delivery operations, out-of-band notification, and national address disambiguation platform tailored for Nigerian e-commerce merchants, last-mile logistics riders, and courier operators.
 
-PostcodeLink bridges the gap between customer addresses (often described with informal landmarks) and official **NIPOST (Nigerian Postal Service)** 6-digit digital postal codes to eliminate driver calls ("where you dey?"), avoid missed parcels, and optimize dispatch routes.
+PostcodeLink bridges the gap between customer addresses (often described with informal landmarks) and official **NIPOST (Nigerian Postal Service)** digital postal codes (both the October 2026 11-character 5-component national digital postcode standard and legacy 6-digit postal codes) to eliminate driver calls ("where you dey?"), avoid missed parcels, and optimize dispatch routes.
 
 ---
 
-## Architecture & Security Hardening (v1.4.0 Release Gate Production Standard)
+## Architecture & Security Hardening (Release Gate v5.4 Production Standard)
 
-Following an in-depth security and architectural audit of the FastAPI backend and Next.js frontend, the platform has completed enterprise-grade hardening covering all Release Gate requirements:
+Following an in-depth security and architectural audit of the FastAPI backend and Next.js frontend, the platform has completed enterprise-grade hardening covering all Release Gate v5.4 requirements:
 
-### 1. P0 — Authentication & Privilege Escalation Immunity
+### 1. P1 — Standard Authenticated Cryptography (AES-256-GCM)
+- **AEAD Encryption**: Replaced XOR stream cipher with industry-standard **AES-256-GCM** via Python's `cryptography` library (`AESGCM`).
+- **Context-Bound Associated Data (AAD)**: Transit OTPs stored in `notification_outbox` use 96-bit cryptographically secure random nonces and are cryptographically bound to their delivery context via Authenticated Additional Data (`f"delivery:{delivery_id}".encode()`). Any tampering with the ciphertext, nonce, or delivery association immediately fails decryption and tag verification.
+- **Key Rotation & Backward Compatibility**: Supports dedicated `OUTBOX_ENCRYPTION_KEY` and candidate fallback keys via `OUTBOX_PREVIOUS_ENCRYPTION_KEYS`. Gracefully migrates and verifies legacy `v1:` HMAC and unversioned hex stream payloads.
+- **Envelope Standard**: Versioned ciphertext envelopes format: `v2:<nonce_hex>:<aad_hex>:<ciphertext_and_tag_hex>`.
+
+### 2. P1 — Official National Digital Postcode Standard (11 Characters, 5 Components)
+- **October 2026 National Standard**: Full support for Nigeria's 11-character 5-component digital address standard:
+  - `State` (2 letters)
+  - `LGA` (2 alphanumeric)
+  - `District` (3 alphanumeric)
+  - `Area` (2 alphanumeric)
+  - `Building` (2 alphanumeric)
+  - Canonical format: `SS-LL-DDD-AA-BB` (e.g. `FC-02-A09-DB-09`, `LA-01-A04-IK-02`).
+- **Strict Taxonomy & Provenance**:
+  - `official_digital_postcode`: Reserved **exclusively** for codes verified against an authoritative NIPOST directory/API with `verification_status="official_verified"`. (Length alone no longer grants official status).
+  - `local_address_reference`: Assigned to pilot, internal, or mock codes (e.g. `LAG-IKJ-0012`).
+  - `legacy_postal_code`: Traditional 6-digit postal codes.
+  - Unverified input syntax is explicitly classified with provenance `"Unverified Address Input"` and `source_owner="PostcodeLink"`, eliminating misleading references to official directories.
+
+### 3. P1 — Authoritative NIPOST Client Status Discrimination
+- **Explicit Status Discrimination**:
+  - `FOUND` (200 + valid schema match)
+  - `NOT_FOUND` (404 authoritative non-existence: does **not** fall back to local data, preventing false validations of non-existent codes)
+  - `UNAVAILABLE` (503 / network timeout: triggers graceful fallback to local cache/database)
+  - `UNAUTHORIZED` (401 / 403 API key or permission failure)
+  - `INVALID_RESPONSE` (malformed schema or mismatched code)
+- **Zero Masking of Missing Records**: An authoritative 404 from NIPOST reports 0 matches and does not contaminate results with speculative local estimates.
+
+### 4. P2 — Process Role Separation (`PROCESS_ROLE`)
+- **Independent Execution Roles**:
+  - `PROCESS_ROLE="api"`: Dedicated HTTP API server. Disables embedded outbox processing loops in production to ensure predictability and prevent background thread starvation.
+  - `PROCESS_ROLE="worker"`: Dedicated background worker process running `backend/app/workers/outbox_worker.py`.
+  - `PROCESS_ROLE="all_in_one"`: Permitted in development or single-container staging deployments.
+- **Production Gate**: The system refuses startup in production if `PROCESS_ROLE` is unset or invalid.
+
+### 5. P2 — Outbox Delivery Guarantees & Duplicate Prevention
+- **Provider Message Tracking**: Added `provider_message_id` and `status_reconciled_at` to `notification_outbox`.
+- **At-Most-Once Provider Dispatch**: If a worker process crashes after the SMS provider (Termii/Twilio) has accepted the message, subsequent retry loops inspect `provider_message_id` and reconcile directly to `SENT` without sending duplicate SMS messages to the customer.
+
+### 6. P2 — Complete API Key Lifecycle Management
+- **Key Issuance & Management**:
+  - `POST /api/v1/api-keys/` — Issue new merchant API keys with custom monthly quotas and prefix `pkl_live_...`.
+  - `GET /api/v1/api-keys/` — List active keys with usage telemetry (last used timestamp, total calls, remaining quota).
+  - `DELETE /api/v1/api-keys/{id}` — Immediate key revocation.
+- **Authentication Middleware**: Supports authentication via `x-api-key` header with atomic call increments and monthly quota enforcement (HTTP 429 when quota exceeded).
+
+### 7. P2 — Anti-DoS Scoped Login Rate Limiting
+- **Composite Brute-Force Bucket**: Scoped failed attempt counters by `(client_ip, email)`.
+- **Targeted Lockout**: An adversary attempting 5 failed passwords from an attacker IP is locked out from that origin, while legitimate users on distinct IPs can continue to authenticate with valid credentials.
+
+### 8. P0 — Authentication & Privilege Escalation Immunity
 - **Public Registration Role Lockdown**: Public registration (`POST /api/v1/auth/register`) strictly sets account role to `merchant`. Client-supplied role attributes are discarded.
-- **Login Rate Limiting & Brute-Force Guard**: Implemented in-memory sliding window rate limiting on `POST /api/v1/auth/login`. After 5 consecutive failed attempts, the account is locked for 15 minutes (HTTP 429).
 - **Interactive Auth Flow**: Interactive `AuthModal` supporting credentials login and registration with JWT token persistence.
 - **Controlled Account Provisioning**: Operator couriers and additional platform administrators can only be provisioned by authenticated Platform Admins via `POST /api/v1/auth/admin/create-user`.
 - **Production Secret & Migration Guard**: In `production` environments, the API refuses startup if `SECRET_KEY` is missing, default, or shorter than 32 characters. `Base.metadata.create_all` is disabled in production to guarantee Alembic migration integrity.
 
-### 2. P0 — Genuine Out-of-Band SMS Dispatches & Persistent Notification Outbox
-- **Real HTTP Provider Adapters**: Implemented genuine HTTP dispatches in `notification_service.py`:
-  - `TermiiNotificationProvider`: Dispatches real SMS over Nigerian mobile networks (`api.ng.termii.com/api/sms/send`) with HTTP status validation, phone sanitization (`234...`), and 10s request timeouts.
-  - `TwilioNotificationProvider`: Dispatches international SMS and WhatsApp messages (`api.twilio.com`) with HTTP 201 Created validation.
-  - `SimulatedNotificationProvider`: Sandbox mock for zero-cost local development returning `SIMULATED`.
-- **Accurate Outbox Reporting**: Never falsely claims `SENT` without verified provider API acknowledgment. Returns `FAILED` with provider error details on API rejections or network timeouts.
-- **Database-Backed Persistent Outbox**: Every delivery creation transaction atomically inserts a `notification_outbox` record (`d8b2ddd3352d` migration) tracking channel, recipient phone, provider, status (`QUEUED`, `SENT`, `SIMULATED`, `FAILED`), retry count, and error details.
-- **Asynchronous Outbox Processor**: Includes `process_notification_outbox()` for background queue processing and retries with backoff.
-- **Zero-Knowledge PIN Privacy**: Plaintext PINs are **never** logged or stored in application memory or ordinary outbox records. Phone numbers are strictly masked (`080****7890`) in all server log outputs.
-
-### 3. P0 — Strict Delivery Lifecycle Stage Enforcement for Proof-of-Delivery PINs
-- **Out for Delivery Gate**: `POST /api/v1/deliveries/{id}/verify-otp` strictly enforces that an order must be in `OUT_FOR_DELIVERY` status before accepting PIN confirmation. Verification requests on `PENDING`, `ASSIGNED`, `PICKED_UP`, or `IN_TRANSIT` orders are rejected with HTTP 400.
-- **Single-Use Revocation**: Upon successful verification, `otp_hash` is immediately overwritten with `REVOKED_AND_VERIFIED`, preventing replay attacks.
-- **Brute-Force Lockout**: 3 failed verification attempts lock PIN verification for 15 minutes (HTTP 429).
-
-### 4. P0 — Operator Workload Accounting & Double-Decrement Elimination
-- **State-Aware Active Slot Accounting**: Operator `active_deliveries_count` is decremented if and only if the order was occupying an active transit slot (`ASSIGNED`, `PICKED_UP`, `IN_TRANSIT`, `OUT_FOR_DELIVERY`).
-- **Elimination of Double-Decrement on Failures**: Moving `FAILED -> CANCELLED` does not decrement the counter a second time because the slot was already released upon entering `FAILED`.
-- **Re-attempt Support**: Re-attempting an order from `FAILED` back to `OUT_FOR_DELIVERY` correctly increments the active workload counter.
-
-### 5. P0 — National Postcode Directory Expansion & Strict Area Consistency
-- **National Coverage Across 11 States**: Official 6-digit postal codes covering:
-  - **Lagos State** (Zone 1: Ikeja Central, Ikeja GRA, Lekki Phase 1, Victoria Island, Ikoyi, Yaba, Surulere, Festac, Oshodi, Maryland, Gbagada, Agege, Ikorodu, Badagry, Epe, Magodo, Apapa)
-  - **Abuja FCT** (Zone 9: Garki Area 1-11, Wuse 2, Maitama, Asokoro, CBD, Gwarinpa, Utako/Jabi, Kubwa, Lugbe, Nyanya)
-  - **Rivers State** (Zone 5: Old GRA, D-Line, Trans-Amadi, Rumuola, Choba, Eleme)
-  - **Oyo State** (Zone 2: Bodija, Dugbe, Ring Road, UI, Oluyole)
-  - **Ogun State** (Zone 1: Abeokuta Central, Ibara GRA, Ota Industrial Zone, Mowe/Ibafo)
-  - **Kano State** (Zone 7: Kano Central, Fagge, Bompai / Nassarawa, Sabon Gari)
-  - **Kaduna State** (Zone 8: Kaduna Central, Malali GRA, Barnawa)
-  - **Enugu State** (Zone 4: Independence Layout, New Haven/Ogui, GRA Enugu)
-  - **Delta State** (Zone 3: Asaba Central, Warri Central, Effurun)
-  - **Edo State** (Zone 3: Benin City Central, GRA Benin City)
-  - **Anambra State** (Zone 4: Awka Central, Onitsha Main Market)
-- **Documented Provenance**: Standardized against NIPOST Official Digital Postcode Directory — National Pilot Edition v2024.2.
-- **Independent Area Consistency Validation**: `cleanse_address` validates supplied `area_hint` independently against the reference record (`matched_area` / `matched_lga`). Conflicting areas appearing in address text are detected and flagged as `conflict` (< 0.60 confidence), preventing false `verified` badges on deliveries.
-- **Zero Fallback**: Unrecognized locations are marked `unverified` with 0.0 confidence and **zero arbitrary fallback to 100001**.
-
-### 6. P0 — Token-Only Public Tracking & Fleet Telemetry Privacy
-- **Strict Cryptographic Hex Tokens**: `GET /api/v1/deliveries/track/{tracking_token}` strictly enforces 32-byte cryptographic tokens. Querying human-readable delivery IDs (`PL-...`) returns HTTP 404.
-- **Token Revocation & Regeneration**: Instant revocation via `POST /api/v1/deliveries/{id}/regenerate-token`.
-- **Fleet Privacy**: Merchant operator queries receive `OperatorDirectoryResponse` with redacted phone numbers, GPS coordinates, and workload counts. Full fleet telemetry is reserved for Platform Administrators.
-
-### 7. Dual PostgreSQL & SQLite CI/CD Pipeline
+### 9. P0 — Dual PostgreSQL & SQLite CI/CD Pipeline
 - **GitHub Actions Workflow (`.github/workflows/ci.yml`)**:
   - Spin up `postgres:16` service container with health checks.
   - Run Alembic migrations and database seeding against PostgreSQL.
-  - Run 21/21 Pytest security and API integration tests against PostgreSQL.
+  - Run 68/68 Pytest security, cryptography, and API integration tests against PostgreSQL.
   - Verify SQLite migration and local fallback test compatibility.
   - Run 7/7 Node.js state-machine and 6-digit OTP security tests.
   - Compile production Next.js 15 build with 0 errors.
@@ -213,6 +221,10 @@ All state modifications are enforced server-side by the lifecycle state machine:
 - **Fleet Operators & Customers**:
   - `GET /api/v1/operators/` & `POST /api/v1/operators/` — Manage courier fleet.
   - `GET /api/v1/customers/` & `POST /api/v1/customers/` — Recipient directory.
+- **API Keys & Integrations**:
+  - `POST /api/v1/api-keys/` — Issue new merchant API keys with custom monthly quotas.
+  - `GET /api/v1/api-keys/` — List active API keys and inspect call usage metrics.
+  - `DELETE /api/v1/api-keys/{id}` — Revoke an API key immediately.
 - **Analytics**:
   - `GET /api/v1/analytics/overview` — Operations KPIs, verification accuracy, and fulfillment revenues.
 
@@ -275,7 +287,7 @@ Interactive OpenAPI documentation is live at **`http://127.0.0.1:8000/docs`** an
    # Or: backend/venv/Scripts/python -m backend.app.seed
    ```
 
-3. Run FastAPI automated security & API test suite (21/21 tests passing):
+3. Run FastAPI automated security & API test suite (68/68 tests passing):
    ```bash
    npm run backend:test
    # Or: backend/venv/Scripts/python -m pytest backend/tests -v
@@ -283,8 +295,11 @@ Interactive OpenAPI documentation is live at **`http://127.0.0.1:8000/docs`** an
 
 4. Start FastAPI server:
    ```bash
-   npm run backend:dev
-   # Or: backend/venv/Scripts/uvicorn backend.app.main:app --reload --port 8000
+   # API role (HTTP API server)
+   PROCESS_ROLE=api uvicorn backend.app.main:app --reload --port 8000
+   
+   # Background Outbox Worker (independent process)
+   PROCESS_ROLE=worker python -m backend.app.workers.outbox_worker
    ```
 
 5. Access interactive Swagger API documentation:

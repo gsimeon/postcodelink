@@ -1,5 +1,6 @@
 """Pydantic schemas for Nigerian Postcode resolution and validation."""
 from typing import Optional, List
+from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict
 
 
@@ -10,10 +11,16 @@ class PostcodeRecordSchema(BaseModel):
     lga: Optional[str] = None
     lat: Optional[float] = None
     lng: Optional[float] = None
-    postcode_type: str = "conventional_area"
+    postcode_type: str = "conventional_area"  # conventional_area | digital_location
+    postcode_category: Optional[str] = "local_address_reference"  # legacy_postal_code | official_digital_postcode | local_address_reference
     building_reference: Optional[str] = None
-    provenance: Optional[str] = "NIPOST Official Digital Postcode Directory"
+    verification_status: Optional[str] = "local_reference"  # official_verified | local_reference | synthetic_demo | unverified
+    provenance: Optional[str] = "PostcodeLink Local Reference Dataset"
     dataset_version: Optional[str] = "2024.2"
+    verified_at: Optional[datetime] = None
+    source_owner: Optional[str] = "PostcodeLink"
+    source_type: Optional[str] = "local_reference"
+    national_components: Optional[dict] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -30,7 +37,7 @@ class PostcodeLookupResponse(BaseModel):
     matches: List[PostcodeRecordSchema]
     is_live_nipost: bool = False
     dataset_version: str = "2024.2"
-    provenance: str = "NIPOST Official Digital Postcode Directory"
+    provenance: str = "NIPOST National Pilot Directory Edition 2024.2"
 
 
 class CleanseAddressRequest(BaseModel):
@@ -48,8 +55,10 @@ class CleanseAddressResponse(BaseModel):
     lga: Optional[str] = None
     postcode: str
     postcode_type: str = "conventional_area"  # conventional_area | digital_location
+    postcode_category: Optional[str] = "legacy_postal_code"  # legacy_postal_code | official_digital_postcode | local_address_reference
     resolution_level: str = "area_district"  # area_district | building_location
     postcode_status: str  # verified | unverified | estimated | conflict | invalid
+    verification_status: Optional[str] = "local_reference"
     confidence: float
     # Explicit three-dimension validation
     postcode_valid: bool = False
@@ -58,4 +67,7 @@ class CleanseAddressResponse(BaseModel):
     source: str
     matched_record: Optional[PostcodeRecordSchema] = None
     changes_made: List[str] = []
-    provenance: Optional[str] = "NIPOST Official Digital Postcode Directory"
+    provenance: Optional[str] = "PostcodeLink Local Reference Dataset"
+    source_owner: Optional[str] = "PostcodeLink"
+    source_type: Optional[str] = "local_reference"
+    national_components: Optional[dict] = None

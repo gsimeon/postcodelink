@@ -12,6 +12,7 @@ from backend.app.models.postcode import PostcodeDirectory
 from backend.app.models.enums import DeliveryStatus, PostcodeStatus, AppRole, VehicleType
 from backend.app.services.postcode_service import OFFICIAL_POSTCODES
 from backend.app.core.security import hash_password, hash_otp
+from backend.app.config import settings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("seed")
@@ -30,6 +31,11 @@ def seed_database():
         updated_count = 0
         for pc in OFFICIAL_POSTCODES:
             code = pc["code"]
+            pc_type = pc.get("postcode_type", "digital_location" if len(code.replace("-", "")) > 6 else "conventional_area")
+            ver_status = pc.get("verification_status", "local_reference")
+            prov = pc.get("provenance", "NIPOST 6-Digit Postal Directory (Zone Reference)")
+            ver_version = pc.get("dataset_version", "2024.2")
+
             if code not in db_records:
                 db_pc = PostcodeDirectory(
                     code=code,
@@ -38,10 +44,11 @@ def seed_database():
                     lga=pc.get("lga"),
                     lat=pc.get("lat"),
                     lng=pc.get("lng"),
-                    postcode_type=pc.get("postcode_type", "conventional_area"),
+                    postcode_type=pc_type,
                     building_reference=pc.get("building_reference"),
-                    provenance=pc.get("provenance", "Local Verification Dataset"),
-                    dataset_version=pc.get("dataset_version", "2024.2"),
+                    verification_status=ver_status,
+                    provenance=prov,
+                    dataset_version=ver_version,
                     is_active=True
                 )
                 db.add(db_pc)
@@ -50,17 +57,20 @@ def seed_database():
             else:
                 existing = db_records[code]
                 needs_update = False
-                if pc.get("postcode_type") and existing.postcode_type != pc["postcode_type"]:
-                    existing.postcode_type = pc["postcode_type"]
+                if existing.postcode_type != pc_type:
+                    existing.postcode_type = pc_type
+                    needs_update = True
+                if hasattr(existing, "verification_status") and existing.verification_status != ver_status:
+                    existing.verification_status = ver_status
                     needs_update = True
                 if pc.get("building_reference") and existing.building_reference != pc["building_reference"]:
                     existing.building_reference = pc["building_reference"]
                     needs_update = True
-                if pc.get("provenance") and existing.provenance != pc["provenance"]:
-                    existing.provenance = pc["provenance"]
+                if existing.provenance != prov:
+                    existing.provenance = prov
                     needs_update = True
-                if pc.get("dataset_version") and existing.dataset_version != pc["dataset_version"]:
-                    existing.dataset_version = pc["dataset_version"]
+                if existing.dataset_version != ver_version:
+                    existing.dataset_version = ver_version
                     needs_update = True
                 if needs_update:
                     updated_count += 1
@@ -69,7 +79,12 @@ def seed_database():
             db.commit()
             logger.info(f"Postcode directory synced: {inserted_count} new, {updated_count} updated (Total active: {len(db_records)}).")
 
-        # 2. Seed Default Merchant, Admin, and Operator Profiles
+        # In production, demo accounts and synthetic fixtures MUST NOT be seeded
+        if settings.ENVIRONMENT == "production" or not settings.SEED_DEMO_DATA:
+            logger.info("Non-development or production environment: Skipping demo profile and test orders seeding.")
+            return
+
+        # 2. Seed Default Merchant, Admin, and Operator Profiles (Development only)
         merchant = db.query(Profile).filter(Profile.email == "dispatch@postcodelink.ng").first()
         if not merchant:
             logger.info("Seeding default merchant profile...")
