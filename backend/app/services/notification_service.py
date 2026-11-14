@@ -91,7 +91,7 @@ class TermiiNotificationProvider(BaseNotificationProvider):
             if str(payload.get("code", "")).lower() != "ok" or not payload.get("message_id"):
                 raise ValueError("Termii did not confirm message acceptance.")
             result_status = NotificationDeliveryStatus.SENT
-        except (httpx.HTTPError, ValueError, TypeError):
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError):
             logger.warning("[Termii Gateway] SMS dispatch failed for %s.", masked)
             result_status = NotificationDeliveryStatus.FAILED
 
