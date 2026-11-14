@@ -42,19 +42,19 @@ jobs:
 
       - name: Verify Alembic Migrations on PostgreSQL
         env:
-          DATABASE_URL: postgresql://postgres:postgrespassword@localhost:5432/postcodelink_test
+          DATABASE_URL: postgresql+psycopg2://postgres:postgrespassword@localhost:5432/postcodelink_test
         run: |
           python -m alembic upgrade head
 
       - name: Verify Database Seeding on PostgreSQL
         env:
-          DATABASE_URL: postgresql://postgres:postgrespassword@localhost:5432/postcodelink_test
+          DATABASE_URL: postgresql+psycopg2://postgres:postgrespassword@localhost:5432/postcodelink_test
         run: |
           python -m backend.app.seed
 
       - name: Execute Pytest Security & API Regression Test Suite (PostgreSQL)
         env:
-          DATABASE_URL: postgresql://postgres:postgrespassword@localhost:5432/postcodelink_test
+          DATABASE_URL: postgresql+psycopg2://postgres:postgrespassword@localhost:5432/postcodelink_test
           SECRET_KEY: "postcodelink_ci_secret_key_32_characters_minimum"
           ENVIRONMENT: "development"
         run: |
