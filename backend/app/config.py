@@ -23,14 +23,14 @@ class Settings(BaseSettings):
     ]
     
     # Security & JWT Token Auth
-    SECRET_KEY: str = os.getenv("SECRET_KEY", "postcodelink_dev_secret_key_" + secrets.token_hex(16))
+    SECRET_KEY: str = os.getenv("SECRET_KEY", "postcodelink_dev_secret_key_32_characters_minimum")
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
     
     # Outbox Payload Cryptography: Dedicated authenticated encryption key (distinct from SECRET_KEY)
     OUTBOX_ENCRYPTION_KEY: str = os.getenv(
         "OUTBOX_ENCRYPTION_KEY",
-        "postcodelink_dev_outbox_enc_key_" + secrets.token_hex(16)
+        "postcodelink_dev_outbox_key_32_characters_minimum"
     )
     OUTBOX_PREVIOUS_ENCRYPTION_KEYS: Optional[str] = os.getenv("OUTBOX_PREVIOUS_ENCRYPTION_KEYS", None)
     
