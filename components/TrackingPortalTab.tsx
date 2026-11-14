@@ -26,24 +26,14 @@ import {
 interface TrackingPortalTabProps {
   deliveries: Delivery[];
   settings: AppSettings;
-  onVerifyOtp: (deliveryId: string, otp: string) => { success: boolean; message: string; remainingAttempts?: number };
 }
 
 export function TrackingPortalTab({
   deliveries,
   settings,
-  onVerifyOtp,
 }: TrackingPortalTabProps) {
   const [trackingInput, setTrackingInput] = useState("PL-2048");
   const [searchedRef, setSearchedRef] = useState("PL-2048");
-  const [enteredOtp, setEnteredOtp] = useState("");
-  const [otpNotice, setOtpNotice] = useState<{ type: "success" | "error"; text: string } | null>(null);
-  const [copiedOtp, setCopiedOtp] = useState(false);
-
-  // P0 Security: OTP masking & identity challenge
-  const [isPinRevealed, setIsPinRevealed] = useState(false);
-  const [phoneChallenge, setPhoneChallenge] = useState("");
-  const [challengeError, setChallengeError] = useState("");
 
   const delivery = deliveries.find(
     (d) => d.id.toLowerCase() === searchedRef.trim().toLowerCase()
@@ -52,42 +42,6 @@ export function TrackingPortalTab({
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     setSearchedRef(trackingInput.trim());
-    setOtpNotice(null);
-    setIsPinRevealed(false);
-    setPhoneChallenge("");
-    setChallengeError("");
-  };
-
-  const handleCopyOtp = (code: string) => {
-    navigator.clipboard.writeText(code);
-    setCopiedOtp(true);
-    setTimeout(() => setCopiedOtp(false), 2000);
-  };
-
-  // Challenge verification: verify recipient owns this parcel before revealing the PIN
-  const handleRevealPin = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!delivery) return;
-    const cleanPhone = delivery.recipientPhone.replace(/\D/g, "");
-    const lastFour = cleanPhone.slice(-4);
-    if (phoneChallenge.trim() === lastFour) {
-      setIsPinRevealed(true);
-      setChallengeError("");
-    } else {
-      setChallengeError("Last 4 digits did not match recipient phone.");
-    }
-  };
-
-  const handleConfirmOtp = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!delivery) return;
-    const res = onVerifyOtp(delivery.id, enteredOtp.trim());
-    if (res.success) {
-      setOtpNotice({ type: "success", text: res.message });
-      setEnteredOtp("");
-    } else {
-      setOtpNotice({ type: "error", text: res.message });
-    }
   };
 
   // Tracking steps
@@ -120,7 +74,7 @@ export function TrackingPortalTab({
           <div>
             <h2>PostcodeLink Customer Tracking Portal</h2>
             <p>
-              Recipients and merchants can track live delivery progress, view verified NIPOST routing codes, and confirm proof of delivery via OTP.
+              Recipients and merchants can track delivery progress and postcode status.
             </p>
           </div>
         </div>
@@ -153,10 +107,6 @@ export function TrackingPortalTab({
               onClick={() => {
                 setTrackingInput(d.id);
                 setSearchedRef(d.id);
-                setOtpNotice(null);
-                setIsPinRevealed(false);
-                setPhoneChallenge("");
-                setChallengeError("");
               }}
             >
               {d.id} ({d.recipientName.split(" ")[0]} · {d.status.replace("_", " ")})
@@ -301,156 +251,19 @@ export function TrackingPortalTab({
 
           {/* Right Column: Protected Security PIN & Courier Contact */}
           <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
-            {/* P0 Security: Protected Proof of Delivery PIN (OTP) Card */}
-            <section
-              className="panel"
-              style={{
-                background: "linear-gradient(180deg, #ffffff, #f0fdf4)",
-                border: "1px solid #bbf7d0",
-              }}
-            >
-              <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#166534", fontWeight: 700, fontSize: "13px", marginBottom: "6px" }}>
-                <Key size={16} /> Delivery Confirmation PIN (OTP)
+            {/* POD remains disabled until backed by authenticated server-side storage. */}
+            <section className="panel">
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: 700, fontSize: "13px", marginBottom: "8px" }}>
+                <ShieldCheck size={16} /> Proof of Delivery
               </div>
-              <p style={{ fontSize: "11px", color: "#475569", margin: "0 0 12px", lineHeight: 1.5 }}>
-                A 4-digit security PIN has been dispatched to recipient <b>{maskedPhone}</b>. Give this PIN to the courier upon delivery.
-              </p>
-
               {delivery.podVerified ? (
-                <div style={{ background: "#dcfce7", border: "1px solid #86efac", color: "#166534", padding: "12px", borderRadius: "8px", textAlign: "center", fontWeight: 700, fontSize: "13px" }}>
-                  ✓ Proof of Delivery Verified
-                  <div style={{ fontSize: "10px", fontWeight: 400, marginTop: "2px" }}>
-                    {delivery.podNote || "Authenticated via OTP"}
-                  </div>
-                </div>
-              ) : isPinRevealed ? (
-                /* Authenticated PIN View */
-                <div style={{ background: "#ffffff", border: "2px dashed #86efac", borderRadius: "8px", padding: "16px", textAlign: "center" }}>
-                  <div style={{ fontSize: "10px", color: "#64748b", letterSpacing: "1px", fontWeight: 700, textTransform: "uppercase" }}>
-                    CONFIRMATION PIN (AUTHENTICATED)
-                  </div>
-                  <div
-                    style={{
-                      fontFamily: "'JetBrains Mono', monospace",
-                      fontSize: "30px",
-                      fontWeight: 800,
-                      letterSpacing: "8px",
-                      color: "#166534",
-                      margin: "6px 0",
-                    }}
-                  >
-                    {delivery.otp || "4821"}
-                  </div>
-                  <div style={{ display: "flex", gap: "6px", justifyContent: "center" }}>
-                    <button
-                      type="button"
-                      className="outline"
-                      style={{ height: "26px", fontSize: "11px", padding: "0 8px" }}
-                      onClick={() => handleCopyOtp(delivery.otp || "4821")}
-                    >
-                      {copiedOtp ? <Check size={12} color="#16a34a" /> : <Copy size={12} />} Copy PIN
-                    </button>
-                    <button
-                      type="button"
-                      className="outline"
-                      style={{ height: "26px", fontSize: "11px", padding: "0 8px" }}
-                      onClick={() => setIsPinRevealed(false)}
-                    >
-                      <EyeOff size={12} /> Hide
-                    </button>
-                  </div>
+                <div style={{ background: "#dcfce7", border: "1px solid #86efac", color: "#166534", padding: "12px", borderRadius: "8px", fontWeight: 700, fontSize: "13px" }}>
+                  Proof of Delivery marked as verified
                 </div>
               ) : (
-                /* Masked Public View with Identity Challenge */
-                <div style={{ background: "#f8fafc", border: "1px solid var(--line)", borderRadius: "8px", padding: "14px" }}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", color: "#475569" }}>
-                      <Lock size={14} color="#64748b" />
-                      <span>Security PIN: <b style={{ letterSpacing: "4px" }}>••••</b></span>
-                    </div>
-                    <span style={{ fontSize: "10px", background: "#e2e8f0", padding: "2px 6px", borderRadius: "4px" }}>
-                      Masked for Privacy
-                    </span>
-                  </div>
-
-                  <form onSubmit={handleRevealPin} style={{ marginTop: "10px", borderTop: "1px solid #e2e8f0", paddingTop: "10px" }}>
-                    <label style={{ fontSize: "10px", color: "#64748b", display: "block", marginBottom: "4px" }}>
-                      Are you the recipient? Enter last 4 digits of phone ({maskedPhone}):
-                    </label>
-                    <div style={{ display: "flex", gap: "6px" }}>
-                      <input
-                        type="password"
-                        maxLength={4}
-                        placeholder="Last 4 digits"
-                        value={phoneChallenge}
-                        onChange={(e) => setPhoneChallenge(e.target.value)}
-                        style={{
-                          width: "110px",
-                          height: "30px",
-                          border: "1px solid #cbd5e1",
-                          borderRadius: "4px",
-                          textAlign: "center",
-                          fontSize: "12px",
-                          letterSpacing: "2px",
-                        }}
-                      />
-                      <button type="submit" className="outline" style={{ height: "30px", fontSize: "11px" }}>
-                        <Eye size={12} /> Reveal PIN
-                      </button>
-                    </div>
-                    {challengeError && (
-                      <div style={{ fontSize: "10px", color: "#dc2626", marginTop: "4px" }}>
-                        {challengeError}
-                      </div>
-                    )}
-                  </form>
-                </div>
-              )}
-
-              {/* Courier Rider OTP Verification Form (with attempt limits) */}
-              {!delivery.podVerified && (
-                <form onSubmit={handleConfirmOtp} style={{ marginTop: "16px", borderTop: "1px solid #e2e8f0", paddingTop: "14px" }}>
-                  <label style={{ fontSize: "11px", fontWeight: 700, color: "#475569", display: "block", marginBottom: "4px" }}>
-                    Courier Rider: Verify Recipient PIN on Delivery
-                  </label>
-                  <small style={{ fontSize: "10px", color: "#64748b", display: "block", marginBottom: "6px" }}>
-                    Enforces 3-attempt limit with 15-minute lockout to prevent brute-force.
-                  </small>
-                  <div style={{ display: "flex", gap: "8px" }}>
-                    <input
-                      type="text"
-                      maxLength={4}
-                      placeholder="Enter 4-digit PIN"
-                      value={enteredOtp}
-                      onChange={(e) => setEnteredOtp(e.target.value)}
-                      style={{
-                        flex: 1,
-                        height: "36px",
-                        border: "1px solid #cbd5e1",
-                        borderRadius: "6px",
-                        textAlign: "center",
-                        fontSize: "14px",
-                        fontWeight: 700,
-                        letterSpacing: "4px",
-                      }}
-                    />
-                    <button type="submit" className="primary" style={{ height: "36px" }}>
-                      Authenticate
-                    </button>
-                  </div>
-                  {otpNotice && (
-                    <div
-                      style={{
-                        marginTop: "8px",
-                        fontSize: "11px",
-                        color: otpNotice.type === "success" ? "#16a34a" : "#dc2626",
-                        fontWeight: 600,
-                      }}
-                    >
-                      {otpNotice.text}
-                    </div>
-                  )}
-                </form>
+                <p style={{ fontSize: "12px", color: "#64748b", lineHeight: 1.5, margin: 0 }}>
+                  Secure PIN verification is temporarily unavailable while server-side OTP storage and authenticated rider access are being configured. No PIN is displayed or verified in this public tracking view.
+                </p>
               )}
             </section>
 
