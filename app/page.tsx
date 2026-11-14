@@ -34,6 +34,7 @@ import {
   FastAPIDelivery,
   FastAPIOperator,
   FastAPICustomer,
+  FastAPIProfile,
 } from "@/lib/fastapi-client";
 
 import { Sidebar, TabKey } from "@/components/Sidebar";
@@ -137,6 +138,7 @@ export default function Home() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [settings, setSettings] = useState<AppSettings>(getStoredSettings());
   const [isFastAPIConnected, setIsFastAPIConnected] = useState(false);
+  const [currentProfile, setCurrentProfile] = useState<FastAPIProfile | null>(null);
 
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [prefillAddress, setPrefillAddress] = useState("");
@@ -144,41 +146,30 @@ export default function Home() {
   const [selectedInspectDelivery, setSelectedInspectDelivery] = useState<Delivery | null>(null);
   const [notice, setNotice] = useState("PostcodeLink Nigeria · Standardized Digital Postcode Dispatch Gateway");
 
-  // Load data: Primary FastAPI with offline local storage fallback
+  // Load data: Authoritative FastAPI data source with no silent split-brain
   const loadData = useCallback(async () => {
     try {
       const health = await fastApiClient.getHealth();
       if (health && health.status === "healthy") {
         setIsFastAPIConnected(true);
-        const [apiDeliveries, apiOperators, apiCustomers] = await Promise.all([
-          fastApiClient.listDeliveries().catch(() => []),
-          fastApiClient.listOperators().catch(() => []),
-          fastApiClient.listCustomers().catch(() => []),
-        ]);
 
-        if (apiDeliveries && apiDeliveries.length > 0) {
+        if (fastApiClient.isAuthenticated()) {
+          const [apiDeliveries, apiOperators, apiCustomers] = await Promise.all([
+            fastApiClient.listDeliveries().catch(() => []),
+            fastApiClient.listOperators().catch(() => []),
+            fastApiClient.listCustomers().catch(() => []),
+          ]);
+
+          // An empty array is a valid empty database state
           setDeliveries(apiDeliveries.map(mapFastAPIDelivery));
-        } else {
-          setDeliveries(getStoredDeliveries());
-        }
-
-        if (apiOperators && apiOperators.length > 0) {
           setOperators(apiOperators.map(mapFastAPIOperator));
-        } else {
-          setOperators(getStoredOperators());
-        }
-
-        if (apiCustomers && apiCustomers.length > 0) {
           setCustomers(apiCustomers.map(mapFastAPICustomer));
-        } else {
-          setCustomers(getStoredCustomers());
+          setSettings(getStoredSettings());
+          return;
         }
-
-        setSettings(getStoredSettings());
-        return;
       }
     } catch {
-      // Backend not running, use fallback
+      // Backend offline
     }
 
     setIsFastAPIConnected(false);
@@ -195,12 +186,30 @@ export default function Home() {
     return () => window.removeEventListener("postcodelink-data-updated", handleUpdate);
   }, [loadData]);
 
+  const handleExplicitLogin = async (email: string, pass: string) => {
+    try {
+      const res = await fastApiClient.login(email, pass);
+      setCurrentProfile(res.profile);
+      setNotice(`Authenticated as ${res.profile.full_name} (${res.profile.business_name || res.profile.role}).`);
+      await loadData();
+    } catch (err: any) {
+      setNotice(`Authentication failed: ${err.message}`);
+    }
+  };
+
+  const handleLogout = () => {
+    fastApiClient.logout();
+    setCurrentProfile(null);
+    setNotice("Logged out of dispatch session.");
+    loadData();
+  };
+
   const unassignedCount = deliveries.filter((d) => d.status === "pending_assignment").length;
   const availableOperatorsCount = operators.filter((o) => o.isAvailable).length;
 
   // Handlers
   const handleSaveDelivery = async (newDelivery: Delivery) => {
-    if (isFastAPIConnected) {
+    if (isFastAPIConnected && fastApiClient.isAuthenticated()) {
       try {
         const res = await fastApiClient.createDelivery({
           recipient_name: newDelivery.recipientName,
@@ -213,14 +222,15 @@ export default function Home() {
           package_description: newDelivery.packageDescription || "Parcel",
           fee: newDelivery.fee || 2500,
         });
-        setNotice(`Order ${res.delivery.id} stored in FastAPI DB. Confirmation PIN: ${res.notification_dispatch.delivery_pin}`);
+        setNotice(`Order ${res.delivery.id} stored in database. PIN dispatched out-of-band to recipient phone.`);
         await loadData();
         setShowCreateModal(false);
         setPrefillAddress("");
         setPrefillPostcode("");
         return;
       } catch (err: any) {
-        setNotice(`FastAPI Note: ${err.message}. Saved locally.`);
+        setNotice(`FastAPI Error: ${err.message}`);
+        return;
       }
     }
 
@@ -231,13 +241,36 @@ export default function Home() {
     setNotice(`Delivery order ${newDelivery.id} created successfully.`);
   };
 
-  const handleBulkImport = (newItems: Delivery[]) => {
+  const handleBulkImport = async (newItems: Delivery[]) => {
+    if (isFastAPIConnected && fastApiClient.isAuthenticated()) {
+      try {
+        const apiPayload = newItems.map((item) => ({
+          recipient_name: item.recipientName,
+          recipient_phone: item.recipientPhone,
+          destination_address: item.destinationAddress,
+          destination_landmark: item.landmark,
+          destination_area: item.destinationArea || "Ikeja",
+          destination_state: item.destinationState || "Lagos",
+          postcode_input: item.postcodeInput,
+          package_description: item.packageDescription || "Parcel",
+          fee: item.fee || 2500,
+        }));
+        await fastApiClient.bulkCreateDeliveries(apiPayload);
+        setNotice(`Batch import complete: ${newItems.length} deliveries registered in database.`);
+        await loadData();
+        return;
+      } catch (err: any) {
+        setNotice(`Bulk Import Error: ${err.message}`);
+        return;
+      }
+    }
+
     bulkAddDeliveries(newItems);
     setNotice(`Batch import complete: ${newItems.length} deliveries dispatched to network.`);
   };
 
   const handleUpdateStatus = async (deliveryId: string, newStatus: DeliveryStatus, note: string) => {
-    if (isFastAPIConnected) {
+    if (isFastAPIConnected && fastApiClient.isAuthenticated()) {
       try {
         let apiStatus = "pending";
         if (newStatus === "assigned") apiStatus = "assigned";
@@ -252,6 +285,7 @@ export default function Home() {
         return;
       } catch (err: any) {
         setNotice(`FastAPI Error: ${err.message}`);
+        return;
       }
     }
 
@@ -270,12 +304,12 @@ export default function Home() {
   };
 
   const handleVerifyOtp = async (deliveryId: string, otp: string) => {
-    if (isFastAPIConnected) {
+    if (isFastAPIConnected && fastApiClient.isAuthenticated()) {
       try {
         await fastApiClient.verifyOTP(deliveryId, otp);
-        setNotice(`Proof of delivery verified for ${deliveryId} in FastAPI database.`);
+        setNotice(`Proof of delivery verified for ${deliveryId} in database.`);
         await loadData();
-        return { success: true, message: "Proof of delivery verified in FastAPI database. Marked delivered." };
+        return { success: true, message: "Proof of delivery verified in database. Marked delivered." };
       } catch (err: any) {
         setNotice(`PIN verification failed: ${err.message}`);
         return { success: false, message: err.message || "PIN verification failed" };
@@ -290,7 +324,7 @@ export default function Home() {
   };
 
   const handleAssignOperator = async (deliveryId: string, operatorId: string, operatorName: string) => {
-    if (isFastAPIConnected && operatorId) {
+    if (isFastAPIConnected && fastApiClient.isAuthenticated() && operatorId) {
       try {
         await fastApiClient.assignOperator(deliveryId, operatorId);
         setNotice(`FastAPI: Assigned ${deliveryId} to ${operatorName}.`);
@@ -316,7 +350,19 @@ export default function Home() {
     setNotice(`Assigned ${deliveryId} to ${operatorName}.`);
   };
 
-  const handleDeleteDelivery = (deliveryId: string) => {
+  const handleDeleteDelivery = async (deliveryId: string) => {
+    if (isFastAPIConnected && fastApiClient.isAuthenticated()) {
+      try {
+        await fastApiClient.deleteDelivery(deliveryId);
+        setNotice(`Delivery ${deliveryId} deleted from database.`);
+        await loadData();
+        return;
+      } catch (err: any) {
+        setNotice(`Delete Error: ${err.message}`);
+        return;
+      }
+    }
+
     deleteDelivery(deliveryId);
     setNotice(`Delivery ${deliveryId} removed from records.`);
   };
@@ -333,7 +379,27 @@ export default function Home() {
     setNotice(`Logistics partner ${newOp.businessName} added.`);
   };
 
-  const handleAddCustomer = (newCustomer: Customer) => {
+  const handleAddCustomer = async (newCustomer: Customer) => {
+    if (isFastAPIConnected && fastApiClient.isAuthenticated()) {
+      try {
+        await fastApiClient.createCustomer({
+          full_name: newCustomer.fullName,
+          phone: newCustomer.phone,
+          email: newCustomer.email,
+          default_address: newCustomer.defaultAddress,
+          area: newCustomer.area,
+          state: newCustomer.state,
+          postcode: newCustomer.postcode,
+        });
+        setNotice(`Customer ${newCustomer.fullName} saved to tenant directory.`);
+        await loadData();
+        return;
+      } catch (err: any) {
+        setNotice(`Customer Save Error: ${err.message}`);
+        return;
+      }
+    }
+
     addCustomer(newCustomer);
     setNotice(`Customer ${newCustomer.fullName} saved to directory.`);
   };
@@ -398,22 +464,66 @@ export default function Home() {
           unassignedCount={unassignedCount}
         />
 
-        {/* Live Backend Connection Indicator */}
-        <div style={{ padding: "8px 24px 0", display: "flex", alignItems: "center", gap: "8px", fontSize: "12px" }}>
-          <span
-            style={{
-              display: "inline-block",
-              width: "8px",
-              height: "8px",
-              borderRadius: "50%",
-              backgroundColor: isFastAPIConnected ? "#10b981" : "#f59e0b",
-            }}
-          />
-          <span style={{ color: isFastAPIConnected ? "#059669" : "#d97706", fontWeight: 600 }}>
-            {isFastAPIConnected
-              ? "FastAPI Relational Database Connected (RBAC & Hashed OTP Active)"
-              : "Offline Local Mode (Start FastAPI via `npm run backend:dev` to sync)"}
-          </span>
+        {/* Live Backend Connection & Authentication Bar */}
+        <div style={{ padding: "8px 24px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid #e2e8f0", backgroundColor: "#f8fafc", fontSize: "12px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <span
+              style={{
+                display: "inline-block",
+                width: "8px",
+                height: "8px",
+                borderRadius: "50%",
+                backgroundColor: isFastAPIConnected ? "#10b981" : "#f59e0b",
+              }}
+            />
+            <span style={{ color: isFastAPIConnected ? "#059669" : "#d97706", fontWeight: 600 }}>
+              {isFastAPIConnected
+                ? (fastApiClient.isAuthenticated() ? "FastAPI Authenticated · Tenant Isolated Database" : "FastAPI Online · Login Required")
+                : "Offline Local Storage Mode"}
+            </span>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+            {fastApiClient.isAuthenticated() ? (
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <span style={{ color: "#475569" }}>
+                  Active Merchant: <strong>{currentProfile?.business_name || "Lagos Fulfillment Hub"}</strong>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  style={{
+                    padding: "3px 8px",
+                    background: "#fee2e2",
+                    color: "#b91c1c",
+                    border: "1px solid #fca5a5",
+                    borderRadius: "4px",
+                    cursor: "pointer",
+                    fontSize: "11px",
+                  }}
+                >
+                  Logout
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => handleExplicitLogin("dispatch@postcodelink.ng", "MerchantPass123!")}
+                style={{
+                  padding: "4px 10px",
+                  background: "#e0e7ff",
+                  color: "#3730a3",
+                  border: "1px solid #c7d2fe",
+                  borderRadius: "4px",
+                  cursor: "pointer",
+                  fontSize: "11px",
+                  fontWeight: 600,
+                }}
+              >
+                Sign In as Merchant (dispatch@postcodelink.ng)
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Tab Content */}

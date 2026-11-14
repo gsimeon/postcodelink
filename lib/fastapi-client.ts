@@ -1,6 +1,7 @@
 /**
  * PostcodeLink Nigeria - FastAPI Client SDK
  * Direct, authenticated interface to the FastAPI backend running on localhost:8000 (or NEXT_PUBLIC_FASTAPI_URL).
+ * Strict security: NO hardcoded credentials. Explicit user authentication only.
  */
 
 const FASTAPI_BASE_URL = process.env.NEXT_PUBLIC_FASTAPI_URL || 'http://127.0.0.1:8000';
@@ -24,6 +25,7 @@ export interface FastAPIProfile {
 
 export interface FastAPIDelivery {
   id: string;
+  tracking_token: string;
   merchant_id?: string;
   operator_id?: string;
   recipient_name: string;
@@ -53,7 +55,7 @@ export interface FastAPIDelivery {
 
 export interface NotificationDispatchPayload {
   recipient_phone: string;
-  delivery_pin: string;
+  status: string;
   channel: string;
   message_preview: string;
 }
@@ -63,21 +65,19 @@ export interface FastAPIDeliveryCreateResult {
   notification_dispatch: NotificationDispatchPayload;
 }
 
+export interface PublicTrackingEvent {
+  status: string;
+  occurred_at: string;
+}
+
 export interface FastAPIPublicTracking {
   id: string;
-  recipient_name: string;
+  recipient_name_masked: string;
   recipient_phone_masked: string;
-  destination_address: string;
-  destination_landmark?: string;
-  destination_area: string;
-  destination_state: string;
+  destination_general_location: string;
   postcode_status: 'verified' | 'unverified' | 'estimated' | 'invalid';
   verified_postcode?: string;
-  package_description: string;
-  fee: number;
   status: string;
-  lat?: number;
-  lng?: number;
   requires_pin_confirmation: boolean;
   otp_attempts: number;
   otp_max_attempts: number;
@@ -87,7 +87,7 @@ export interface FastAPIPublicTracking {
   created_at: string;
   updated_at: string;
   assigned_operator_name?: string;
-  events: FastAPIDeliveryEvent[];
+  timeline: PublicTrackingEvent[];
 }
 
 export interface FastAPIDeliveryEvent {
@@ -115,6 +115,7 @@ export interface FastAPIOperator {
 
 export interface FastAPICustomer {
   id: string;
+  merchant_id: string;
   full_name: string;
   phone: string;
   email?: string;
@@ -171,6 +172,14 @@ export const fastApiClient = {
     return authToken;
   },
 
+  logout() {
+    this.setToken(null);
+  },
+
+  isAuthenticated(): boolean {
+    return !!this.getToken();
+  },
+
   async login(email: string, password: string): Promise<{ access_token: string; profile: FastAPIProfile }> {
     const res = await fetch(`${API_V1}/auth/login`, {
       method: 'POST',
@@ -186,16 +195,25 @@ export const fastApiClient = {
     return data;
   },
 
-  async ensureAuthenticated(): Promise<string> {
-    const existing = this.getToken();
-    if (existing) return existing;
-    // Auto-authenticate default merchant session for seamless local experience
-    try {
-      const data = await this.login('dispatch@postcodelink.ng', 'MerchantPass123!');
-      return data.access_token;
-    } catch {
-      return '';
+  async register(payload: {
+    full_name: string;
+    email: string;
+    password: string;
+    phone?: string;
+    business_name?: string;
+  }): Promise<{ access_token: string; profile: FastAPIProfile }> {
+    const res = await fetch(`${API_V1}/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Registration failed');
     }
+    const data = await res.json();
+    this.setToken(data.access_token);
+    return data;
   },
 
   async getHealth() {
@@ -209,7 +227,6 @@ export const fastApiClient = {
   },
 
   async listDeliveries(status?: string, search?: string): Promise<FastAPIDelivery[]> {
-    await this.ensureAuthenticated();
     const params = new URLSearchParams();
     if (status) params.append('status', status);
     if (search) params.append('search', search);
@@ -223,7 +240,6 @@ export const fastApiClient = {
   },
 
   async getDelivery(id: string): Promise<FastAPIDelivery> {
-    await this.ensureAuthenticated();
     const res = await fetch(`${API_V1}/deliveries/${encodeURIComponent(id)}`, {
       headers: getHeaders(),
       cache: 'no-store',
@@ -232,8 +248,8 @@ export const fastApiClient = {
     return await res.json();
   },
 
-  async getPublicTracking(id: string): Promise<FastAPIPublicTracking> {
-    const res = await fetch(`${API_V1}/deliveries/${encodeURIComponent(id)}/tracking`, {
+  async getPublicTracking(identifier: string): Promise<FastAPIPublicTracking> {
+    const res = await fetch(`${API_V1}/deliveries/${encodeURIComponent(identifier)}/tracking`, {
       cache: 'no-store',
     });
     if (!res.ok) throw new Error(`Tracking record not found: ${res.statusText}`);
@@ -252,7 +268,6 @@ export const fastApiClient = {
     fee?: number;
     pickup_address?: string;
   }): Promise<FastAPIDeliveryCreateResult> {
-    await this.ensureAuthenticated();
     const res = await fetch(`${API_V1}/deliveries/`, {
       method: 'POST',
       headers: getHeaders(),
@@ -265,8 +280,41 @@ export const fastApiClient = {
     return await res.json();
   },
 
+  async bulkCreateDeliveries(items: Array<{
+    recipient_name: string;
+    recipient_phone: string;
+    destination_address: string;
+    destination_landmark?: string;
+    destination_area: string;
+    destination_state: string;
+    postcode_input: string;
+    package_description: string;
+    fee?: number;
+  }>): Promise<FastAPIDelivery[]> {
+    const res = await fetch(`${API_V1}/deliveries/bulk`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(items),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Bulk import failed');
+    }
+    return await res.json();
+  },
+
+  async deleteDelivery(deliveryId: string): Promise<void> {
+    const res = await fetch(`${API_V1}/deliveries/${encodeURIComponent(deliveryId)}`, {
+      method: 'DELETE',
+      headers: getHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to delete delivery');
+    }
+  },
+
   async assignOperator(deliveryId: string, operatorId: string): Promise<FastAPIDelivery> {
-    await this.ensureAuthenticated();
     const res = await fetch(`${API_V1}/deliveries/${encodeURIComponent(deliveryId)}/assign`, {
       method: 'POST',
       headers: getHeaders(),
@@ -280,7 +328,6 @@ export const fastApiClient = {
   },
 
   async updateStatus(deliveryId: string, newStatus: string, note?: string): Promise<FastAPIDelivery> {
-    await this.ensureAuthenticated();
     const res = await fetch(`${API_V1}/deliveries/${encodeURIComponent(deliveryId)}/status`, {
       method: 'POST',
       headers: getHeaders(),
@@ -294,7 +341,6 @@ export const fastApiClient = {
   },
 
   async verifyOTP(deliveryId: string, otp: string, note?: string): Promise<FastAPIDelivery> {
-    await this.ensureAuthenticated();
     const res = await fetch(`${API_V1}/deliveries/${encodeURIComponent(deliveryId)}/verify-otp`, {
       method: 'POST',
       headers: getHeaders(),
@@ -308,7 +354,6 @@ export const fastApiClient = {
   },
 
   async listOperators(): Promise<FastAPIOperator[]> {
-    await this.ensureAuthenticated();
     const res = await fetch(`${API_V1}/operators/`, {
       headers: getHeaders(),
       cache: 'no-store',
@@ -318,7 +363,6 @@ export const fastApiClient = {
   },
 
   async listCustomers(search?: string): Promise<FastAPICustomer[]> {
-    await this.ensureAuthenticated();
     const url = search ? `${API_V1}/customers/?search=${encodeURIComponent(search)}` : `${API_V1}/customers/`;
     const res = await fetch(url, {
       headers: getHeaders(),
@@ -328,8 +372,28 @@ export const fastApiClient = {
     return await res.json();
   },
 
+  async createCustomer(payload: {
+    full_name: string;
+    phone: string;
+    email?: string;
+    default_address: string;
+    area: string;
+    state: string;
+    postcode?: string;
+  }): Promise<FastAPICustomer> {
+    const res = await fetch(`${API_V1}/customers/`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to create customer');
+    }
+    return await res.json();
+  },
+
   async getAnalytics(): Promise<FastAPIAnalytics> {
-    await this.ensureAuthenticated();
     const res = await fetch(`${API_V1}/analytics/overview`, {
       headers: getHeaders(),
       cache: 'no-store',

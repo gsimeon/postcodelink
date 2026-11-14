@@ -1,4 +1,4 @@
-"""Delivery schemas with strict privacy and secure token handling."""
+"""Delivery schemas with privacy preservation and tokenized public tracking."""
 from typing import Optional, List
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict
@@ -47,6 +47,7 @@ class DeliveryVerifyOTPRequest(BaseModel):
 
 class DeliveryResponse(BaseModel):
     id: str
+    tracking_token: str
     merchant_id: Optional[str] = None
     operator_id: Optional[str] = None
     recipient_name: str
@@ -64,7 +65,7 @@ class DeliveryResponse(BaseModel):
     status: DeliveryStatus
     lat: Optional[float] = None
     lng: Optional[float] = None
-    # NOTE: otp field is strictly REMOVED for security
+    # NOTE: PIN is strictly absent from all delivery responses
     otp_attempts: int
     otp_max_attempts: int
     pod_verified: bool
@@ -79,9 +80,9 @@ class DeliveryResponse(BaseModel):
 
 class NotificationDispatchPayload(BaseModel):
     recipient_phone: str
-    delivery_pin: str  # Simulated SMS / WhatsApp gateway dispatch payload on order creation
-    channel: str = "SMS / WhatsApp Gateway"
-    message_preview: str
+    status: str = "DISPATCHED"
+    channel: str = "SMS / WhatsApp Direct Gateway"
+    message_preview: str  # e.g. "PIN dispatched directly to recipient mobile; not exposed in API"
 
 
 class DeliveryCreateResponse(BaseModel):
@@ -89,22 +90,19 @@ class DeliveryCreateResponse(BaseModel):
     notification_dispatch: NotificationDispatchPayload
 
 
+class PublicTrackingEvent(BaseModel):
+    status: DeliveryStatus
+    occurred_at: datetime
+
+
 class DeliveryPublicTrackingResponse(BaseModel):
     id: str
-    recipient_name: str
+    recipient_name_masked: str  # e.g. "C**** N****"
     recipient_phone_masked: str  # e.g. "080****3421"
-    destination_address: str
-    destination_landmark: Optional[str] = None
-    destination_area: str
-    destination_state: str
+    destination_general_location: str  # e.g. "Lekki Phase 1, Lagos"
     postcode_status: PostcodeStatus
     verified_postcode: Optional[str] = None
-    package_description: str
-    fee: float
     status: DeliveryStatus
-    lat: Optional[float] = None
-    lng: Optional[float] = None
-    # No OTP digits exposed in public tracking
     requires_pin_confirmation: bool = True
     otp_attempts: int
     otp_max_attempts: int
@@ -114,4 +112,4 @@ class DeliveryPublicTrackingResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     assigned_operator_name: Optional[str] = None
-    events: List[DeliveryEventResponse] = []
+    timeline: List[PublicTrackingEvent] = []

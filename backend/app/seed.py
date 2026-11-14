@@ -1,4 +1,5 @@
 """Database seed script populating authentic Nigerian logistics, postcode, and courier data."""
+import secrets
 import logging
 from datetime import datetime, timezone, timedelta
 from backend.app.database import engine, SessionLocal, Base
@@ -41,7 +42,7 @@ def seed_database():
             db.commit()
             logger.info(f"Seeded {len(OFFICIAL_POSTCODES)} postcodes.")
 
-        # 2. Seed Default Merchant & Admin Profiles
+        # 2. Seed Default Merchant, Admin, and Operator Profiles
         merchant = db.query(Profile).filter(Profile.email == "dispatch@postcodelink.ng").first()
         if not merchant:
             logger.info("Seeding default merchant profile...")
@@ -135,12 +136,13 @@ def seed_database():
                 db.add(db_op)
             db.commit()
 
-        # 4. Seed Customers
+        # 4. Seed Customers (Scoped to merchant)
         existing_cust = db.query(Customer).count()
-        if existing_cust == 0:
-            logger.info("Seeding customer address book...")
+        if existing_cust == 0 and merchant:
+            logger.info("Seeding customer address book scoped to merchant...")
             customers_data = [
                 {
+                    "merchant_id": merchant.id,
                     "full_name": "Chioma Nwosu",
                     "phone": "08034567890",
                     "email": "chioma.nwosu@example.com",
@@ -151,6 +153,7 @@ def seed_database():
                     "total_orders": 8,
                 },
                 {
+                    "merchant_id": merchant.id,
                     "full_name": "Emeka Okafor",
                     "phone": "08023456781",
                     "email": "emeka.o@example.com",
@@ -161,6 +164,7 @@ def seed_database():
                     "total_orders": 14,
                 },
                 {
+                    "merchant_id": merchant.id,
                     "full_name": "Amina Bello",
                     "phone": "08081234567",
                     "email": "amina.b@example.com",
@@ -186,6 +190,7 @@ def seed_database():
             sample_deliveries = [
                 {
                     "id": "PL-2026-A1098B",
+                    "tracking_token": secrets.token_urlsafe(24),
                     "merchant_id": merchant.id if merchant else None,
                     "operator_id": op1.id if op1 else None,
                     "recipient_name": "Emeka Okafor",
@@ -203,17 +208,18 @@ def seed_database():
                     "status": DeliveryStatus.OUT_FOR_DELIVERY,
                     "lat": 6.5960,
                     "lng": 3.3444,
-                    # Secure hashed OTP (never plaintext)
                     "otp_hash": hash_otp("482910"),
                     "otp_expires_at": now + timedelta(hours=24),
                     "otp_attempts": 0,
                     "otp_max_attempts": 3,
                     "pod_verified": False,
+                    "version": 1,
                     "created_at": now - timedelta(hours=3),
                     "updated_at": now - timedelta(minutes=25),
                 },
                 {
                     "id": "PL-2026-B8712C",
+                    "tracking_token": secrets.token_urlsafe(24),
                     "merchant_id": merchant.id if merchant else None,
                     "operator_id": op2.id if op2 else None,
                     "recipient_name": "Chioma Nwosu",
@@ -237,11 +243,13 @@ def seed_database():
                     "otp_max_attempts": 3,
                     "pod_verified": True,
                     "pod_note": "Handed directly to recipient at gatehouse.",
+                    "version": 2,
                     "created_at": now - timedelta(hours=6),
                     "updated_at": now - timedelta(hours=1),
                 },
                 {
                     "id": "PL-2026-C4409D",
+                    "tracking_token": secrets.token_urlsafe(24),
                     "merchant_id": merchant.id if merchant else None,
                     "operator_id": None,
                     "recipient_name": "Amina Bello",
@@ -264,6 +272,7 @@ def seed_database():
                     "otp_attempts": 0,
                     "otp_max_attempts": 3,
                     "pod_verified": False,
+                    "version": 1,
                     "created_at": now - timedelta(minutes=45),
                     "updated_at": now - timedelta(minutes=45),
                 },

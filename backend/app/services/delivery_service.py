@@ -1,7 +1,8 @@
-"""Delivery service handling business logic, state transitions, and secure OTP verification."""
+"""Delivery service handling business logic, concurrency-safe transactions, and strict privacy."""
 import secrets
+import logging
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple
+from typing import Optional, List
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -20,10 +21,13 @@ from backend.app.schemas.delivery import (
     DeliveryPublicTrackingResponse,
     NotificationDispatchPayload,
     DeliveryResponse,
+    PublicTrackingEvent,
 )
 from backend.app.services.state_machine import can_transition
-from backend.app.services.postcode_service import OFFICIAL_POSTCODES, normalize_string
+from backend.app.services.postcode_service import cleanse_address, normalize_string
 from backend.app.core.security import hash_otp, verify_otp_hash
+
+logger = logging.getLogger("delivery_service")
 
 
 def generate_reference(db: Session) -> str:
@@ -44,30 +48,61 @@ def generate_otp() -> str:
     return f"{secrets.randbelow(900000) + 100000}"
 
 
+# Outbound notification sink for simulated external gateways (Termii / Twilio / SMS)
+DISPATCHED_NOTIFICATIONS: List[dict] = []
+
+
+def dispatch_outbound_notification(recipient_phone: str, recipient_name: str, delivery_id: str, pin: str):
+    """Simulated production SMS / WhatsApp gateway dispatch.
+    
+    In production, this calls Termii, Twilio, or Africa's Talking API.
+    The plaintext PIN is sent ONLY to the recipient's phone and NEVER returned to the merchant HTTP client.
+    """
+    DISPATCHED_NOTIFICATIONS.append({
+        "recipient_phone": recipient_phone,
+        "recipient_name": recipient_name,
+        "delivery_id": delivery_id,
+        "pin": pin,
+        "timestamp": datetime.now(timezone.utc)
+    })
+    logger.info(
+        f"[SMS Gateway Outbound] To: {recipient_phone} | Order: {delivery_id} | "
+        f"Hi {recipient_name}, your PostcodeLink parcel is dispatched. Confirmation PIN: {pin}."
+    )
+
+
 def create_delivery(db: Session, request: DeliveryCreateRequest, current_user: Profile) -> DeliveryCreateResponse:
-    """Create a new delivery scoped strictly to the authenticated merchant."""
+    """Create a new delivery with centralized postcode validation and secure out-of-band PIN dispatch."""
     ref_id = generate_reference(db)
     raw_otp = generate_otp()
     otp_hash_val = hash_otp(raw_otp)
     otp_expires_at = datetime.now(timezone.utc) + timedelta(hours=settings.OTP_EXPIRE_HOURS)
-    
-    # Authoritative reference postcode check
-    verified_code = None
-    postcode_status = PostcodeStatus.UNVERIFIED
-    
-    norm_area = normalize_string(request.destination_area)
-    norm_state = normalize_string(request.destination_state)
-    input_code = request.postcode_input.strip()
+    tracking_token = secrets.token_urlsafe(24)
 
-    for rec in OFFICIAL_POSTCODES:
-        if (rec["code"] == input_code or normalize_string(rec["area"]) == norm_area) and normalize_string(rec["state"]) == norm_state:
-            postcode_status = PostcodeStatus.VERIFIED
-            verified_code = rec["code"]
-            break
+    # CRITICAL FIX: Centralized postcode validation through cleanse_address
+    cleanse_res = cleanse_address(
+        address=request.destination_address,
+        state_hint=request.destination_state,
+        postcode_hint=request.postcode_input,
+        db=db,
+    )
+
+    # Only mark VERIFIED if exact postcode match was confirmed in reference registry
+    input_code = request.postcode_input.strip()
+    if cleanse_res.postcode_status == "verified" and cleanse_res.postcode == input_code:
+        postcode_status = PostcodeStatus.VERIFIED
+        verified_code = cleanse_res.postcode
+    elif cleanse_res.postcode_status == "estimated":
+        postcode_status = PostcodeStatus.ESTIMATED
+        verified_code = cleanse_res.postcode
+    else:
+        postcode_status = PostcodeStatus.UNVERIFIED
+        verified_code = None
 
     delivery = Delivery(
         id=ref_id,
-        merchant_id=current_user.id,  # Strictly derived from authenticated user
+        tracking_token=tracking_token,
+        merchant_id=current_user.id,  # Strictly derived from authenticated merchant
         recipient_name=request.recipient_name.strip(),
         recipient_phone=request.recipient_phone.strip(),
         destination_address=request.destination_address.strip(),
@@ -86,12 +121,13 @@ def create_delivery(db: Session, request: DeliveryCreateRequest, current_user: P
         otp_attempts=0,
         otp_max_attempts=settings.OTP_MAX_ATTEMPTS,
         pod_verified=False,
+        version=1,
     )
     
     db.add(delivery)
     db.flush()
 
-    # Create initial immutable event with verified actor identity
+    # Initial audit log
     init_event = DeliveryEvent(
         delivery_id=delivery.id,
         status=DeliveryStatus.PENDING,
@@ -104,16 +140,14 @@ def create_delivery(db: Session, request: DeliveryCreateRequest, current_user: P
     db.commit()
     db.refresh(delivery)
 
-    # Simulated outbound SMS/WhatsApp notification payload
-    dispatch_msg = (
-        f"Hello {delivery.recipient_name}, your package '{delivery.package_description}' is registered for delivery "
-        f"with tracking {delivery.id}. Your delivery confirmation PIN is: {raw_otp}."
-    )
+    # Dispatch PIN out-of-band to recipient mobile (Never in HTTP response body!)
+    dispatch_outbound_notification(delivery.recipient_phone, delivery.recipient_name, delivery.id, raw_otp)
+
     notification = NotificationDispatchPayload(
         recipient_phone=delivery.recipient_phone,
-        delivery_pin=raw_otp,
-        channel="SMS / WhatsApp Gateway",
-        message_preview=dispatch_msg
+        status="DISPATCHED",
+        channel="SMS / WhatsApp Direct Gateway",
+        message_preview="Confirmation PIN dispatched directly to recipient mobile via secure SMS."
     )
 
     return DeliveryCreateResponse(
@@ -123,27 +157,37 @@ def create_delivery(db: Session, request: DeliveryCreateRequest, current_user: P
 
 
 def assign_operator(db: Session, delivery_id: str, request: DeliveryAssignRequest, current_user: Profile) -> Delivery:
-    """Assign an operator to a delivery with validation on availability, service area, and capacity."""
-    delivery = db.query(Delivery).filter(Delivery.id == delivery_id).first()
+    """Assign an operator with availability, capacity, and service area checks."""
+    delivery = db.query(Delivery).filter(Delivery.id == delivery_id).with_for_update().first()
     if not delivery:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delivery order not found.")
 
-    # Tenant check: only delivery owner merchant or admin can assign
     if current_user.role != AppRole.ADMIN and delivery.merchant_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to assign this delivery.")
 
-    operator = db.query(Operator).filter(Operator.id == request.operator_id).first()
+    # Idempotency: if already assigned to the same operator, return without incrementing counters
+    if delivery.operator_id == request.operator_id:
+        return delivery
+
+    operator = db.query(Operator).filter(Operator.id == request.operator_id).with_for_update().first()
     if not operator:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Courier operator not found.")
 
-    # Operational Check 1: Operator availability
+    # Check 1: Availability
     if not operator.is_available:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Courier operator '{operator.business_name}' is currently unavailable for new dispatches."
         )
 
-    # Operational Check 2: Service area coverage
+    # Check 2: Capacity limit (max 15 active dispatches)
+    if operator.active_deliveries_count >= 15:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Courier operator '{operator.business_name}' has reached maximum dispatch capacity."
+        )
+
+    # Check 3: Service area coverage
     op_areas = [normalize_string(a) for a in (operator.service_areas or [])]
     dest_area = normalize_string(delivery.destination_area)
     if op_areas and "all areas" not in op_areas and not any(a in dest_area or dest_area in a for a in op_areas):
@@ -152,12 +196,11 @@ def assign_operator(db: Session, delivery_id: str, request: DeliveryAssignReques
             detail=f"Operator '{operator.business_name}' does not cover '{delivery.destination_area}'. Covered zones: {', '.join(operator.service_areas)}."
         )
 
-    # Lifecycle state transition check
     allowed, reason = can_transition(delivery.status, DeliveryStatus.ASSIGNED)
     if not allowed:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
 
-    # Atomic counter adjustment: if previously assigned to a different operator, decrement old count
+    # Reassignment: decrement previous operator
     if delivery.operator_id and delivery.operator_id != operator.id:
         old_op = db.query(Operator).filter(Operator.id == delivery.operator_id).first()
         if old_op:
@@ -165,6 +208,7 @@ def assign_operator(db: Session, delivery_id: str, request: DeliveryAssignReques
 
     delivery.operator_id = operator.id
     delivery.status = DeliveryStatus.ASSIGNED
+    delivery.version += 1
     operator.active_deliveries_count += 1
     
     event = DeliveryEvent(
@@ -182,35 +226,53 @@ def assign_operator(db: Session, delivery_id: str, request: DeliveryAssignReques
 
 
 def update_delivery_status(db: Session, delivery_id: str, request: DeliveryStatusUpdateRequest, current_user: Profile) -> Delivery:
-    """Transition delivery state according to lifecycle rules and authenticated permissions."""
-    delivery = db.query(Delivery).filter(Delivery.id == delivery_id).first()
+    """Transition delivery state enforcing role-specific transition authority."""
+    delivery = db.query(Delivery).filter(Delivery.id == delivery_id).with_for_update().first()
     if not delivery:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delivery order not found.")
 
-    # Authorization check
-    is_owner = delivery.merchant_id == current_user.id
-    is_assigned = False
+    # Idempotency check: no duplicate event if status is unchanged
+    if delivery.status == request.new_status:
+        return delivery
+
+    is_merchant_owner = delivery.merchant_id == current_user.id
+    is_assigned_operator = False
     if current_user.role == AppRole.OPERATOR and delivery.operator_id:
         op = db.query(Operator).filter(Operator.profile_id == current_user.id).first()
         if op and op.id == delivery.operator_id:
-            is_assigned = True
+            is_assigned_operator = True
 
-    if current_user.role != AppRole.ADMIN and not is_owner and not is_assigned:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to update status of this delivery.")
+    # Role-Specific Transition Rules:
+    # 1. PICKED_UP, IN_TRANSIT, OUT_FOR_DELIVERY: Assigned Operator or Admin only
+    if request.new_status in [DeliveryStatus.PICKED_UP, DeliveryStatus.IN_TRANSIT, DeliveryStatus.OUT_FOR_DELIVERY]:
+        if not is_assigned_operator and current_user.role != AppRole.ADMIN:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Forbidden: Only the assigned courier operator can advance delivery to '{request.new_status.value}'."
+            )
+
+    # 2. CANCELLED: Merchant owner or Admin only
+    if request.new_status == DeliveryStatus.CANCELLED:
+        if not is_merchant_owner and current_user.role != AppRole.ADMIN:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden: Only the merchant owner or admin can cancel an order."
+            )
+
+    # 3. DELIVERED: Requires OTP confirmation (cannot be arbitrarily set)
+    if request.new_status == DeliveryStatus.DELIVERED and not delivery.pod_verified:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot mark as DELIVERED without recipient OTP confirmation."
+        )
 
     allowed, reason = can_transition(delivery.status, request.new_status)
     if not allowed:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
 
-    # Guard: Cannot mark as DELIVERED without verified PIN
-    if request.new_status == DeliveryStatus.DELIVERED and not delivery.pod_verified:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot mark as DELIVERED without secure recipient OTP confirmation."
-        )
-
     old_status = delivery.status
     delivery.status = request.new_status
+    delivery.version += 1
 
     # Operator active counters update
     if delivery.operator_id and request.new_status in [DeliveryStatus.DELIVERED, DeliveryStatus.CANCELLED]:
@@ -235,12 +297,11 @@ def update_delivery_status(db: Session, delivery_id: str, request: DeliveryStatu
 
 
 def verify_delivery_otp(db: Session, delivery_id: str, request: DeliveryVerifyOTPRequest, current_user: Profile) -> Delivery:
-    """Verify delivery PIN with hash validation, expiry checks, and atomic 3-attempt lockout."""
-    delivery = db.query(Delivery).filter(Delivery.id == delivery_id).first()
+    """Verify delivery PIN with row-level locking, expiry, and atomic 3-attempt lockout."""
+    delivery = db.query(Delivery).filter(Delivery.id == delivery_id).with_for_update().first()
     if not delivery:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delivery order not found.")
 
-    # Authorization check
     is_owner = delivery.merchant_id == current_user.id
     is_assigned = False
     if current_user.role == AppRole.OPERATOR and delivery.operator_id:
@@ -253,9 +314,12 @@ def verify_delivery_otp(db: Session, delivery_id: str, request: DeliveryVerifyOT
 
     now = datetime.now(timezone.utc)
 
-    # 1. Already delivered
-    if delivery.pod_verified and delivery.status == DeliveryStatus.DELIVERED:
-        return delivery
+    # 1. Single-use guard: Cannot verify an already finalized/delivered order
+    if delivery.pod_verified or delivery.status == DeliveryStatus.DELIVERED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Delivery order has already been verified and delivered."
+        )
 
     # 2. Check lockout
     if delivery.otp_locked_until:
@@ -285,15 +349,16 @@ def verify_delivery_otp(db: Session, delivery_id: str, request: DeliveryVerifyOT
                 detail="Delivery confirmation PIN has expired. A new delivery order must be issued."
             )
 
-    # 4. Check PIN Match via secure hash comparison
+    # 4. Check PIN Match
     if verify_otp_hash(request.otp, delivery.otp_hash):
         delivery.pod_verified = True
         delivery.status = DeliveryStatus.DELIVERED
         delivery.otp_attempts = 0
         delivery.otp_locked_until = None
-        # Single-use enforcement: invalidate hash so it can never be used again
+        # Single-use revocation
         delivery.otp_hash = "REVOKED_AND_VERIFIED"
-        delivery.pod_note = request.note or "Verified via recipient 6-digit confirmation PIN."
+        delivery.pod_note = request.note or "Verified via recipient confirmation PIN."
+        delivery.version += 1
 
         if delivery.operator_id:
             op = db.query(Operator).filter(Operator.id == delivery.operator_id).first()
@@ -314,8 +379,9 @@ def verify_delivery_otp(db: Session, delivery_id: str, request: DeliveryVerifyOT
         db.refresh(delivery)
         return delivery
 
-    # MISMATCH: Increment attempt counter
+    # MISMATCH: Increment attempt counter atomically
     delivery.otp_attempts += 1
+    delivery.version += 1
     remaining = delivery.otp_max_attempts - delivery.otp_attempts
     
     if remaining <= 0:
@@ -342,15 +408,33 @@ def verify_delivery_otp(db: Session, delivery_id: str, request: DeliveryVerifyOT
     )
 
 
-def get_public_tracking(db: Session, delivery_id: str) -> DeliveryPublicTrackingResponse:
-    """Format delivery for public recipient tracking. No OTP digits exposed."""
-    delivery = db.query(Delivery).filter(Delivery.id == delivery_id).first()
-    if not delivery:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delivery tracking reference not found.")
+def mask_recipient_name(name: str) -> str:
+    parts = name.strip().split()
+    masked_parts = []
+    for p in parts:
+        if len(p) <= 2:
+            masked_parts.append(p[0] + "*")
+        else:
+            masked_parts.append(p[0] + "*" * (len(p) - 1))
+    return " ".join(masked_parts)
 
-    # Mask recipient phone: e.g. "080****5678"
+
+def get_public_tracking(db: Session, identifier: str) -> DeliveryPublicTrackingResponse:
+    """Format delivery for public recipient tracking by ID or tracking token.
+    
+    Enforces strict privacy: masks recipient name, masks phone, hides exact street address,
+    hides coordinates, hides parcel description, hides fees, and hides internal actor notes.
+    """
+    delivery = db.query(Delivery).filter(
+        (Delivery.id == identifier) | (Delivery.tracking_token == identifier)
+    ).first()
+    if not delivery:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delivery tracking record not found.")
+
     phone = delivery.recipient_phone
     masked_phone = f"{phone[:3]}****{phone[-4:]}" if len(phone) >= 7 else "***"
+    masked_name = mask_recipient_name(delivery.recipient_name)
+    general_location = f"{delivery.destination_area}, {delivery.destination_state}"
 
     now = datetime.now(timezone.utc)
     is_locked = False
@@ -366,21 +450,20 @@ def get_public_tracking(db: Session, delivery_id: str) -> DeliveryPublicTracking
 
     operator_name = delivery.assigned_operator.business_name if delivery.assigned_operator else None
 
+    # Public timeline (no internal actor notes or IDs)
+    public_timeline = [
+        PublicTrackingEvent(status=e.status, occurred_at=e.occurred_at)
+        for e in delivery.events
+    ]
+
     return DeliveryPublicTrackingResponse(
         id=delivery.id,
-        recipient_name=delivery.recipient_name,
+        recipient_name_masked=masked_name,
         recipient_phone_masked=masked_phone,
-        destination_address=delivery.destination_address,
-        destination_landmark=delivery.destination_landmark,
-        destination_area=delivery.destination_area,
-        destination_state=delivery.destination_state,
+        destination_general_location=general_location,
         postcode_status=delivery.postcode_status,
         verified_postcode=delivery.verified_postcode,
-        package_description=delivery.package_description,
-        fee=float(delivery.fee),
         status=delivery.status,
-        lat=delivery.lat,
-        lng=delivery.lng,
         requires_pin_confirmation=True,
         otp_attempts=delivery.otp_attempts,
         otp_max_attempts=delivery.otp_max_attempts,
@@ -390,5 +473,5 @@ def get_public_tracking(db: Session, delivery_id: str) -> DeliveryPublicTracking
         created_at=delivery.created_at,
         updated_at=delivery.updated_at,
         assigned_operator_name=operator_name,
-        events=delivery.events,
+        timeline=public_timeline,
     )

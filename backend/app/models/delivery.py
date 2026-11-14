@@ -1,4 +1,5 @@
-"""Delivery order model."""
+"""Delivery order model with cryptographic tracking token and concurrency locking."""
+import secrets
 from datetime import datetime, timezone
 from sqlalchemy import Column, String, Boolean, Float, Integer, DateTime, ForeignKey, Enum as SAEnum, Numeric
 from sqlalchemy.orm import relationship
@@ -9,7 +10,8 @@ from backend.app.models.enums import DeliveryStatus, PostcodeStatus
 class Delivery(Base):
     __tablename__ = "deliveries"
 
-    id = Column(String(32), primary_key=True, index=True)  # e.g. "PL-2026-AB12CD"
+    id = Column(String(32), primary_key=True, index=True)  # Human-readable reference: "PL-2026-AB12CD"
+    tracking_token = Column(String(64), unique=True, index=True, nullable=False, default=lambda: secrets.token_urlsafe(24))
     merchant_id = Column(String(36), ForeignKey("profiles.id", ondelete="SET NULL"), nullable=True, index=True)
     operator_id = Column(String(36), ForeignKey("operators.id", ondelete="SET NULL"), nullable=True, index=True)
     
@@ -45,7 +47,7 @@ class Delivery(Base):
     pod_verified = Column(Boolean, nullable=False, default=False)
     pod_note = Column(String(500), nullable=True)
     
-    # Concurrency control
+    # Concurrency control & optimistic locking
     version = Column(Integer, nullable=False, default=1)
     
     estimated_delivery_time = Column(DateTime, nullable=True)

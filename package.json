@@ -7,6 +7,7 @@
     "backend:dev": "uvicorn backend.app.main:app --reload --port 8000",
     "backend:test": "pytest backend/tests -v",
     "backend:seed": "python -m backend.app.seed",
+    "backend:migrate": "alembic upgrade head",
     "build": "next build",
     "start": "next start",
     "test": "node scripts/run-tests.mjs",

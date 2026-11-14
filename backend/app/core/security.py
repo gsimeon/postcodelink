@@ -52,3 +52,4 @@ def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta]
 def decode_access_token(token: str) -> Dict[str, Any]:
     """Decode and validate a signed JWT access token."""
     return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+

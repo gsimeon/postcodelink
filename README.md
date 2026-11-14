@@ -6,48 +6,43 @@ PostcodeLink bridges the gap between customer addresses (often described with in
 
 ---
 
-## Architecture & Reliability Gate v1 (Post-Audit Fixes)
+## Architecture & Security Hardening (v1.2.0 Production Standard)
 
-Following an in-depth security and reliability audit, the platform has completed the **Reliability Gate v1** upgrades:
+Following an in-depth security and architectural audit of the FastAPI backend and Next.js frontend, the platform has completed enterprise-grade hardening:
 
-### 1. P0 — Strict Postcode Verification (Zero False-Positives)
-- **Problem Fixed**: Previously, `isVerified` in `CreateDeliveryModal.tsx` defaulted to true, allowing addresses to retain a "verified" badge even after modification without a matching record.
-- **Implementation**: Postcode status now **strictly defaults to unverified**. Every keystroke or state change re-evaluates the address against the verified NIPOST registry. If no authoritative 6-digit match exists, the record is explicitly saved as `postcodeStatus: 'unverified'` with manual landmark dispatch instructions.
+### 1. P0 — Authentication & Privilege Escalation Immunity
+- **Public Registration Role Lockdown**: Public registration (`POST /api/v1/auth/register`) strictly sets account role to `merchant`. Client-supplied role attributes are discarded.
+- **Controlled Account Provisioning**: Operator couriers and additional platform administrators can only be provisioned by authenticated Platform Admins via `POST /api/v1/auth/admin/create-user`.
+- **Production Secret Guard**: In `production` environments, the API refuses startup if `SECRET_KEY` is missing, default, or shorter than 32 characters.
 
-### 2. P0 — OTP Security & Brute-Force Lockout
-- **Problem Fixed**: Plaintext PIN was previously exposed in the public tracking interface, and verification was executed in unthrottled browser-side code.
-- **Implementation**:
-  - **Plaintext Masking**: The public tracking view masks the PIN (`••••`). A two-factor identity challenge requires verifying the last 4 digits of the recipient's phone number before revealing the PIN on screen.
-  - **Rate Limiting & Lockout**: Implemented a **3-attempt maximum limit**. Exceeding 3 failed attempts triggers an automatic **15-minute lockout** to prevent brute-force attacks.
-  - **Server-Side Verification**: A dedicated server API route (`POST /api/deliveries/verify-otp`) authenticates delivery confirmations and writes to an immutable event log.
+### 2. P0 — Complete Multi-Tenant Isolation
+- **Customer Directory Isolation**: Customer records are strictly scoped by `merchant_id` with a database-level composite unique constraint `(merchant_id, phone)`. Merchants can only list, read, or delete recipient entries belonging to their account.
+- **Delivery Order Isolation**: Merchants are prevented from viewing or modifying orders belonging to other merchants. Courier operators only access deliveries dispatched to their specific fleet.
+- **No Hardcoded Client Credentials**: Next.js client authentication uses explicit session tokens without silent hardcoded demo merchant fallbacks.
 
-### 3. P0 — Supabase Role-Based Row Level Security (RLS)
-- **Problem Fixed**: Initial starter migration contained no active RLS access policies.
-- **Implementation**: Applied [`supabase/migrations/0002_role_based_rls_policies.sql`](file:///c:/Users/PC/.gemini/antigravity-ide/scratch/postcodelink/supabase/migrations/0002_role_based_rls_policies.sql) defining role-aware security boundaries:
-  - **Merchants**: Can insert, view, and manage only deliveries belonging to their authenticated user ID.
-  - **Operators**: Can view and update status strictly on deliveries assigned to their profile.
-  - **Delivery Events**: Strictly **immutable audit history** (client updates and deletions are blocked by RLS).
+### 3. P0 — Zero-Knowledge Delivery PIN (OTP) & Out-of-Band Dispatch
+- **Zero-Knowledge API Boundary**: The plaintext 6-digit confirmation PIN is **never** returned in any HTTP response payload—not in delivery creation, order detail, status logs, or notification preview payloads.
+- **Out-of-Band SMS / WhatsApp Dispatch**: The generated PIN is dispatched exclusively to the simulated or live SMS/WhatsApp gateway (`dispatch_outbound_notification`) directly to the recipient's phone number.
+- **Cryptographic Storage & Single-Use Revocation**: Stored using SHA-256 with order-specific salt. Upon successful delivery confirmation, the hash is immediately overwritten with `REVOKED_AND_VERIFIED`, preventing replay attacks.
+- **Concurrency-Safe Lockout**: Verifications acquire row-level locks (`with_for_update()`). Brute-force protection limits failed attempts to 3, after which a 15-minute lockout is enforced.
 
-### 4. P1 — Server-Side Postcode API Isolation
-- **Problem Fixed**: Settings interface previously allowed entering upstream API keys into client-side `localStorage`.
-- **Implementation**:
-  - All upstream credentials (`NIPOST_API_KEY`, `NIPOST_API_BASE_URL`) are isolated to server-side environment variables in `.env.local`.
-  - Upstream communication is routed through server endpoints:
-    - `GET /api/postcode/lookup?code=105102`
-    - `POST /api/postcode/cleanse`
-  - Upstream failure automatically falls back to the local verified NIPOST registry with clear metadata flags.
+### 4. P0 — Privacy-Preserving Public Tracking Portal
+- **Tokenized URL Access**: Public tracking routes accept cryptographically random URL tokens (`tracking_token`) or delivery IDs.
+- **PII Masking**: Recipient names (`C******* N*****`) and phone numbers (`080****7890`) are masked on public views.
+- **Internal Data Shielding**: Exact street addresses, landmarks, GPS coordinates, fulfillment fees, package descriptions, and internal rider/admin audit notes are withheld from unauthenticated tracking responses.
 
-### 5. P1 — Operational vs. Simulated Data Boundaries
-- **Transparent Labelling**: Preloaded records are explicitly marked as demonstration data.
-- **Dispatch Radar Map**: Clarified that the SVG radar visualizer plots geographic anchor points across Nigerian metropolitan corridors (Lagos, Abuja, Rivers), not live hardware GPS device telemetry.
+### 5. P0 — Centralized Strict Postcode Verification
+- **No False Positives or Fallbacks**: Normalized through `cleanse_address`. An address is marked `verified` only when an exact 6-digit code matches the reference registry.
+- **Estimated vs Unverified**: Area-only matches receive `estimated` status (never `verified`). Unknown addresses receive `unverified` and empty postcodes with **zero fallback to 100001**.
 
-### 6. Collision-Resistant References & Lifecycle State Machine
-- **Delivery References**: Replaced pseudo-random integers with cryptographically secure, collision-resistant identifiers: `PL-[YEAR]-[6-CHAR-HEX]` (e.g. `PL-2026-A4F19B`).
-- **State Machine Validator**: Enforces strict lifecycle progression:
-  ```
-  draft → pending_assignment → assigned → in_transit → delivered / failed
-  ```
-  Terminal states (`delivered`, `cancelled`) are locked and reject further status modifications.
+### 6. Operational Fleet Guards & Lifecycle State Machine
+- **Assignment Idempotency**: Reassigning an order to the same operator is idempotent and does not double-count active delivery quotas.
+- **Operator Capacity Guard**: Assignments are rejected with HTTP 400 if an operator reaches the maximum active dispatch capacity (15 active orders).
+- **Role-Enforced Status Transitions**: Order status progression (`PICKED_UP`, `IN_TRANSIT`, `OUT_FOR_DELIVERY`) requires assigned operator or admin credentials; cancellations require merchant ownership or admin authority. Terminal states (`DELIVERED`, `CANCELLED`) reject modifications. Optimistic locking is enforced via the `version` column.
+
+### 7. Database Migrations via Alembic
+- Integrated Alembic migrations in `backend/alembic/` supporting SQLite for development and PostgreSQL for production.
+- Initial baseline migration `1789ba72611e` version-controls all relational schemas, indexes, and constraints.
 
 ---
 
@@ -245,13 +240,17 @@ Interactive OpenAPI documentation is live at **`http://127.0.0.1:8000/docs`** an
    backend/venv/Scripts/pip install -r backend/requirements.txt
    ```
 
-2. Seed database with official NIPOST postcodes and demo fleet:
+2. Apply database migrations & seed reference data:
    ```bash
+   # Run Alembic migrations
+   python -m alembic upgrade head
+   
+   # Seed official Nigerian postcodes and initial profiles
    npm run backend:seed
    # Or: backend/venv/Scripts/python -m backend.app.seed
    ```
 
-3. Run FastAPI automated test suite (7/7 tests passing):
+3. Run FastAPI automated security & API test suite (11/11 tests passing):
    ```bash
    npm run backend:test
    # Or: backend/venv/Scripts/python -m pytest backend/tests -v

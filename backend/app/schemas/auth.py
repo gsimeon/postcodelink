@@ -8,9 +8,18 @@ from backend.app.models.enums import AppRole
 class UserRegisterRequest(BaseModel):
     full_name: str = Field(..., min_length=2)
     email: EmailStr
-    password: str = Field(..., min_length=6)
+    password: str = Field(..., min_length=8)  # Enforce minimum 8 characters
     phone: Optional[str] = None
-    role: AppRole = AppRole.MERCHANT
+    business_name: Optional[str] = None
+    # NOTE: Public registration MUST NOT allow specifying role. Role is strictly assigned by server.
+
+
+class AdminCreateUserRequest(BaseModel):
+    full_name: str = Field(..., min_length=2)
+    email: EmailStr
+    password: str = Field(..., min_length=8)
+    phone: Optional[str] = None
+    role: AppRole
     business_name: Optional[str] = None
 
 

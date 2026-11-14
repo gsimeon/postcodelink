@@ -2,14 +2,15 @@
 import os
 import secrets
 from typing import List
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "PostcodeLink Nigeria API"
-    VERSION: str = "1.1.0"
+    VERSION: str = "1.2.0"
     API_V1_STR: str = "/api/v1"
-    ENVIRONMENT: str = "development"
+    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
     
     # Database URL: default SQLite, switchable to PostgreSQL via DATABASE_URL
     DATABASE_URL: str = "sqlite:///./postcodelink.db"
@@ -22,8 +23,7 @@ class Settings(BaseSettings):
     ]
     
     # Security & JWT Token Auth
-    # In production, SECRET_KEY must be provided via environment variable
-    SECRET_KEY: str = os.getenv("SECRET_KEY", "postcodelink_dev_secret_key_change_in_production_" + secrets.token_hex(16))
+    SECRET_KEY: str = os.getenv("SECRET_KEY", "postcodelink_dev_secret_key_" + secrets.token_hex(16))
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
     
@@ -32,11 +32,20 @@ class Settings(BaseSettings):
     OTP_LOCKOUT_MINUTES: int = 15
     OTP_EXPIRE_HOURS: int = 24
     
-    # Seeding & External Integrations
-    SEED_DEMO_DATA: bool = True
+    # Seeding & External Integrations: SEED_DEMO_DATA defaults to True in dev only
+    SEED_DEMO_DATA: bool = os.getenv("SEED_DEMO_DATA", "false").lower() in ("true", "1") or (os.getenv("ENVIRONMENT", "development") == "development")
     NIPOST_API_KEY: str = ""
     NIPOST_API_URL: str = ""
-    
+
+    @model_validator(mode="after")
+    def validate_production_security(self):
+        """Reject startup if running in production without explicit, secure SECRET_KEY."""
+        if self.ENVIRONMENT == "production":
+            raw_secret = self.SECRET_KEY
+            if not raw_secret or len(raw_secret) < 32 or raw_secret.startswith("postcodelink_dev"):
+                raise ValueError("Fatal Security Error: In production, SECRET_KEY must be set to a strong secret (at least 32 characters).")
+        return self
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

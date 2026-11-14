@@ -1,6 +1,6 @@
-"""Customer directory router with access control."""
+"""Customer directory router with strict tenant isolation."""
 from typing import List, Optional
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, status, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
@@ -21,8 +21,11 @@ def api_list_customers(
     current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
     db: Session = Depends(get_db),
 ):
-    """List recurring delivery customers and recipient address book (Merchants/Admins only)."""
+    """List customer address book scoped strictly to the authenticated merchant."""
     query = db.query(Customer)
+    if current_user.role == AppRole.MERCHANT:
+        query = query.filter(Customer.merchant_id == current_user.id)
+
     if search:
         term = f"%{search.strip()}%"
         query = query.filter(
@@ -42,8 +45,13 @@ def api_create_customer(
     current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
     db: Session = Depends(get_db),
 ):
-    """Add a new customer to recipient address directory."""
-    cust = db.query(Customer).filter(Customer.phone == request.phone.strip()).first()
+    """Add or update customer in the authenticated merchant's address directory."""
+    merchant_id = current_user.id
+    cust = db.query(Customer).filter(
+        Customer.merchant_id == merchant_id,
+        Customer.phone == request.phone.strip()
+    ).first()
+
     if cust:
         cust.total_orders += 1
         cust.default_address = request.default_address.strip()
@@ -56,6 +64,7 @@ def api_create_customer(
         return cust
 
     new_cust = Customer(
+        merchant_id=merchant_id,
         full_name=request.full_name.strip(),
         phone=request.phone.strip(),
         email=request.email.strip() if request.email else None,
@@ -69,3 +78,38 @@ def api_create_customer(
     db.commit()
     db.refresh(new_cust)
     return new_cust
+
+
+@router.get("/{customer_id}", response_model=CustomerResponse)
+def api_get_customer(
+    customer_id: str,
+    current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
+    db: Session = Depends(get_db),
+):
+    """Get customer record scoped strictly to merchant ownership."""
+    cust = db.query(Customer).filter(Customer.id == customer_id).first()
+    if not cust:
+        raise HTTPException(status_code=404, detail="Customer not found.")
+
+    if current_user.role != AppRole.ADMIN and cust.merchant_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden: You cannot access another merchant's customer.")
+
+    return cust
+
+
+@router.delete("/{customer_id}", status_code=status.HTTP_204_NO_CONTENT)
+def api_delete_customer(
+    customer_id: str,
+    current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
+    db: Session = Depends(get_db),
+):
+    """Delete a customer entry from merchant's address book."""
+    cust = db.query(Customer).filter(Customer.id == customer_id).first()
+    if not cust:
+        raise HTTPException(status_code=404, detail="Customer not found.")
+
+    if current_user.role != AppRole.ADMIN and cust.merchant_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden: You cannot delete another merchant's customer.")
+
+    db.delete(cust)
+    db.commit()

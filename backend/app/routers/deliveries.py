@@ -40,6 +40,20 @@ def api_create_delivery(
     return create_delivery(db, request, current_user)
 
 
+@router.post("/bulk", response_model=List[DeliveryResponse], status_code=status.HTTP_201_CREATED)
+def api_bulk_create_deliveries(
+    items: List[DeliveryCreateRequest],
+    current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
+    db: Session = Depends(get_db),
+):
+    """Batch import delivery orders into the authenticated merchant's account."""
+    created_items = []
+    for item in items:
+        res = create_delivery(db, item, current_user)
+        created_items.append(res.delivery)
+    return created_items
+
+
 @router.get("/", response_model=List[DeliveryResponse])
 def api_list_deliveries(
     status_filter: Optional[DeliveryStatus] = Query(None, alias="status"),
@@ -90,7 +104,6 @@ def api_get_delivery(
     if not delivery:
         raise HTTPException(status_code=404, detail="Delivery order not found.")
 
-    # Authorization
     if current_user.role == AppRole.MERCHANT and delivery.merchant_id != current_user.id:
         raise HTTPException(status_code=403, detail="Forbidden: You do not have access to this delivery order.")
     elif current_user.role == AppRole.OPERATOR:
@@ -101,10 +114,13 @@ def api_get_delivery(
     return delivery
 
 
-@router.get("/{delivery_id}/tracking", response_model=DeliveryPublicTrackingResponse)
-def api_get_tracking(delivery_id: str, db: Session = Depends(get_db)):
-    """Public customer tracking portal endpoint. Masked recipient phone, ZERO OTP digits exposed."""
-    return get_public_tracking(db, delivery_id)
+@router.get("/{identifier}/tracking", response_model=DeliveryPublicTrackingResponse)
+def api_get_tracking(identifier: str, db: Session = Depends(get_db)):
+    """Public customer tracking portal endpoint by delivery ID or tracking token.
+    
+    Protects privacy: masks name and phone, hides exact street address and coordinates.
+    """
+    return get_public_tracking(db, identifier)
 
 
 @router.post("/{delivery_id}/assign", response_model=DeliveryResponse)
@@ -125,7 +141,7 @@ def api_update_status(
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Update delivery status enforcing valid state machine transitions and authenticated actor claims."""
+    """Update delivery status enforcing valid state machine transitions and role authority."""
     return update_delivery_status(db, delivery_id, request, current_user)
 
 
@@ -138,3 +154,24 @@ def api_verify_otp(
 ):
     """Confirm delivery via 6-digit recipient PIN with 3-attempt brute-force protection."""
     return verify_delivery_otp(db, delivery_id, request, current_user)
+
+
+@router.delete("/{delivery_id}", status_code=status.HTTP_204_NO_CONTENT)
+def api_delete_delivery(
+    delivery_id: str,
+    current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
+    db: Session = Depends(get_db),
+):
+    """Delete a delivery order (only permitted for unassigned or cancelled orders by merchant owner/admin)."""
+    delivery = db.query(Delivery).filter(Delivery.id == delivery_id).first()
+    if not delivery:
+        raise HTTPException(status_code=404, detail="Delivery order not found.")
+
+    if current_user.role != AppRole.ADMIN and delivery.merchant_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden: You cannot delete another merchant's delivery.")
+
+    if delivery.status not in [DeliveryStatus.PENDING, DeliveryStatus.CANCELLED]:
+        raise HTTPException(status_code=400, detail="Cannot delete an order that has already been dispatched or delivered.")
+
+    db.delete(delivery)
+    db.commit()
