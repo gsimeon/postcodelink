@@ -186,7 +186,14 @@ def cleanse_address(
         area_consistent = True
         if norm_area_hint:
             # If area hint was provided, ensure it is consistent with the postcode area
-            if norm_area_hint not in matched_area_norm and matched_area_norm not in norm_area_hint and norm_area_hint not in norm_addr:
+            # Compare the declared area only with the matched postcode directory area.
+            # Mentioning the supplied area somewhere else in the street address is not proof
+            # that it belongs to this postcode.
+            if not (
+                norm_area_hint == matched_area_norm
+                or norm_area_hint in matched_area_norm
+                or matched_area_norm in norm_area_hint
+            ):
                 area_consistent = False
 
         state_consistent = True
