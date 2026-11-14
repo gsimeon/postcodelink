@@ -15,6 +15,7 @@ class Profile(Base):
     role = Column(SAEnum(AppRole), nullable=False, default=AppRole.MERCHANT)
     phone = Column(String(32), nullable=True)
     email = Column(String(255), unique=True, index=True, nullable=False)
+    hashed_password = Column(String(255), nullable=False)
     business_name = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
@@ -22,4 +23,3 @@ class Profile(Base):
     # Relationships
     operators = relationship("Operator", back_populates="profile", cascade="all, delete-orphan")
     deliveries = relationship("Delivery", back_populates="merchant", foreign_keys="Delivery.merchant_id")
-

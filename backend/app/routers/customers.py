@@ -1,4 +1,4 @@
-"""Customer directory router."""
+"""Customer directory router with access control."""
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
@@ -6,7 +6,10 @@ from sqlalchemy import or_
 
 from backend.app.database import get_db
 from backend.app.models.customer import Customer
+from backend.app.models.profile import Profile
+from backend.app.models.enums import AppRole
 from backend.app.schemas.customer import CustomerCreate, CustomerResponse
+from backend.app.core.auth_deps import require_roles
 
 router = APIRouter(prefix="/customers", tags=["customers"])
 
@@ -15,9 +18,10 @@ router = APIRouter(prefix="/customers", tags=["customers"])
 def api_list_customers(
     search: Optional[str] = Query(None),
     limit: int = Query(50, le=100),
-    db: Session = Depends(get_db)
+    current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
+    db: Session = Depends(get_db),
 ):
-    """List recurring delivery customers and recipient address book."""
+    """List recurring delivery customers and recipient address book (Merchants/Admins only)."""
     query = db.query(Customer)
     if search:
         term = f"%{search.strip()}%"
@@ -33,7 +37,11 @@ def api_list_customers(
 
 
 @router.post("/", response_model=CustomerResponse, status_code=status.HTTP_201_CREATED)
-def api_create_customer(request: CustomerCreate, db: Session = Depends(get_db)):
+def api_create_customer(
+    request: CustomerCreate,
+    current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
+    db: Session = Depends(get_db),
+):
     """Add a new customer to recipient address directory."""
     cust = db.query(Customer).filter(Customer.phone == request.phone.strip()).first()
     if cust:
@@ -61,4 +69,3 @@ def api_create_customer(request: CustomerCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(new_cust)
     return new_cust
-

@@ -21,23 +21,22 @@ def api_lookup_postcodes(
     code: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
-    """Search authoritative Nigerian postal codes by state, LGA/area, or 6-digit code."""
+    """Search official Nigerian postal codes from the local NIPOST reference dataset."""
     matches = find_postcodes(db=db, state=state, area=area, code=code)
     return PostcodeLookupResponse(
-        source="postcodelink_nipost_registry",
+        source="local_nipost_reference_dataset",
         count=len(matches),
         matches=matches,
-        is_live_nipost=True,
+        is_live_nipost=False,
     )
 
 
 @router.post("/cleanse", response_model=CleanseAddressResponse)
 def api_cleanse_address(request: CleanseAddressRequest, db: Session = Depends(get_db)):
-    """Normalize and cleanse a messy Nigerian street address against verified postal codes."""
+    """Normalize and cleanse a messy Nigerian street address against verified reference postcodes."""
     return cleanse_address(
         address=request.address,
         state_hint=request.state,
         postcode_hint=request.postcode,
         db=db,
     )
-

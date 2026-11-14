@@ -10,6 +10,7 @@ from backend.app.config import settings
 from backend.app.database import engine, Base, get_db
 from backend.app.seed import seed_database
 from backend.app.routers import (
+    auth,
     deliveries,
     postcodes,
     operators,
@@ -22,13 +23,16 @@ logger = logging.getLogger("uvicorn")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan context manager running startup database initialization and seeding."""
+    """Lifespan context manager running startup database initialization and controlled seeding."""
     logger.info("Initializing PostcodeLink Nigeria Database...")
     Base.metadata.create_all(bind=engine)
-    try:
-        seed_database()
-    except Exception as e:
-        logger.warning(f"Database seed note: {e}")
+    
+    # Controlled seeding: only seed if explicitly enabled and not in production
+    if settings.SEED_DEMO_DATA and settings.ENVIRONMENT != "production":
+        try:
+            seed_database()
+        except Exception as e:
+            logger.warning(f"Database seed note: {e}")
     yield
     logger.info("Shutting down PostcodeLink API...")
 
@@ -52,6 +56,7 @@ app.add_middleware(
 )
 
 # Register routers under /api/v1
+app.include_router(auth.router, prefix=settings.API_V1_STR)
 app.include_router(deliveries.router, prefix=settings.API_V1_STR)
 app.include_router(postcodes.router, prefix=settings.API_V1_STR)
 app.include_router(operators.router, prefix=settings.API_V1_STR)
@@ -65,6 +70,7 @@ def root():
         "service": "PostcodeLink Nigeria API",
         "status": "operational",
         "version": settings.VERSION,
+        "environment": settings.ENVIRONMENT,
         "docs_url": "/docs",
         "api_v1": settings.API_V1_STR,
     }
@@ -79,4 +85,3 @@ def health(db: Session = Depends(get_db)):
         "database": "connected",
         "engine": engine.name,
     }
-

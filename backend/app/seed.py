@@ -10,13 +10,14 @@ from backend.app.models.delivery_event import DeliveryEvent
 from backend.app.models.postcode import PostcodeDirectory
 from backend.app.models.enums import DeliveryStatus, PostcodeStatus, AppRole, VehicleType
 from backend.app.services.postcode_service import OFFICIAL_POSTCODES
+from backend.app.core.security import hash_password, hash_otp
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("seed")
 
 
 def seed_database():
-    """Initializes tables and seeds base records."""
+    """Initializes tables and seeds base records with secure password and OTP hashes."""
     logger.info("Creating database tables if not exist...")
     Base.metadata.create_all(bind=engine)
 
@@ -40,7 +41,7 @@ def seed_database():
             db.commit()
             logger.info(f"Seeded {len(OFFICIAL_POSTCODES)} postcodes.")
 
-        # 2. Seed Default Merchant Profile
+        # 2. Seed Default Merchant & Admin Profiles
         merchant = db.query(Profile).filter(Profile.email == "dispatch@postcodelink.ng").first()
         if not merchant:
             logger.info("Seeding default merchant profile...")
@@ -49,11 +50,42 @@ def seed_database():
                 role=AppRole.MERCHANT,
                 phone="+2348023456789",
                 email="dispatch@postcodelink.ng",
+                hashed_password=hash_password("MerchantPass123!"),
                 business_name="Lagos Gadget Hub & Fulfillment"
             )
             db.add(merchant)
-            db.commit()
+
+        admin = db.query(Profile).filter(Profile.email == "admin@postcodelink.ng").first()
+        if not admin:
+            logger.info("Seeding default platform admin profile...")
+            admin = Profile(
+                full_name="PostcodeLink Admin",
+                role=AppRole.ADMIN,
+                phone="+2348099001122",
+                email="admin@postcodelink.ng",
+                hashed_password=hash_password("AdminSecure2026!"),
+                business_name="PostcodeLink Logistics Network"
+            )
+            db.add(admin)
+
+        operator_user = db.query(Profile).filter(Profile.email == "rider@postcodelink.ng").first()
+        if not operator_user:
+            logger.info("Seeding default fleet rider profile...")
+            operator_user = Profile(
+                full_name="Ibrahim Danladi",
+                role=AppRole.OPERATOR,
+                phone="+2348031122334",
+                email="rider@postcodelink.ng",
+                hashed_password=hash_password("RiderPass123!"),
+                business_name="Apex Express Dispatch"
+            )
+            db.add(operator_user)
+
+        db.commit()
+        if merchant:
             db.refresh(merchant)
+        if operator_user:
+            db.refresh(operator_user)
 
         # 3. Seed Courier Operators
         existing_ops = db.query(Operator).count()
@@ -61,6 +93,7 @@ def seed_database():
             logger.info("Seeding courier fleet operators...")
             operators_data = [
                 {
+                    "profile_id": operator_user.id if operator_user else None,
                     "business_name": "Apex Express Dispatch",
                     "phone": "+2348031122334",
                     "vehicle_type": VehicleType.MOTORCYCLE,
@@ -68,7 +101,7 @@ def seed_database():
                     "is_available": True,
                     "rating": 4.9,
                     "completed_deliveries": 342,
-                    "active_deliveries_count": 2,
+                    "active_deliveries_count": 1,
                     "current_lat": 6.5960,
                     "current_lng": 3.3444,
                 },
@@ -80,7 +113,7 @@ def seed_database():
                     "is_available": True,
                     "rating": 4.8,
                     "completed_deliveries": 510,
-                    "active_deliveries_count": 1,
+                    "active_deliveries_count": 0,
                     "current_lat": 6.4281,
                     "current_lng": 3.4219,
                 },
@@ -170,7 +203,9 @@ def seed_database():
                     "status": DeliveryStatus.OUT_FOR_DELIVERY,
                     "lat": 6.5960,
                     "lng": 3.3444,
-                    "otp": "482910",
+                    # Secure hashed OTP (never plaintext)
+                    "otp_hash": hash_otp("482910"),
+                    "otp_expires_at": now + timedelta(hours=24),
                     "otp_attempts": 0,
                     "otp_max_attempts": 3,
                     "pod_verified": False,
@@ -196,7 +231,8 @@ def seed_database():
                     "status": DeliveryStatus.DELIVERED,
                     "lat": 6.4474,
                     "lng": 3.4723,
-                    "otp": "912384",
+                    "otp_hash": "REVOKED_AND_VERIFIED",
+                    "otp_expires_at": now + timedelta(hours=24),
                     "otp_attempts": 0,
                     "otp_max_attempts": 3,
                     "pod_verified": True,
@@ -223,7 +259,8 @@ def seed_database():
                     "status": DeliveryStatus.PENDING,
                     "lat": 6.4531,
                     "lng": 3.3958,
-                    "otp": "730192",
+                    "otp_hash": hash_otp("730192"),
+                    "otp_expires_at": now + timedelta(hours=24),
                     "otp_attempts": 0,
                     "otp_max_attempts": 3,
                     "pod_verified": False,
@@ -237,11 +274,10 @@ def seed_database():
                 db.add(deliv)
                 db.flush()
 
-                # Add initial event
                 e1 = DeliveryEvent(
                     delivery_id=deliv.id,
                     status=DeliveryStatus.PENDING,
-                    actor_name="Merchant Admin",
+                    actor_name="Babatunde Adeleke",
                     actor_role="merchant",
                     note="Order placed and registered in dispatch queue.",
                     occurred_at=deliv.created_at,
@@ -252,15 +288,15 @@ def seed_database():
                     e2 = DeliveryEvent(
                         delivery_id=deliv.id,
                         status=DeliveryStatus.ASSIGNED,
-                        actor_name="Dispatch Coordinator",
-                        actor_role="dispatcher",
+                        actor_name="Babatunde Adeleke",
+                        actor_role="merchant",
                         note="Assigned to courier fleet rider.",
                         occurred_at=deliv.created_at + timedelta(minutes=20),
                     )
                     e3 = DeliveryEvent(
                         delivery_id=deliv.id,
                         status=DeliveryStatus.OUT_FOR_DELIVERY,
-                        actor_name="Fleet Rider",
+                        actor_name="Ibrahim Danladi",
                         actor_role="operator",
                         note="Package out for last-mile delivery to recipient.",
                         occurred_at=deliv.created_at + timedelta(hours=1),
@@ -271,8 +307,8 @@ def seed_database():
                     e4 = DeliveryEvent(
                         delivery_id=deliv.id,
                         status=DeliveryStatus.DELIVERED,
-                        actor_name="Recipient / Courier POD",
-                        actor_role="recipient",
+                        actor_name="Ibrahim Danladi",
+                        actor_role="operator",
                         note="Verified via recipient 6-digit confirmation PIN.",
                         occurred_at=deliv.updated_at,
                     )
@@ -288,4 +324,3 @@ def seed_database():
 
 if __name__ == "__main__":
     seed_database()
-

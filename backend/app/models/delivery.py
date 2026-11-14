@@ -1,6 +1,6 @@
 """Delivery order model."""
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Boolean, Float, Integer, DateTime, ForeignKey, Enum as SAEnum
+from sqlalchemy import Column, String, Boolean, Float, Integer, DateTime, ForeignKey, Enum as SAEnum, Numeric
 from sqlalchemy.orm import relationship
 from backend.app.database import Base
 from backend.app.models.enums import DeliveryStatus, PostcodeStatus
@@ -26,9 +26,9 @@ class Delivery(Base):
     postcode_status = Column(SAEnum(PostcodeStatus), nullable=False, default=PostcodeStatus.UNVERIFIED)
     verified_postcode = Column(String(10), nullable=True)
     
-    # Package & Fee
+    # Package & Fee (Stored as Numeric with 2 decimal precision)
     package_description = Column(String(500), nullable=False)
-    fee = Column(Float, nullable=False, default=2500.0)
+    fee = Column(Numeric(10, 2, asdecimal=False), nullable=False, default=2500.0)
     pickup_address = Column(String(500), nullable=True)
     
     # Status & Coordinates
@@ -36,13 +36,17 @@ class Delivery(Base):
     lat = Column(Float, nullable=True)
     lng = Column(Float, nullable=True)
     
-    # Security: Delivery PIN / OTP & Brute-force protection
-    otp = Column(String(6), nullable=False)
+    # Security: Hashed PIN / OTP, Expiry & Brute-force protection
+    otp_hash = Column(String(255), nullable=False)
+    otp_expires_at = Column(DateTime, nullable=True)
     otp_attempts = Column(Integer, nullable=False, default=0)
     otp_max_attempts = Column(Integer, nullable=False, default=3)
     otp_locked_until = Column(DateTime, nullable=True)
     pod_verified = Column(Boolean, nullable=False, default=False)
     pod_note = Column(String(500), nullable=True)
+    
+    # Concurrency control
+    version = Column(Integer, nullable=False, default=1)
     
     estimated_delivery_time = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
@@ -52,4 +56,3 @@ class Delivery(Base):
     merchant = relationship("Profile", back_populates="deliveries", foreign_keys=[merchant_id])
     assigned_operator = relationship("Operator", back_populates="deliveries", foreign_keys=[operator_id])
     events = relationship("DeliveryEvent", back_populates="delivery", cascade="all, delete-orphan", order_by="DeliveryEvent.occurred_at.asc()")
-

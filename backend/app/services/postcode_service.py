@@ -6,7 +6,7 @@ from backend.app.config import settings
 from backend.app.models.postcode import PostcodeDirectory
 from backend.app.schemas.postcode import PostcodeRecordSchema, CleanseAddressResponse
 
-# Canonical seed data for Nigerian Postcodes (NIPOST standard)
+# Local reference dataset for Nigerian Postal Codes (NIPOST standard, version 2026.1)
 OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
     # Lagos State
     {"code": "100001", "area": "Marina", "state": "Lagos", "lga": "Lagos Island", "lat": 6.4531, "lng": 3.3958},
@@ -58,7 +58,6 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
 def normalize_string(text: Optional[str]) -> str:
     if not text:
         return ""
-    # lowercase, strip accents/special chars, normalize spaces
     s = text.lower()
     s = re.sub(r"[^\w\s]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
@@ -67,9 +66,6 @@ def normalize_string(text: Optional[str]) -> str:
 
 def find_postcodes(db: Optional[Session], state: Optional[str] = None, area: Optional[str] = None, code: Optional[str] = None) -> List[PostcodeRecordSchema]:
     """Search postcodes by state, area, or 6-digit postal code."""
-    # First query database if available
-    results: List[PostcodeRecordSchema] = []
-    
     if db:
         query = db.query(PostcodeDirectory).filter(PostcodeDirectory.is_active == True)
         if code:
@@ -83,7 +79,8 @@ def find_postcodes(db: Optional[Session], state: Optional[str] = None, area: Opt
         if db_records:
             return [PostcodeRecordSchema.model_validate(r) for r in db_records]
 
-    # Fallback to in-memory official directory
+    # Reference dataset search
+    results: List[PostcodeRecordSchema] = []
     norm_state = normalize_string(state)
     norm_area = normalize_string(area)
     norm_code = code.strip() if code else ""
@@ -102,35 +99,45 @@ def find_postcodes(db: Optional[Session], state: Optional[str] = None, area: Opt
 
 
 def cleanse_address(address: str, state_hint: Optional[str] = None, postcode_hint: Optional[str] = None, db: Optional[Session] = None) -> CleanseAddressResponse:
-    """Intelligently cleanses, normalizes, and verifies a Nigerian address against postal authority records."""
-    norm_addr = normalize_string(address)
+    """Cleanses and standardizes an address against the official local NIPOST reference dataset.
+    
+    Rules:
+    - Exact match with valid 6-digit code in registry -> 'verified' (confidence >= 0.90)
+    - Area match with estimated code -> 'estimated' (confidence 0.60 - 0.75)
+    - No authoritative match -> 'unverified' (confidence 0.0), NEVER silently fall back to 100001!
+    """
+    clean_addr = address.strip()
+    norm_addr = normalize_string(clean_addr)
     tokens = set(norm_addr.split())
     
+    # Check for explicit 6-digit postcode pattern in address or hint
+    found_postcodes = re.findall(r"\b\d{6}\b", clean_addr)
+    extracted_code = postcode_hint.strip() if postcode_hint else (found_postcodes[0] if found_postcodes else None)
+
     best_match: Optional[Dict[str, Any]] = None
     highest_score = 0
     matched_area = ""
 
-    # Check against known postcode areas
     for rec in OFFICIAL_POSTCODES:
         area_norm = normalize_string(rec["area"])
         area_tokens = area_norm.split()
         
-        # Check if full area name in address or tokens match
         score = 0
+        # If exact postcode provided and matches
+        if extracted_code and rec["code"] == extracted_code:
+            score += 15
+
+        # If full area name found in address
         if area_norm in norm_addr:
             score += 10
         elif any(tok in tokens for tok in area_tokens if len(tok) > 2):
             score += 4
 
-        # State bonus
+        # State match bonus
         if state_hint and normalize_string(state_hint) == normalize_string(rec["state"]):
             score += 3
         elif normalize_string(rec["state"]) in norm_addr:
             score += 2
-            
-        # Postcode bonus
-        if postcode_hint and rec["code"] == postcode_hint.strip():
-            score += 5
 
         if score > highest_score:
             highest_score = score
@@ -138,71 +145,66 @@ def cleanse_address(address: str, state_hint: Optional[str] = None, postcode_hin
             matched_area = rec["area"]
 
     changes: List[str] = []
-    
-    # Check for 6-digit postcode pattern in address
-    found_postcode = re.findall(r"\b\d{6}\b", address)
-    extracted_code = found_postcode[0] if found_postcode else None
 
-    if best_match and highest_score >= 10:
-        # High confidence match
+    # CASE 1: Exact postcode and matching area verified
+    if best_match and extracted_code and best_match["code"] == extracted_code and highest_score >= 15:
         verified_code = best_match["code"]
         detected_state = best_match["state"]
         detected_lga = best_match.get("lga")
-        postcode_status = "verified"
-        confidence = 0.95
-        
-        formatted = f"{address.strip().rstrip(',')}, {matched_area}, {detected_state} {verified_code}"
-        changes.append(f"Linked verified NIPOST code {verified_code} for {matched_area}, {detected_state}")
-        
+        formatted = f"{clean_addr.rstrip(',')}, {matched_area}, {detected_state} {verified_code}"
+        changes.append(f"Verified against NIPOST reference registry code {verified_code} for {matched_area}, {detected_state}")
+
         return CleanseAddressResponse(
-            original_address=address,
+            original_address=clean_addr,
             formatted_address=formatted,
             area=matched_area,
             state=detected_state,
             lga=detected_lga,
             postcode=verified_code,
-            postcode_status=postcode_status,
-            confidence=confidence,
-            source="postcodelink_nipost_registry",
+            postcode_status="verified",
+            confidence=0.95,
+            source="local_nipost_reference_dataset",
             matched_record=PostcodeRecordSchema(**best_match),
             changes_made=changes
         )
-    elif best_match and highest_score >= 4:
-        # Estimated / partial match
-        detected_code = best_match["code"]
+
+    # CASE 2: Area name recognized in address (estimated postcode)
+    elif best_match and highest_score >= 10:
+        suggested_code = best_match["code"]
         detected_state = best_match["state"]
-        postcode_status = "estimated"
-        confidence = 0.70
-        changes.append(f"Estimated postcode {detected_code} based on area token match: {matched_area}")
-        formatted = f"{address.strip().rstrip(',')}, {detected_state}"
-        
+        detected_lga = best_match.get("lga")
+        formatted = f"{clean_addr.rstrip(',')}, {matched_area}, {detected_state}"
+        changes.append(f"Identified area '{matched_area}' in {detected_state}. Suggested reference postcode is {suggested_code}.")
+
         return CleanseAddressResponse(
-            original_address=address,
+            original_address=clean_addr,
             formatted_address=formatted,
             area=matched_area,
             state=detected_state,
-            lga=best_match.get("lga"),
-            postcode=detected_code,
-            postcode_status=postcode_status,
-            confidence=confidence,
-            source="postcodelink_nipost_registry",
+            lga=detected_lga,
+            postcode=suggested_code,
+            postcode_status="estimated",
+            confidence=0.70,
+            source="local_nipost_reference_dataset",
             matched_record=PostcodeRecordSchema(**best_match),
             changes_made=changes
         )
+
+    # CASE 3: No authoritative match found - NEVER substitute a false postcode
     else:
-        # Unverified
-        fallback_state = state_hint.strip() if state_hint else "Lagos"
-        changes.append("No authoritative 6-digit postal code found for specified location; flagged unverified")
+        fallback_state = state_hint.strip() if state_hint else "Unknown"
+        changes.append("No authoritative postal code found in local NIPOST reference dataset. Marked unverified with original manual address retained.")
+
         return CleanseAddressResponse(
-            original_address=address,
-            formatted_address=address.strip(),
+            original_address=clean_addr,
+            formatted_address=clean_addr,
             area="Unknown Area",
             state=fallback_state,
             lga=None,
-            postcode=extracted_code or "100001",
+            postcode="",
             postcode_status="unverified",
-            confidence=0.30,
-            source="unverified_raw",
+            confidence=0.0,
+            source="manual_unverified",
             matched_record=None,
             changes_made=changes
         )

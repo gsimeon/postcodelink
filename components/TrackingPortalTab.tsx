@@ -26,7 +26,7 @@ import {
 interface TrackingPortalTabProps {
   deliveries: Delivery[];
   settings: AppSettings;
-  onVerifyOtp: (deliveryId: string, otp: string) => { success: boolean; message: string; remainingAttempts?: number };
+  onVerifyOtp: (deliveryId: string, otp: string) => { success: boolean; message: string; remainingAttempts?: number } | Promise<{ success: boolean; message: string; remainingAttempts?: number }>;
 }
 
 export function TrackingPortalTab({
@@ -78,10 +78,10 @@ export function TrackingPortalTab({
     }
   };
 
-  const handleConfirmOtp = (e: React.FormEvent) => {
+  const handleConfirmOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!delivery) return;
-    const res = onVerifyOtp(delivery.id, enteredOtp.trim());
+    const res = await onVerifyOtp(delivery.id, enteredOtp.trim());
     if (res.success) {
       setOtpNotice({ type: "success", text: res.message });
       setEnteredOtp("");

@@ -1,4 +1,4 @@
-"""Delivery schemas."""
+"""Delivery schemas with strict privacy and secure token handling."""
 from typing import Optional, List
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict
@@ -29,25 +29,19 @@ class DeliveryCreateRequest(BaseModel):
     package_description: str = Field(..., min_length=2)
     fee: float = Field(default=2500.0, ge=0)
     pickup_address: Optional[str] = None
-    merchant_id: Optional[str] = None
 
 
 class DeliveryStatusUpdateRequest(BaseModel):
     new_status: DeliveryStatus
-    actor_name: str = "Merchant Admin"
-    actor_role: str = "merchant"
     note: Optional[str] = None
 
 
 class DeliveryAssignRequest(BaseModel):
     operator_id: str
-    actor_name: str = "Merchant Dispatcher"
 
 
 class DeliveryVerifyOTPRequest(BaseModel):
     otp: str = Field(..., min_length=4, max_length=6)
-    recipient_phone: Optional[str] = None
-    operator_id: Optional[str] = None
     note: Optional[str] = None
 
 
@@ -70,7 +64,7 @@ class DeliveryResponse(BaseModel):
     status: DeliveryStatus
     lat: Optional[float] = None
     lng: Optional[float] = None
-    otp: str  # Displayed to merchant/operator in dashboard
+    # NOTE: otp field is strictly REMOVED for security
     otp_attempts: int
     otp_max_attempts: int
     pod_verified: bool
@@ -81,6 +75,18 @@ class DeliveryResponse(BaseModel):
     events: List[DeliveryEventResponse] = []
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class NotificationDispatchPayload(BaseModel):
+    recipient_phone: str
+    delivery_pin: str  # Simulated SMS / WhatsApp gateway dispatch payload on order creation
+    channel: str = "SMS / WhatsApp Gateway"
+    message_preview: str
+
+
+class DeliveryCreateResponse(BaseModel):
+    delivery: DeliveryResponse
+    notification_dispatch: NotificationDispatchPayload
 
 
 class DeliveryPublicTrackingResponse(BaseModel):
@@ -98,7 +104,8 @@ class DeliveryPublicTrackingResponse(BaseModel):
     status: DeliveryStatus
     lat: Optional[float] = None
     lng: Optional[float] = None
-    otp_masked: str  # e.g. "***924"
+    # No OTP digits exposed in public tracking
+    requires_pin_confirmation: bool = True
     otp_attempts: int
     otp_max_attempts: int
     is_locked: bool
