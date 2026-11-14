@@ -116,11 +116,97 @@ Following an in-depth security and reliability audit, the platform has completed
 
 ---
 
+## FastAPI Backend Architecture & Database Structure
+
+PostcodeLink Nigeria provides a dedicated Python/FastAPI backend powered by **SQLAlchemy 2.0 ORM** and **Pydantic v2**, supporting zero-config local development with SQLite (`postcodelink.db`) and instant production deployment on PostgreSQL via the `DATABASE_URL` environment setting.
+
+### 1. Database Schema & Relational Design
+
+The backend implements a normalized, relational schema:
+
+| Table | Primary Key | Description & Relationships |
+|---|---|---|
+| `profiles` | `UUID` | Merchant accounts, dispatch managers, and courier users (`merchant`, `operator`, `admin`). |
+| `operators` | `UUID` | Logistics fleets and couriers (vehicle type, service areas JSON, rating, active delivery counters). FK to `profiles.id`. |
+| `customers` | `UUID` | Recipient address directory (phone index, default address, state, verified postcode, total order counter). |
+| `deliveries` | `VARCHAR(32)` | Complete delivery orders with human-readable tracking references (`PL-2026-XXXXXX`), destination coordinates, fees, and state-machine statuses. |
+| `delivery_events` | `UUID` | **Immutable append-only audit trail** recording actor, role, status transition, timestamp, and notes. FK to `deliveries.id`. |
+| `postcodes` | `UUID` | Authoritative Nigerian 6-digit postal code directory (NIPOST standard) across Lagos, Abuja FCT, Rivers, Oyo, Kano, etc. |
+
+### 2. State Machine & Lifecycle Transitions
+
+All state modifications are enforced server-side by the lifecycle state machine:
+```
+           ┌──────────┐
+           │ PENDING  │
+           └────┬─────┘
+                │
+                ▼
+          ┌───────────┐
+          │ ASSIGNED  │
+          └─────┬─────┘
+                │
+                ▼
+         ┌────────────┐
+         │ PICKED_UP  │
+         └──────┬─────┘
+                │
+                ▼
+        ┌─────────────┐
+        │ IN_TRANSIT  │
+        └───────┬─────┘
+                │
+                ▼
+     ┌──────────────────┐
+     │ OUT_FOR_DELIVERY │
+     └──────────┬───────┘
+                │
+         (OTP Confirmed)
+                ▼
+         ┌───────────┐
+         │ DELIVERED │  (Terminal)
+         └───────────┘
+```
+*Note: Any order can move to `FAILED` or `CANCELLED` according to strict guard rules. Terminal states (`DELIVERED`, `CANCELLED`) reject all subsequent modifications.*
+
+### 3. Proof of Delivery PIN (OTP) & Brute-Force Lockout
+- **Generation**: Cryptographically secure 6-digit PIN generated server-side on order placement.
+- **Privacy Masking**: Public tracking portal only returns a masked representation (`***924`), requiring the recipient's phone number verification challenge.
+- **Brute-Force Guard**: Maximum of **3 failed attempts**. The 3rd failed attempt automatically locks PIN verification for **15 minutes** (HTTP 429).
+
+### 4. RESTful API Endpoints (`/api/v1`)
+
+- **System & Health**:
+  - `GET /` — API root, service status, version info.
+  - `GET /health` — Verifies database engine and connection health.
+- **Deliveries**:
+  - `POST /api/v1/deliveries/` — Create new delivery with automated NIPOST verification.
+  - `GET /api/v1/deliveries/` — List deliveries (with search and status filters).
+  - `GET /api/v1/deliveries/{id}` — Full merchant/operator delivery details.
+  - `GET /api/v1/deliveries/{id}/tracking` — Public recipient tracking view with masked PIN.
+  - `POST /api/v1/deliveries/{id}/assign` — Assign courier fleet operator.
+  - `POST /api/v1/deliveries/{id}/status` — Advance lifecycle status with state machine validation.
+  - `POST /api/v1/deliveries/{id}/verify-otp` — Verify recipient PIN and confirm delivery.
+- **Postcodes & Address Cleanser**:
+  - `GET /api/v1/postcodes/lookup` — Search official postcodes by area, state, or 6-digit code.
+  - `POST /api/v1/postcodes/cleanse` — Normalize and standardize messy addresses against postal records.
+- **Fleet Operators & Customers**:
+  - `GET /api/v1/operators/` & `POST /api/v1/operators/` — Manage courier fleet.
+  - `GET /api/v1/customers/` & `POST /api/v1/customers/` — Recipient directory.
+- **Analytics**:
+  - `GET /api/v1/analytics/overview` — Operations KPIs, verification accuracy, and fulfillment revenues.
+
+Interactive OpenAPI documentation is live at **`http://127.0.0.1:8000/docs`** and ReDoc at **`http://127.0.0.1:8000/redoc`**.
+
+---
+
 ## Tech Stack
-- **Framework**: Next.js 15 (App Router, Turbopack, React 19)
-- **Language**: TypeScript 5.8
-- **Icons**: Lucide React
-- **Styling**: Responsive CSS with clean light palette (DM Sans, Manrope, JetBrains Mono)
+- **Frontend Framework**: Next.js 15 (App Router, Turbopack, React 19)
+- **Frontend Language**: TypeScript 5.8
+- **Backend Framework**: Python 3.12, FastAPI, Uvicorn, Starlette
+- **ORM & Data Layer**: SQLAlchemy 2.0 (SQLite / PostgreSQL compatible)
+- **Data Validation**: Pydantic v2, Pydantic-Settings
+- **Testing**: Node Test Runner (Frontend/Lib) & Pytest (FastAPI endpoints)
 - **Database Schema**: Supabase PostgreSQL migration ready in `supabase/migrations/`
   - `0001_initial_schema.sql` (Tables & Types)
   - `0002_role_based_rls_policies.sql` (Role-based RLS Policies)
@@ -128,6 +214,8 @@ Following an in-depth security and reliability audit, the platform has completed
 ---
 
 ## Running Locally
+
+### 1. Frontend (Next.js)
 
 1. Install dependencies:
    ```bash
@@ -139,19 +227,41 @@ Following an in-depth security and reliability audit, the platform has completed
    cp .env.example .env.local
    ```
 
-3. Run automated tests:
+3. Run automated frontend tests:
    ```bash
    npm test
    ```
 
-4. Run development server:
+4. Run frontend development server:
    ```bash
    npm run dev
    ```
 
-5. Open [http://localhost:3000](http://localhost:3000) in your browser.
+### 2. Backend (FastAPI)
 
-6. Run production build verification:
+1. Setup virtual environment and install requirements:
    ```bash
-   npm run build
+   python -m venv backend/venv
+   backend/venv/Scripts/pip install -r backend/requirements.txt
    ```
+
+2. Seed database with official NIPOST postcodes and demo fleet:
+   ```bash
+   npm run backend:seed
+   # Or: backend/venv/Scripts/python -m backend.app.seed
+   ```
+
+3. Run FastAPI automated test suite (7/7 tests passing):
+   ```bash
+   npm run backend:test
+   # Or: backend/venv/Scripts/python -m pytest backend/tests -v
+   ```
+
+4. Start FastAPI server:
+   ```bash
+   npm run backend:dev
+   # Or: backend/venv/Scripts/uvicorn backend.app.main:app --reload --port 8000
+   ```
+
+5. Access interactive Swagger API documentation:
+   Open [http://localhost:8000/docs](http://localhost:8000/docs).

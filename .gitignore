@@ -4,3 +4,15 @@ out
 .env
 .env.local
 .DS_Store
+
+# Python & FastAPI
+backend/venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.db
+*.sqlite
+*.sqlite3
+.pytest_cache/
+
