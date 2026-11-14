@@ -377,7 +377,7 @@ def cleanse_address(
                         "lga": r.lga,
                         "lat": r.lat,
                         "lng": r.lng,
-                        "postcode_type": getattr(r, "postcode_type", "conventional_area"),
+                        "postcode_type": getattr(r, "postcode_type", None) if getattr(r, "postcode_type", None) in ["conventional_area", "digital_location"] else ("digital_location" if len((r.code or "").replace("-", "")) > 6 else "conventional_area"),
                         "postcode_category": getattr(r, "postcode_category", "legacy_postal_code"),
                         "verification_status": getattr(r, "verification_status", "local_reference"),
                         "building_reference": getattr(r, "building_reference", None),

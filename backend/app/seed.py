@@ -31,7 +31,7 @@ def seed_database():
         updated_count = 0
         for pc in OFFICIAL_POSTCODES:
             code = pc["code"]
-            pc_type = pc.get("postcode_type", "official_digital_postcode" if len(code) > 6 else "legacy_postal_code")
+            pc_type = pc.get("postcode_type", "digital_location" if len(code.replace("-", "")) > 6 else "conventional_area")
             ver_status = pc.get("verification_status", "local_reference")
             prov = pc.get("provenance", "NIPOST 6-Digit Postal Directory (Zone Reference)")
             ver_version = pc.get("dataset_version", "2024.2")
