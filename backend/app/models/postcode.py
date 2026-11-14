@@ -25,8 +25,14 @@ class PostcodeDirectory(Base):
 
     @property
     def postcode_category(self) -> str:
-        """Categorize into official national digital postcode vs legacy 6-digit postal code."""
-        if self.postcode_type in ["digital_location", "official_digital_postcode"] or (self.code and len(self.code) > 6):
+        """Categorize into official national digital postcode vs legacy 6-digit postal code vs local reference.
+        
+        Length alone never establishes official status. Official status requires official verification
+        against an authorized national NIPOST directory source.
+        """
+        if self.verification_status == "official_verified":
             return "official_digital_postcode"
-        return "legacy_postal_code"
+        if self.code and self.code.isdigit() and len(self.code) == 6:
+            return "legacy_postal_code"
+        return "local_address_reference"
 

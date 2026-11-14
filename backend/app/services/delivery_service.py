@@ -62,25 +62,25 @@ def adjust_operator_workload_count(operator: Operator, old_status: DeliveryStatu
         operator.active_deliveries_count += 1
 
 
-def encrypt_transit_pin(pin: str, secret_key: Optional[str] = None) -> str:
-    """Authenticated encryption for transit PIN using HMAC-SHA256 authenticated envelope."""
+def encrypt_transit_pin(pin: str, secret_key: Optional[str] = None, delivery_id: Optional[str] = None) -> str:
+    """Authenticated encryption for transit PIN using standard AES-256-GCM AEAD envelope."""
     key = secret_key or getattr(settings, "OUTBOX_ENCRYPTION_KEY", None) or settings.SECRET_KEY
-    return encrypt_authenticated_pin(pin, key)
+    return encrypt_authenticated_pin(pin, master_key=key, delivery_id=delivery_id)
 
 
-def decrypt_transit_pin(token: str, secret_key: Optional[str] = None) -> Optional[str]:
-    """Decrypts and verifies authenticated transit PIN envelope."""
+def decrypt_transit_pin(token: str, secret_key: Optional[str] = None, delivery_id: Optional[str] = None) -> Optional[str]:
+    """Decrypts and verifies authenticated transit PIN envelope using AES-256-GCM and key rotation."""
     if secret_key:
-        res = decrypt_authenticated_pin(token, secret_key)
+        res = decrypt_authenticated_pin(token, master_key=secret_key, delivery_id=delivery_id)
         if res is not None:
             return res
     outbox_key = getattr(settings, "OUTBOX_ENCRYPTION_KEY", None)
     if outbox_key and outbox_key != secret_key:
-        res = decrypt_authenticated_pin(token, outbox_key)
+        res = decrypt_authenticated_pin(token, master_key=outbox_key, delivery_id=delivery_id)
         if res is not None:
             return res
     if settings.SECRET_KEY != secret_key and settings.SECRET_KEY != outbox_key:
-        res = decrypt_authenticated_pin(token, settings.SECRET_KEY)
+        res = decrypt_authenticated_pin(token, master_key=settings.SECRET_KEY, delivery_id=delivery_id)
         if res is not None:
             return res
     return None
@@ -198,8 +198,8 @@ def create_delivery(
     db.add(init_event)
 
     # Persistent notification outbox record (QUEUED) created atomically with delivery
-    # Transit PIN is securely encrypted with dedicated OUTBOX_ENCRYPTION_KEY so only the outbox worker can dispatch it
-    encrypted_pin = encrypt_transit_pin(raw_otp, settings.OUTBOX_ENCRYPTION_KEY)
+    # Transit PIN is securely encrypted with dedicated OUTBOX_ENCRYPTION_KEY and bound to delivery.id via AEAD AAD
+    encrypted_pin = encrypt_transit_pin(raw_otp, settings.OUTBOX_ENCRYPTION_KEY, delivery_id=delivery.id)
     outbox_entry = NotificationOutbox(
         delivery_id=delivery.id,
         channel="SMS",
@@ -702,7 +702,7 @@ def resend_delivery_pin(db: Session, delivery_id: str, current_user: Profile) ->
     delivery.otp_expires_at = datetime.now(timezone.utc) + timedelta(hours=settings.OTP_EXPIRE_HOURS)
     delivery.version += 1
 
-    encrypted_pin = encrypt_transit_pin(raw_pin, settings.OUTBOX_ENCRYPTION_KEY)
+    encrypted_pin = encrypt_transit_pin(raw_pin, settings.OUTBOX_ENCRYPTION_KEY, delivery_id=delivery.id)
 
     # Atomic Outbox Entry: strictly queued for asynchronous worker dispatch
     outbox_entry = NotificationOutbox(
@@ -787,6 +787,23 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
         item.retry_count += 1
         item.updated_at = now
 
+        # Idempotent reconciliation guard:
+        # If the item already has a provider_message_id recorded (e.g. from previous dispatch attempt
+        # where the provider accepted the SMS but local database commit crashed), reconcile to SENT
+        # immediately without re-dispatching a duplicate SMS to the customer.
+        if getattr(item, "provider_message_id", None):
+            logger.info(
+                f"[Outbox Worker] Item {item.id} already has provider_message_id '{item.provider_message_id}'. "
+                "Reconciling to SENT without duplicate dispatch."
+            )
+            item.status = NotificationDeliveryStatus.SENT
+            item.status_reconciled_at = now
+            item.sent_at = item.sent_at or now
+            item.locked_at = None
+            item.locked_by = None
+            processed += 1
+            continue
+
         # Select provider based on item configuration
         provider_name = item.provider if item.provider in ["termii", "twilio", "simulated"] else settings.SMS_PROVIDER
         active_provider = get_notification_provider(provider_name)
@@ -812,7 +829,7 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
 
             target_pin = None
             if item.message_payload:
-                target_pin = decrypt_transit_pin(item.message_payload, settings.OUTBOX_ENCRYPTION_KEY)
+                target_pin = decrypt_transit_pin(item.message_payload, settings.OUTBOX_ENCRYPTION_KEY, delivery_id=item.delivery_id)
                 if not target_pin:
                     item.status = NotificationDeliveryStatus.FAILED
                     item.failure_classification = "invalid_pin_payload"
@@ -839,7 +856,7 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
                 deliv.otp_locked_until = None
                 deliv.otp_expires_at = now + timedelta(hours=settings.OTP_EXPIRE_HOURS)
                 deliv.version += 1
-                item.message_payload = encrypt_transit_pin(target_pin, settings.OUTBOX_ENCRYPTION_KEY)
+                item.message_payload = encrypt_transit_pin(target_pin, settings.OUTBOX_ENCRYPTION_KEY, delivery_id=deliv.id)
                 db.flush()
 
             dispatch_res = active_provider.send_delivery_pin(
@@ -860,6 +877,9 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
         # Inspect provider response
         item.status = dispatch_res.status
         item.provider = dispatch_res.provider
+        if getattr(dispatch_res, "message_id", None):
+            item.provider_message_id = dispatch_res.message_id
+
         if dispatch_res.status in [NotificationDeliveryStatus.SENT, NotificationDeliveryStatus.SIMULATED]:
             item.sent_at = now
             item.error_details = None

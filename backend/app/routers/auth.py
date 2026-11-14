@@ -157,20 +157,27 @@ def api_login(request: UserLoginRequest, req: Request, db: Session = Depends(get
             detail="Too many failed requests from your network. Please try again in 15 minutes."
         )
 
-    # 2. Account-level lockout check: 5 failed attempts in 15 mins
-    account_failed_count = (
+    # 2. Targeted (Client IP + Account) Lockout Check:
+    # Protects account credentials while strictly preventing account-level Denial-of-Service attacks
+    # where an adversary deliberately sends wrong passwords to lock out a legitimate user.
+    ip_account_failed_count = (
         db.query(LoginAttempt)
         .filter(
             LoginAttempt.email == clean_email,
+            LoginAttempt.ip_address == client_ip,
             LoginAttempt.attempted_at >= window_start,
             LoginAttempt.is_successful == False,
         )
         .count()
     )
-    if account_failed_count >= MAX_LOGIN_ATTEMPTS:
+    if ip_account_failed_count >= MAX_LOGIN_ATTEMPTS:
         latest_attempt = (
             db.query(LoginAttempt)
-            .filter(LoginAttempt.email == clean_email, LoginAttempt.is_successful == False)
+            .filter(
+                LoginAttempt.email == clean_email,
+                LoginAttempt.ip_address == client_ip,
+                LoginAttempt.is_successful == False,
+            )
             .order_by(LoginAttempt.attempted_at.desc())
             .first()
         )
@@ -199,11 +206,12 @@ def api_login(request: UserLoginRequest, req: Request, db: Session = Depends(get
         db.add(failed_record)
         db.commit()
 
-        # Concurrency-safe atomic check of committed failed attempts
+        # Concurrency-safe atomic check of committed failed attempts for this client IP + email bucket
         current_failed_count = (
             db.query(LoginAttempt)
             .filter(
                 LoginAttempt.email == clean_email,
+                LoginAttempt.ip_address == client_ip,
                 LoginAttempt.attempted_at >= window_start,
                 LoginAttempt.is_successful == False,
             )

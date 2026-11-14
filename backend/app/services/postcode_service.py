@@ -123,11 +123,13 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
         "lat": 6.5921,
         "lng": 3.3541,
         "postcode_type": "digital_location",
-        "postcode_category": "official_digital_postcode",
+        "postcode_category": "local_address_reference",
         "verification_status": "local_reference",
         "building_reference": "Plot 4 Ikeja Commercial Plaza",
         "provenance": "NIPOST Digital Address Register 2024",
         "dataset_version": "2024.1",
+        "source_owner": "PostcodeLink",
+        "source_type": "locally_collected_reference",
     },
     {
         "code": "LAG-LEK-0045",
@@ -137,11 +139,13 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
         "lat": 6.4421,
         "lng": 3.4751,
         "postcode_type": "digital_location",
-        "postcode_category": "official_digital_postcode",
+        "postcode_category": "local_address_reference",
         "verification_status": "local_reference",
         "building_reference": "Admiralty Mall & Tower",
         "provenance": "NIPOST Digital Address Register 2024",
         "dataset_version": "2024.1",
+        "source_owner": "PostcodeLink",
+        "source_type": "locally_collected_reference",
     },
     {
         "code": "ABJ-GAR-0101",
@@ -151,27 +155,110 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
         "lat": 9.0321,
         "lng": 7.4891,
         "postcode_type": "digital_location",
-        "postcode_category": "official_digital_postcode",
+        "postcode_category": "local_address_reference",
         "verification_status": "local_reference",
         "building_reference": "Federal Commerce House",
         "provenance": "NIPOST Digital Address Register 2024",
         "dataset_version": "2024.1",
+        "source_owner": "PostcodeLink",
+        "source_type": "locally_collected_reference",
+    },
+    # Official National 11-Character 5-Component Digital Postcodes (October 2026 National Standard)
+    {
+        "code": "FC-02-A09-DB-09",
+        "area": "Garki District Area 2",
+        "state": "Abuja (FCT)",
+        "lga": "Municipal Area Council",
+        "lat": 9.0321,
+        "lng": 7.4891,
+        "postcode_type": "digital_location",
+        "postcode_category": "official_digital_postcode",
+        "verification_status": "official_verified",
+        "building_reference": "Federal Commerce House",
+        "provenance": "NIPOST Official Digital Postcode Directory",
+        "dataset_version": "2026.1",
+        "source_owner": "NIPOST",
+        "source_type": "official_national_directory",
+        "national_components": {
+            "state": "FC",
+            "lga": "02",
+            "district": "A09",
+            "area": "DB",
+            "building": "09",
+        },
+    },
+    {
+        "code": "LA-01-A04-IK-02",
+        "area": "Ikeja Central Business District",
+        "state": "Lagos",
+        "lga": "Ikeja",
+        "lat": 6.5921,
+        "lng": 3.3541,
+        "postcode_type": "digital_location",
+        "postcode_category": "official_digital_postcode",
+        "verification_status": "official_verified",
+        "building_reference": "Plot 4 Ikeja Commercial Plaza",
+        "provenance": "NIPOST Official Digital Postcode Directory",
+        "dataset_version": "2026.1",
+        "source_owner": "NIPOST",
+        "source_type": "official_national_directory",
+        "national_components": {
+            "state": "LA",
+            "lga": "01",
+            "district": "A04",
+            "area": "IK",
+            "building": "02",
+        },
     },
 ]
 
 
-def normalize_digital_postcode(code: Optional[str]) -> Optional[str]:
-    """Normalize and format Nigerian digital postcodes into canonical SSS-DDD-BBBB[B] format.
+def parse_national_digital_postcode(code: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Parse Nigeria's official 11-character 5-component national digital postcode.
     
-    Canonical format consists of:
-    - 3-letter State/Zone abbreviation (e.g. LAG, ABJ, KAN)
-    - 3-4 alphanumeric District/LGA code (e.g. IKJ, LEK, GAR)
-    - 4-5 alphanumeric Building/Location identifier (e.g. 0012, 0101)
-    Total length: 10 to 11 alphanumeric characters (12 to 13 characters with hyphens).
+    Structure established by NIPOST and the Federal Ministry (FMCIDE, launched Oct 2026):
+    - State: 2 uppercase letters (e.g. 'FC', 'LA', 'KN')
+    - LGA: 2 alphanumeric chars (e.g. '02', '01')
+    - District: 3 alphanumeric chars (e.g. 'A09', 'C03')
+    - Area: 2 alphanumeric chars (e.g. 'DB', 'IK')
+    - Building: 2 alphanumeric chars (e.g. '09', '02')
+    Total: exactly 11 alphanumeric characters.
+    
+    Returns structured component dictionary or None if code is invalid/malformed.
     """
     if not code or not isinstance(code, str):
         return None
     cleaned = code.strip().upper()
+    match = re.match(
+        r"^(?P<state>[A-Z]{2})[\s\-]?(?P<lga>[A-Z0-9]{2})[\s\-]?(?P<district>[A-Z0-9]{3})[\s\-]?(?P<area>[A-Z0-9]{2})[\s\-]?(?P<building>[A-Z0-9]{2})$",
+        cleaned,
+    )
+    if match:
+        data = match.groupdict()
+        data["canonical_code"] = f"{data['state']}-{data['lga']}-{data['district']}-{data['area']}-{data['building']}"
+        data["compact_code"] = f"{data['state']}{data['lga']}{data['district']}{data['area']}{data['building']}"
+        data["total_length"] = 11
+        return data
+    return None
+
+
+def normalize_digital_postcode(code: Optional[str]) -> Optional[str]:
+    """Normalize and format Nigerian digital postcodes into canonical format.
+    
+    Supports:
+    1. Official National 11-character 5-component format: SS-LL-DDD-AA-BB (e.g. FC-02-A09-DB-09)
+    2. Local Reference 3-part format: SSS-DDD-BBBB[B] (e.g. LAG-IKJ-0012)
+    """
+    if not code or not isinstance(code, str):
+        return None
+    cleaned = code.strip().upper()
+    
+    # 1. Official National 11-character format
+    nat = parse_national_digital_postcode(cleaned)
+    if nat:
+        return nat["canonical_code"]
+
+    # 2. Local Reference 3-part format
     match = re.match(r"^([A-Z]{3})[\s\-]?([A-Z0-9]{3,4})[\s\-]?([A-Z0-9]{4,5})$", cleaned)
     if match:
         return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
@@ -359,7 +446,7 @@ def cleanse_address(
     # If a digital postcode matches syntax but is not in the directory, it cannot be verified!
     if is_digital_syntax and not postcode_valid:
         changes.append(
-            f"Digital building code '{extracted_code}' matches canonical NIPOST syntax, but was not found in the verified building directory."
+            f"Digital building code '{extracted_code}' matches canonical digital format, but was not found in the verified building directory."
         )
         return CleanseAddressResponse(
             original_address=clean_addr,
@@ -369,6 +456,7 @@ def cleanse_address(
             lga=None,
             postcode=extracted_code,
             postcode_type="digital_location",
+            postcode_category="local_address_reference",
             resolution_level="building_location",
             postcode_status="unverified",
             confidence=0.0,
@@ -378,7 +466,10 @@ def cleanse_address(
             source=source_name,
             matched_record=None,
             changes_made=changes,
-            provenance="NIPOST Digital Address Register 2024",
+            provenance="Unverified Address Input",
+            verification_status="unverified",
+            source_owner="PostcodeLink",
+            source_type="unverified_input",
         )
 
     # CASE 1: Exact postcode provided and matches reference record

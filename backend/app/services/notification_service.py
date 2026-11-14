@@ -7,6 +7,7 @@ Enforces zero-knowledge PIN privacy:
 - Accurate status reporting: SIMULATED (dev), SENT (confirmed API dispatch), FAILED (API or network error).
 """
 import os
+import secrets
 import logging
 from abc import ABC, abstractmethod
 from typing import Optional, Tuple, Dict, Any, List
@@ -28,6 +29,7 @@ class NotificationDeliveryStatus(str, Enum):
     SIMULATED = "SIMULATED"
     FAILED = "FAILED"
     SUPERSEDED = "SUPERSEDED"
+    RECONCILED = "RECONCILED"
 
 
 class NotificationDispatchResult(BaseModel):
@@ -37,6 +39,7 @@ class NotificationDispatchResult(BaseModel):
     provider: str
     message_preview: str
     error_details: Optional[str] = None
+    message_id: Optional[str] = None
 
 
 class BaseNotificationProvider(ABC):
@@ -184,6 +187,7 @@ class TermiiNotificationProvider(BaseNotificationProvider):
             logger.warning(f"[Termii Gateway] SMS dispatch failed for {masked}: {exc}")
             result_status = NotificationDeliveryStatus.FAILED
             error_details = str(exc)
+            message_id = None
 
         return NotificationDispatchResult(
             status=result_status,
@@ -192,6 +196,7 @@ class TermiiNotificationProvider(BaseNotificationProvider):
             provider="termii",
             message_preview="Provider accepted the SMS request." if result_status == NotificationDeliveryStatus.SENT else "SMS provider did not confirm delivery.",
             error_details=error_details,
+            message_id=str(message_id) if result_status == NotificationDeliveryStatus.SENT and message_id else None,
         )
 
     def send_status_alert(
@@ -304,7 +309,8 @@ class TwilioNotificationProvider(BaseNotificationProvider):
             except Exception as e:
                 raise ValueError(f"Twilio returned an invalid or unparseable response: {e}")
 
-            if not resp_data.get("sid"):
+            sid = resp_data.get("sid")
+            if not sid:
                 err_text = resp_data.get("message") or getattr(resp, "text", "") or "Twilio did not return a message SID."
                 raise ValueError(err_text)
             result_status = NotificationDeliveryStatus.SENT
@@ -313,6 +319,7 @@ class TwilioNotificationProvider(BaseNotificationProvider):
             logger.warning(f"[Twilio Gateway] SMS dispatch failed for {masked}: {exc}")
             result_status = NotificationDeliveryStatus.FAILED
             error_details = str(exc)
+            sid = None
 
         return NotificationDispatchResult(
             status=result_status,
@@ -321,6 +328,7 @@ class TwilioNotificationProvider(BaseNotificationProvider):
             provider="twilio",
             message_preview="Provider accepted the SMS request." if result_status == NotificationDeliveryStatus.SENT else "SMS provider did not confirm delivery.",
             error_details=error_details,
+            message_id=str(sid) if result_status == NotificationDeliveryStatus.SENT and sid else None,
         )
 
     def send_status_alert(
@@ -393,6 +401,7 @@ class SimulatedNotificationProvider(BaseNotificationProvider):
             recipient_masked=masked,
             provider="simulated",
             message_preview="Notification simulated in local environment. In production, PIN is sent via Termii/Twilio SMS.",
+            message_id=f"sim_{secrets.token_hex(8)}",
         )
 
     def send_status_alert(

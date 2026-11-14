@@ -18,6 +18,7 @@ from backend.app.routers import (
     operators,
     customers,
     analytics,
+    api_keys,
 )
 
 logger = logging.getLogger("uvicorn")
@@ -43,14 +44,17 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.warning(f"Database seed note: {e}")
 
-    # Start asynchronous outbox retry worker if enabled
+    # Start asynchronous outbox retry worker only if enabled and process role is all_in_one or worker
     worker_task = None
     stop_event = asyncio.Event()
-    if settings.OUTBOX_WORKER_ENABLED:
-        logger.info("Starting background Outbox Dispatch Worker...")
+    should_run_embedded = settings.OUTBOX_WORKER_ENABLED and settings.PROCESS_ROLE in ("all_in_one", "worker")
+    if should_run_embedded:
+        logger.info(f"Starting embedded background Outbox Dispatch Worker (PROCESS_ROLE={settings.PROCESS_ROLE})...")
         worker_task = asyncio.create_task(
             run_outbox_worker_loop(stop_event, poll_interval=settings.OUTBOX_WORKER_INTERVAL_SECONDS)
         )
+    elif settings.OUTBOX_WORKER_ENABLED:
+        logger.info(f"API process role ('{settings.PROCESS_ROLE}'): Embedded worker disabled; managed by standalone outbox worker process.")
 
     yield
 
@@ -89,6 +93,7 @@ app.include_router(postcodes.router, prefix=settings.API_V1_STR)
 app.include_router(operators.router, prefix=settings.API_V1_STR)
 app.include_router(customers.router, prefix=settings.API_V1_STR)
 app.include_router(analytics.router, prefix=settings.API_V1_STR)
+app.include_router(api_keys.router, prefix=settings.API_V1_STR)
 
 
 @app.get("/", tags=["system"])

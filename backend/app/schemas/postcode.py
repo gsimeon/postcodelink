@@ -12,12 +12,15 @@ class PostcodeRecordSchema(BaseModel):
     lat: Optional[float] = None
     lng: Optional[float] = None
     postcode_type: str = "conventional_area"  # conventional_area | digital_location
-    postcode_category: Optional[str] = "legacy_postal_code"  # legacy_postal_code | official_digital_postcode | local_address_reference | unverified_synthetic
+    postcode_category: Optional[str] = "local_address_reference"  # legacy_postal_code | official_digital_postcode | local_address_reference
     building_reference: Optional[str] = None
     verification_status: Optional[str] = "local_reference"  # official_verified | local_reference | synthetic_demo | unverified
-    provenance: Optional[str] = "NIPOST 6-Digit Postal Directory (Zone Reference)"
+    provenance: Optional[str] = "PostcodeLink Local Reference Dataset"
     dataset_version: Optional[str] = "2024.2"
     verified_at: Optional[datetime] = None
+    source_owner: Optional[str] = "PostcodeLink"
+    source_type: Optional[str] = "local_reference"
+    national_components: Optional[dict] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -52,7 +55,7 @@ class CleanseAddressResponse(BaseModel):
     lga: Optional[str] = None
     postcode: str
     postcode_type: str = "conventional_area"  # conventional_area | digital_location
-    postcode_category: Optional[str] = "legacy_postal_code"  # legacy_postal_code | official_digital_postcode
+    postcode_category: Optional[str] = "legacy_postal_code"  # legacy_postal_code | official_digital_postcode | local_address_reference
     resolution_level: str = "area_district"  # area_district | building_location
     postcode_status: str  # verified | unverified | estimated | conflict | invalid
     verification_status: Optional[str] = "local_reference"
@@ -64,4 +67,7 @@ class CleanseAddressResponse(BaseModel):
     source: str
     matched_record: Optional[PostcodeRecordSchema] = None
     changes_made: List[str] = []
-    provenance: Optional[str] = "NIPOST National Pilot Directory Edition 2024.2"
+    provenance: Optional[str] = "PostcodeLink Local Reference Dataset"
+    source_owner: Optional[str] = "PostcodeLink"
+    source_type: Optional[str] = "local_reference"
+    national_components: Optional[dict] = None

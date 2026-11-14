@@ -1,7 +1,7 @@
 """Application configuration using Pydantic Settings."""
 import os
 import secrets
-from typing import List, Any
+from typing import List, Any, Optional
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -32,6 +32,10 @@ class Settings(BaseSettings):
         "OUTBOX_ENCRYPTION_KEY",
         "postcodelink_dev_outbox_enc_key_" + secrets.token_hex(16)
     )
+    OUTBOX_PREVIOUS_ENCRYPTION_KEYS: Optional[str] = os.getenv("OUTBOX_PREVIOUS_ENCRYPTION_KEYS", None)
+    
+    # Process Role: Segregate HTTP serving ("api") from background dispatch ("worker") or unified ("all_in_one")
+    PROCESS_ROLE: str = os.getenv("PROCESS_ROLE", "api")
     
     # Delivery PIN / OTP Security
     OTP_MAX_ATTEMPTS: int = 3
@@ -92,6 +96,11 @@ class Settings(BaseSettings):
             raw_secret = self.SECRET_KEY
             if not raw_secret or len(raw_secret) < 32 or raw_secret.startswith("postcodelink_dev"):
                 raise ValueError("Fatal Security Error: In production, SECRET_KEY must be set to a strong secret (at least 32 characters).")
+
+            # Process role validation
+            role = (self.PROCESS_ROLE or "").strip().lower()
+            if role not in ["api", "worker", "all_in_one"]:
+                raise ValueError(f"Fatal Production Configuration Error: PROCESS_ROLE must be 'api', 'worker', or 'all_in_one', got '{self.PROCESS_ROLE}'.")
 
             # Production SMS Gateway validation
             provider = (self.SMS_PROVIDER or "").strip().lower()

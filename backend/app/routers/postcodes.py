@@ -11,7 +11,7 @@ from backend.app.schemas.postcode import (
     PostcodeRecordSchema,
 )
 from backend.app.services.postcode_service import find_postcodes, cleanse_address
-from backend.app.services.nipost_client import get_nipost_client, NIPOSTClient
+from backend.app.services.nipost_client import get_nipost_client, NIPOSTClient, NIPOSTLookupStatus
 
 router = APIRouter(prefix="/postcodes", tags=["postcodes"])
 
@@ -26,29 +26,44 @@ def api_lookup_postcodes(
 ):
     """Search official Nigerian postal codes from live NIPOST API or local reference dataset."""
     if client.is_configured and code:
-        live_res = client.lookup_postcode(code)
-        if live_res:
+        res = client.lookup_postcode(code)
+        if res.status == NIPOSTLookupStatus.FOUND and res.data:
+            live_res = res.data
             schema_rec = PostcodeRecordSchema(
-                code=live_res.get("code", code),
-                area=live_res.get("area", "Official Zone"),
-                state=live_res.get("state", "Nigeria"),
+                code=live_res["code"],
+                area=live_res["area"],
+                state=live_res["state"],
                 lga=live_res.get("lga"),
                 lat=live_res.get("lat"),
                 lng=live_res.get("lng"),
-                postcode_type=live_res.get("postcode_type", "official_digital_postcode" if len(code) > 6 else "legacy_postal_code"),
+                postcode_type=live_res.get("postcode_type", "digital_location" if len(code.replace("-", "")) > 6 else "conventional_area"),
+                postcode_category="official_digital_postcode" if len(code.replace("-", "")) > 6 else "legacy_postal_code",
                 building_reference=live_res.get("building_reference"),
                 verification_status="official_verified",
-                provenance="NIPOST Official Digital Directory (Live API)",
-                dataset_version="Live Gateway",
+                provenance="NIPOST Official National Directory (Live API)",
+                dataset_version=live_res.get("dataset_version", "2026.1"),
+                source_owner="NIPOST",
+                source_type="official_national_directory",
             )
             return PostcodeLookupResponse(
                 source="live_nipost_api",
                 count=1,
                 matches=[schema_rec],
                 is_live_nipost=True,
-                dataset_version="Live Gateway",
-                provenance="NIPOST Official Digital Directory (Live API)",
+                dataset_version=live_res.get("dataset_version", "2026.1"),
+                provenance="NIPOST Official National Directory (Live API)",
             )
+        elif res.status == NIPOSTLookupStatus.NOT_FOUND:
+            # Authoritative response: code does not exist in NIPOST directory. Do NOT fall back to local data.
+            return PostcodeLookupResponse(
+                source="live_nipost_api",
+                count=0,
+                matches=[],
+                is_live_nipost=True,
+                dataset_version="2026.1",
+                provenance="NIPOST Official National Directory (Live API: Postcode Not Found)",
+            )
+        # If UNAVAILABLE, UNAUTHORIZED, or INVALID_RESPONSE: fall through to local reference dataset with fallback notice
 
     matches = find_postcodes(db=db, state=state, area=area, code=code)
     return PostcodeLookupResponse(

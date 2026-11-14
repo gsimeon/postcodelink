@@ -55,6 +55,9 @@ def main():
     import signal
     import secrets
 
+    # Explicit process role for worker container
+    settings.PROCESS_ROLE = "worker"
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
     parser = argparse.ArgumentParser(description="PostcodeLink Outbox Dispatch Worker Process")
