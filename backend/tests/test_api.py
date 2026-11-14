@@ -8,12 +8,26 @@ from backend.app.main import app
 from backend.app.config import Settings
 from backend.app.database import SessionLocal
 from backend.app.models.operator import Operator
+from backend.app.models.delivery import Delivery
+from backend.app.models.enums import DeliveryStatus
 from backend.app.services.notification_service import (
     NotificationDispatchResult,
     NotificationDeliveryStatus,
 )
 
 client = TestClient(app)
+
+
+def set_delivery_out_for_delivery(delivery_id: str) -> None:
+    """Move an isolated test order to the PIN-eligible hand-off stage."""
+    db = SessionLocal()
+    try:
+        delivery = db.query(Delivery).filter(Delivery.id == delivery_id).first()
+        assert delivery is not None
+        delivery.status = DeliveryStatus.OUT_FOR_DELIVERY
+        db.commit()
+    finally:
+        db.close()
 
 
 def get_auth_token(email: str, password: str) -> str:
@@ -588,6 +602,7 @@ def test_otp_verification_lockout_and_single_use():
     }, headers={"Authorization": f"Bearer {token}"})
     assert create_res.status_code == 201
     deliv_id = create_res.json()["delivery"]["id"]
+    set_delivery_out_for_delivery(deliv_id)
 
     # Attempt 1: Wrong PIN
     try1 = client.post(f"/api/v1/deliveries/{deliv_id}/verify-otp", json={
@@ -631,6 +646,7 @@ def test_otp_verification_lockout_and_single_use():
         }, headers={"Authorization": f"Bearer {token}"}).json()
         fresh_id = fresh_order["delivery"]["id"]
         fresh_pin = mock_send.call_args.kwargs["pin"]
+    set_delivery_out_for_delivery(fresh_id)
 
     # Verify once -> DELIVERED (200 OK)
     verify1 = client.post(f"/api/v1/deliveries/{fresh_id}/verify-otp", json={
