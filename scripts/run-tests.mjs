@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 // 1. Test State Machine
 const ALLOWED_TRANSITIONS = {
@@ -51,9 +53,6 @@ test('State Machine: blocks invalid or illegal status progressions', () => {
 });
 
 
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-
 test('POD API fails closed instead of attempting browser localStorage on the server', () => {
   const route = readFileSync(join(process.cwd(), 'app/api/deliveries/verify-otp/route.ts'), 'utf8');
   assert.match(route, /POD_VERIFICATION_NOT_CONFIGURED/);
@@ -63,6 +62,6 @@ test('POD API fails closed instead of attempting browser localStorage on the ser
 
 test('Public tracking view never reveals or validates a recipient OTP', () => {
   const tracking = readFileSync(join(process.cwd(), 'components/TrackingPortalTab.tsx'), 'utf8');
-  assert.doesNotMatch(tracking, /delivery\\.otp|recipientPhone\\.replace|lastFour|handleRevealPin/);
+  assert.doesNotMatch(tracking, /delivery\.otp|recipientPhone\.replace|lastFour|handleRevealPin/);
   assert.match(tracking, /No PIN is displayed or verified/);
 });
