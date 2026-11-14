@@ -1,7 +1,7 @@
 """Delivery schemas with privacy preservation and tokenized public tracking."""
-from typing import Optional, List
+from typing import Optional, List, Any
 from datetime import datetime
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 from backend.app.models.enums import DeliveryStatus, PostcodeStatus
 from backend.app.schemas.operator import OperatorResponse
 
@@ -25,10 +25,25 @@ class DeliveryCreateRequest(BaseModel):
     destination_landmark: Optional[str] = None
     destination_area: str
     destination_state: str
-    postcode_input: str
-    package_description: str = Field(..., min_length=2)
+    postcode_input: Optional[str] = None
+    postcode: Optional[str] = None
+    package_description: str = Field(default="Standard Package", min_length=2)
     fee: float = Field(default=2500.0, ge=0)
     pickup_address: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_postcode_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            p_in = data.get("postcode_input")
+            p_code = data.get("postcode")
+            if not p_in and p_code:
+                data["postcode_input"] = str(p_code)
+            elif not p_code and p_in:
+                data["postcode"] = str(p_in)
+            if not data.get("postcode_input"):
+                data["postcode_input"] = ""
+        return data
 
 
 class DeliveryStatusUpdateRequest(BaseModel):
@@ -113,3 +128,19 @@ class DeliveryPublicTrackingResponse(BaseModel):
     updated_at: datetime
     assigned_operator_name: Optional[str] = None
     timeline: List[PublicTrackingEvent] = []
+
+
+class BulkItemResult(BaseModel):
+    index: int
+    success: bool
+    reference: Optional[str] = None
+    delivery: Optional[DeliveryResponse] = None
+    error: Optional[str] = None
+
+
+class DeliveryBulkCreateResponse(BaseModel):
+    batch_id: Optional[str] = None
+    total_items: int
+    successful_count: int
+    failed_count: int
+    results: List[BulkItemResult]

@@ -65,9 +65,12 @@ export function OverviewTab({
 
   const statusColors: Record<DeliveryStatus, string> = {
     draft: "gray",
+    pending: "amber",
     pending_assignment: "amber",
     assigned: "blue",
+    picked_up: "blue",
     in_transit: "blue",
+    out_for_delivery: "blue",
     delivered: "green",
     failed: "red",
     cancelled: "red",

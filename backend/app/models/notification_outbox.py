@@ -21,8 +21,14 @@ class NotificationOutbox(Base):
         default=NotificationDeliveryStatus.QUEUED,
         index=True,
     )
+    notification_type = Column(String(32), nullable=False, default="otp_delivery_pin")
+    idempotency_key = Column(String(64), unique=True, nullable=True, index=True)
     retry_count = Column(Integer, nullable=False, default=0)
     max_retries = Column(Integer, nullable=False, default=3)
+    next_attempt_at = Column(DateTime, nullable=True, index=True)
+    locked_at = Column(DateTime, nullable=True)
+    locked_by = Column(String(64), nullable=True)
+    failure_classification = Column(String(32), nullable=True)
     error_details = Column(String(500), nullable=True)
     
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)

@@ -9,7 +9,7 @@ Enforces zero-knowledge PIN privacy:
 import os
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, Tuple, Dict, Any, List
 from enum import Enum
 import httpx
 from pydantic import BaseModel
@@ -59,6 +59,46 @@ def mask_phone(phone: str) -> str:
     return "***"
 
 
+def normalize_nigerian_phone(phone: str) -> Tuple[str, str]:
+    """Validate and normalize phone numbers for Nigerian and international SMS dispatch.
+
+    Returns:
+        (e164_format, national_msisdn_format)
+        e.g. ("+2348012345678", "2348012345678")
+    Raises:
+        ValueError if the phone number format is invalid.
+    """
+    if not phone or not isinstance(phone, str):
+        raise ValueError("Phone number must be a non-empty string.")
+
+    cleaned = "".join(c for c in phone.strip() if c.isdigit() or c == "+")
+    digits = cleaned.replace("+", "")
+
+    # 1. Nigerian local format: 080... / 070... / 090... / 081... (11 digits)
+    if digits.startswith("0") and len(digits) == 11:
+        msisdn = "234" + digits[1:]
+        e164 = "+" + msisdn
+        return e164, msisdn
+
+    # 2. Nigerian international format without leading plus: 23480... (13 digits)
+    if digits.startswith("234") and len(digits) == 13:
+        msisdn = digits
+        e164 = "+" + msisdn
+        return e164, msisdn
+
+    # 3. International format with explicit plus prefix (+1..., +44..., +234...)
+    if cleaned.startswith("+") and 10 <= len(digits) <= 15:
+        return cleaned, digits
+
+    # 4. Standalone valid digits of standard international length (10-15 digits)
+    if 10 <= len(digits) <= 15:
+        return "+" + digits, digits
+
+    raise ValueError(
+        f"Invalid phone number format: '{phone}'. Expected 11-digit national or E.164 international format."
+    )
+
+
 class TermiiNotificationProvider(BaseNotificationProvider):
     """Termii SMS Provider for Nigerian mobile networks (MTN, Airtel, Glo, 9mobile)."""
 
@@ -86,9 +126,22 @@ class TermiiNotificationProvider(BaseNotificationProvider):
             f"[Termii Gateway] Initiating SMS dispatch to {masked} for Order {delivery_id}. Sender: {self.sender_id}."
         )
 
+        try:
+            _, dest_msisdn = normalize_nigerian_phone(recipient_phone)
+        except ValueError as exc:
+            logger.warning(f"[Termii Gateway] Phone normalization failed for {masked}: {exc}")
+            return NotificationDispatchResult(
+                status=NotificationDeliveryStatus.FAILED,
+                channel="Termii SMS Gateway",
+                recipient_masked=masked,
+                provider="termii",
+                message_preview="Invalid recipient phone format.",
+                error_details=str(exc),
+            )
+
         message = f"Your PostcodeLink delivery confirmation PIN is {pin}. Do not share this code."
         payload = {
-            "to": recipient_phone,
+            "to": dest_msisdn,
             "from": self.sender_id,
             "sms": message,
             "type": "plain",
@@ -101,12 +154,18 @@ class TermiiNotificationProvider(BaseNotificationProvider):
             resp.raise_for_status()
             try:
                 resp_data = resp.json() if callable(getattr(resp, "json", None)) else {}
-            except Exception:
-                resp_data = {}
+                if not isinstance(resp_data, dict):
+                    raise ValueError("Termii returned a non-dictionary JSON payload.")
+            except Exception as e:
+                raise ValueError(f"Termii returned an invalid or unparseable response: {e}")
 
-            if resp_data.get("code") != "ok" and not resp_data.get("message_id"):
-                err_text = resp_data.get("message") or "Termii did not return an acceptance payload."
+            code = resp_data.get("code")
+            message_id = resp_data.get("message_id")
+            # Strict verification: Termii requires BOTH code == "ok" AND a valid non-empty message_id
+            if code != "ok" or not message_id:
+                err_text = resp_data.get("message") or f"Termii rejected message dispatch or omitted message ID (code: {code}, message_id: {message_id})"
                 raise ValueError(err_text)
+
             result_status = NotificationDeliveryStatus.SENT
             error_details = None
         except Exception as exc:
@@ -152,19 +211,34 @@ class TwilioNotificationProvider(BaseNotificationProvider):
             f"[Twilio Gateway] Initiating dispatch to {masked} for Order {delivery_id}."
         )
 
+        try:
+            e164_phone, _ = normalize_nigerian_phone(recipient_phone)
+        except ValueError as exc:
+            logger.warning(f"[Twilio Gateway] Phone normalization failed for {masked}: {exc}")
+            return NotificationDispatchResult(
+                status=NotificationDeliveryStatus.FAILED,
+                channel="Twilio SMS Gateway",
+                recipient_masked=masked,
+                provider="twilio",
+                message_preview="Invalid recipient phone format.",
+                error_details=str(exc),
+            )
+
         message = f"Your PostcodeLink delivery confirmation PIN is {pin}. Do not share this code."
         try:
             resp = httpx.post(
                 self.base_url,
-                data={"To": recipient_phone, "From": self.from_number, "Body": message},
+                data={"To": e164_phone, "From": self.from_number, "Body": message},
                 auth=(self.account_sid, self.auth_token),
                 timeout=self.timeout,
             )
             resp.raise_for_status()
             try:
                 resp_data = resp.json() if callable(getattr(resp, "json", None)) else {}
-            except Exception:
-                resp_data = {}
+                if not isinstance(resp_data, dict):
+                    raise ValueError("Twilio returned a non-dictionary JSON payload.")
+            except Exception as e:
+                raise ValueError(f"Twilio returned an invalid or unparseable response: {e}")
 
             if not resp_data.get("sid"):
                 err_text = resp_data.get("message") or getattr(resp, "text", "") or "Twilio did not return a message SID."

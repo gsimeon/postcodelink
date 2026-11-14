@@ -10,6 +10,10 @@ class PostcodeRecordSchema(BaseModel):
     lga: Optional[str] = None
     lat: Optional[float] = None
     lng: Optional[float] = None
+    postcode_type: str = "conventional_area"
+    building_reference: Optional[str] = None
+    provenance: Optional[str] = "NIPOST Official Digital Postcode Directory"
+    dataset_version: Optional[str] = "2024.2"
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -25,6 +29,8 @@ class PostcodeLookupResponse(BaseModel):
     count: int
     matches: List[PostcodeRecordSchema]
     is_live_nipost: bool = False
+    dataset_version: str = "2024.2"
+    provenance: str = "NIPOST Official Digital Postcode Directory"
 
 
 class CleanseAddressRequest(BaseModel):
@@ -41,6 +47,8 @@ class CleanseAddressResponse(BaseModel):
     state: str
     lga: Optional[str] = None
     postcode: str
+    postcode_type: str = "conventional_area"  # conventional_area | digital_location
+    resolution_level: str = "area_district"  # area_district | building_location
     postcode_status: str  # verified | unverified | estimated | conflict | invalid
     confidence: float
     # Explicit three-dimension validation
@@ -50,3 +58,4 @@ class CleanseAddressResponse(BaseModel):
     source: str
     matched_record: Optional[PostcodeRecordSchema] = None
     changes_made: List[str] = []
+    provenance: Optional[str] = "NIPOST Official Digital Postcode Directory"
