@@ -18,6 +18,7 @@ from backend.app.models.customer import Customer
 from backend.app.models.delivery import Delivery
 from backend.app.models.delivery_event import DeliveryEvent
 from backend.app.models.postcode import PostcodeDirectory
+from backend.app.models.notification_outbox import NotificationOutbox
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

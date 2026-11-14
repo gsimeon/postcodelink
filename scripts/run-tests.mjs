@@ -64,14 +64,20 @@ function generateDeliveryReference(prefix = 'PL') {
   return `${prefix}-${year}-${randomPart.slice(0, 6)}`;
 }
 
-function generateSecureOtp() {
+function generateSecureOtp(length = 6) {
   if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
     const array = new Uint32Array(1);
     crypto.getRandomValues(array);
-    const code = 1000 + (array[0] % 9000);
+    if (length === 4) {
+      return (1000 + (array[0] % 9000)).toString();
+    }
+    const code = 100000 + (array[0] % 900000);
     return code.toString();
   }
-  return Math.floor(1000 + Math.random() * 9000).toString();
+  if (length === 4) {
+    return Math.floor(1000 + Math.random() * 9000).toString();
+  }
+  return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
 test('Reference Generator: generates collision-resistant formatted IDs', () => {
@@ -81,20 +87,28 @@ test('Reference Generator: generates collision-resistant formatted IDs', () => {
   assert.match(ref1, /^PL-\d{4}-[A-F0-9]{6}$/);
 });
 
-test('OTP Generator: generates 4-digit numeric pins with sufficient entropy', () => {
+test('OTP Generator: generates 6-digit numeric pins matching backend enterprise standard', () => {
   const pins = new Set();
   for (let i = 0; i < 50; i++) {
-    const pin = generateSecureOtp();
-    assert.equal(pin.length, 4);
-    assert.match(pin, /^\d{4}$/);
+    const pin = generateSecureOtp(6);
+    assert.equal(pin.length, 6);
+    assert.match(pin, /^\d{6}$/);
     pins.add(pin);
   }
   // Check high distinct ratio
   assert.ok(pins.size > 40);
 });
 
-// 3. Test OTP Attempt Limiting & Lockout Logic
+// 3. Test OTP Attempt Limiting, Lockout & Strict Stage Logic
 function simulateOtpVerification(delivery, enteredOtp) {
+  // Strict Delivery Stage Gate: Proof of delivery PIN can only be verified when out_for_delivery
+  if (delivery.status !== 'out_for_delivery') {
+    return {
+      success: false,
+      error: `Cannot verify PIN: delivery is in "${delivery.status}" status. PIN can only be verified when "out_for_delivery".`,
+    };
+  }
+
   const now = new Date();
   if (delivery.otpLockedUntil) {
     const lockTime = new Date(delivery.otpLockedUntil);
@@ -123,47 +137,60 @@ function simulateOtpVerification(delivery, enteredOtp) {
   return { success: true };
 }
 
-test('OTP Security: enforces 3 failed attempts lockout', () => {
+test('OTP Security: rejects verification when delivery is not in out_for_delivery status', () => {
+  const pendingDelivery = {
+    id: 'PL-2026-TEST00',
+    status: 'pending',
+    otp: '123456',
+    otpAttempts: 0,
+    otpMaxAttempts: 3,
+  };
+  const res = simulateOtpVerification(pendingDelivery, '123456');
+  assert.equal(res.success, false);
+  assert.match(res.error, /out_for_delivery/i);
+});
+
+test('OTP Security: enforces 3 failed attempts lockout on out_for_delivery orders', () => {
   const mockDelivery = {
     id: 'PL-2026-TEST01',
-    status: 'in_transit',
-    otp: '5812',
+    status: 'out_for_delivery',
+    otp: '581290',
     otpAttempts: 0,
     otpMaxAttempts: 3,
   };
 
   // Attempt 1: fail
-  const r1 = simulateOtpVerification(mockDelivery, '0000');
+  const r1 = simulateOtpVerification(mockDelivery, '000000');
   assert.equal(r1.success, false);
   assert.equal(r1.remainingAttempts, 2);
 
   // Attempt 2: fail
-  const r2 = simulateOtpVerification(mockDelivery, '1111');
+  const r2 = simulateOtpVerification(mockDelivery, '111111');
   assert.equal(r2.success, false);
   assert.equal(r2.remainingAttempts, 1);
 
   // Attempt 3: fail -> trigger lockout
-  const r3 = simulateOtpVerification(mockDelivery, '2222');
+  const r3 = simulateOtpVerification(mockDelivery, '222222');
   assert.equal(r3.success, false);
   assert.equal(r3.locked, true);
   assert.equal(r3.remainingAttempts, 0);
 
   // Attempt 4: locked out even if correct
-  const r4 = simulateOtpVerification(mockDelivery, '5812');
+  const r4 = simulateOtpVerification(mockDelivery, '581290');
   assert.equal(r4.success, false);
   assert.equal(r4.locked, true);
 });
 
-test('OTP Security: completes delivery when correct PIN provided', () => {
+test('OTP Security: completes delivery when correct 6-digit PIN provided on out_for_delivery orders', () => {
   const mockDelivery = {
     id: 'PL-2026-TEST02',
-    status: 'in_transit',
-    otp: '9341',
+    status: 'out_for_delivery',
+    otp: '934182',
     otpAttempts: 0,
     otpMaxAttempts: 3,
   };
 
-  const r = simulateOtpVerification(mockDelivery, '9341');
+  const r = simulateOtpVerification(mockDelivery, '934182');
   assert.equal(r.success, true);
   assert.equal(mockDelivery.status, 'delivered');
   assert.equal(mockDelivery.podVerified, true);

@@ -1,6 +1,7 @@
 """Comprehensive automated test suite verifying security, tenant isolation, RBAC, and OTP protection."""
 import secrets
-from unittest.mock import patch
+import httpx
+from unittest.mock import patch, MagicMock
 import pytest
 from starlette.testclient import TestClient
 
@@ -331,7 +332,7 @@ def test_postcode_verification_consistency_and_conflict_detection():
         "address": "14 Admiralty Way",
         "area": "Lekki Phase 1",
         "state": "Lagos",
-        "postcode": "101241"
+        "postcode": "105102"
     })
     assert res_exact.status_code == 200
     data_exact = res_exact.json()
@@ -340,12 +341,12 @@ def test_postcode_verification_consistency_and_conflict_detection():
     assert data_exact["address_consistent"] is True
     assert data_exact["dispatch_confidence"] >= 0.90
 
-    # 2. Postcode 101241 (Lekki Phase 1) with CONFLICTING area "Ikeja" -> conflict
+    # 2. Postcode 105102 (Lekki Phase 1) with CONFLICTING area "Ikeja" -> conflict
     res_conflict = client.post("/api/v1/postcodes/cleanse", json={
         "address": "Obafemi Awolowo Way",
         "area": "Ikeja",
         "state": "Lagos",
-        "postcode": "101241"  # Mismatched code for Lekki, not Ikeja!
+        "postcode": "105102"  # Mismatched code for Lekki, not Ikeja!
     })
     assert res_conflict.status_code == 200
     data_conflict = res_conflict.json()
@@ -575,6 +576,7 @@ def test_operator_assignment_idempotency_and_capacity_guard():
 def test_otp_verification_lockout_and_single_use():
     """Verify 3-attempt brute force lockout and single-use enforcement."""
     token = get_auth_token("dispatch@postcodelink.ng", "MerchantPass123!")
+    admin_token = get_auth_token("admin@postcodelink.ng", "AdminSecure2026!")
 
     create_res = client.post("/api/v1/deliveries/", json={
         "recipient_name": "Lockout & Single-use Recipient",
@@ -589,7 +591,33 @@ def test_otp_verification_lockout_and_single_use():
     assert create_res.status_code == 201
     deliv_id = create_res.json()["delivery"]["id"]
 
-    # Attempt 1: Wrong PIN
+    # 1. Strict Stage Verification: Attempting verify-otp on PENDING order MUST fail with 400
+    early_verify = client.post(f"/api/v1/deliveries/{deliv_id}/verify-otp", json={
+        "otp": "123456"
+    }, headers={"Authorization": f"Bearer {token}"})
+    assert early_verify.status_code == 400
+    assert "out_for_delivery" in early_verify.json()["detail"].lower()
+
+    # Create & assign operator, then advance order to OUT_FOR_DELIVERY
+    op_res = client.post("/api/v1/operators/", json={
+        "business_name": "Stage Test Courier",
+        "phone": "+2348077771111",
+        "vehicle_type": "motorcycle",
+        "service_areas": ["Lagos"],
+        "max_capacity": 10
+    }, headers={"Authorization": f"Bearer {admin_token}"}).json()
+    op_id = op_res["id"]
+
+    asgn = client.post(f"/api/v1/deliveries/{deliv_id}/assign", json={"operator_id": op_id}, headers={"Authorization": f"Bearer {token}"})
+    assert asgn.status_code == 200
+    p1 = client.post(f"/api/v1/deliveries/{deliv_id}/status", json={"new_status": "picked_up"}, headers={"Authorization": f"Bearer {admin_token}"})
+    assert p1.status_code == 200
+    p2 = client.post(f"/api/v1/deliveries/{deliv_id}/status", json={"new_status": "in_transit"}, headers={"Authorization": f"Bearer {admin_token}"})
+    assert p2.status_code == 200
+    p3 = client.post(f"/api/v1/deliveries/{deliv_id}/status", json={"new_status": "out_for_delivery"}, headers={"Authorization": f"Bearer {admin_token}"})
+    assert p3.status_code == 200
+
+    # Attempt 1: Wrong PIN on OUT_FOR_DELIVERY
     try1 = client.post(f"/api/v1/deliveries/{deliv_id}/verify-otp", json={
         "otp": "000000"
     }, headers={"Authorization": f"Bearer {token}"})
@@ -632,6 +660,12 @@ def test_otp_verification_lockout_and_single_use():
         fresh_id = fresh_order["delivery"]["id"]
         fresh_pin = mock_send.call_args.kwargs["pin"]
 
+    # Advance fresh order to OUT_FOR_DELIVERY
+    client.post(f"/api/v1/deliveries/{fresh_id}/assign", json={"operator_id": op_id}, headers={"Authorization": f"Bearer {token}"})
+    client.post(f"/api/v1/deliveries/{fresh_id}/status", json={"new_status": "picked_up"}, headers={"Authorization": f"Bearer {admin_token}"})
+    client.post(f"/api/v1/deliveries/{fresh_id}/status", json={"new_status": "in_transit"}, headers={"Authorization": f"Bearer {admin_token}"})
+    client.post(f"/api/v1/deliveries/{fresh_id}/status", json={"new_status": "out_for_delivery"}, headers={"Authorization": f"Bearer {admin_token}"})
+
     # Verify once -> DELIVERED (200 OK)
     verify1 = client.post(f"/api/v1/deliveries/{fresh_id}/verify-otp", json={
         "otp": fresh_pin
@@ -662,3 +696,256 @@ def test_production_config_secret_guard():
         SECRET_KEY="a_very_strong_production_secret_key_that_is_at_least_32_chars_long"
     )
     assert valid_prod_settings.ENVIRONMENT == "production"
+
+
+def test_termii_notification_provider_http_dispatch():
+    """Verify Termii SMS provider handles HTTP 200, API errors, and network timeouts accurately."""
+    from backend.app.services.notification_service import (
+        TermiiNotificationProvider,
+        NotificationDeliveryStatus,
+    )
+
+    provider = TermiiNotificationProvider(api_key="test_termii_key_123", sender_id="PostcodeLnk")
+
+    # 1. Success case: Termii returns {"code": "ok", "message_id": "998877"}
+    with patch("httpx.Client.post") as mock_post:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b'{"code": "ok", "message_id": "998877"}'
+        mock_resp.json.return_value = {"code": "ok", "message_id": "998877"}
+        mock_post.return_value = mock_resp
+
+        res = provider.send_delivery_pin("08012345678", "Amina Bello", "PL-2026-TEST", "456789")
+        assert res.status == NotificationDeliveryStatus.SENT
+        assert res.provider == "termii"
+        assert res.recipient_masked == "080****5678"
+
+    # 2. Rejection case: Termii returns HTTP 200 with error payload
+    with patch("httpx.Client.post") as mock_post:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b'{"message": "Insufficient wallet balance"}'
+        mock_resp.json.return_value = {"message": "Insufficient wallet balance"}
+        mock_post.return_value = mock_resp
+
+        res = provider.send_delivery_pin("08012345678", "Amina Bello", "PL-2026-TEST", "456789")
+        assert res.status == NotificationDeliveryStatus.FAILED
+        assert "Insufficient wallet balance" in (res.error_details or "")
+
+    # 3. Network timeout case: httpx raises TimeoutException
+    with patch("httpx.Client.post") as mock_post:
+        mock_post.side_effect = httpx.TimeoutException("Connection timed out after 10.0s")
+
+        res = provider.send_delivery_pin("08012345678", "Amina Bello", "PL-2026-TEST", "456789")
+        assert res.status == NotificationDeliveryStatus.FAILED
+        assert "Timeout" in (res.error_details or "")
+
+
+def test_twilio_notification_provider_http_dispatch():
+    """Verify Twilio provider handles HTTP 201 Created and HTTP errors accurately."""
+    from backend.app.services.notification_service import (
+        TwilioNotificationProvider,
+        NotificationDeliveryStatus,
+    )
+
+    provider = TwilioNotificationProvider(
+        account_sid="AC_test_account_sid",
+        auth_token="auth_token_xyz",
+        from_number="+1234567890"
+    )
+
+    # 1. Success case: Twilio returns HTTP 201 Created
+    with patch("httpx.Client.post") as mock_post:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 201
+        mock_resp.content = b'{"sid": "SM12345", "status": "queued"}'
+        mock_resp.json.return_value = {"sid": "SM12345", "status": "queued"}
+        mock_post.return_value = mock_resp
+
+        res = provider.send_delivery_pin("+2348012345678", "Amina Bello", "PL-2026-TEST", "654321")
+        assert res.status == NotificationDeliveryStatus.SENT
+        assert res.provider == "twilio"
+
+    # 2. Failure case: Twilio returns HTTP 400 Bad Request
+    with patch("httpx.Client.post") as mock_post:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 400
+        mock_resp.text = "Invalid 'To' Phone Number"
+        mock_post.return_value = mock_resp
+
+        res = provider.send_delivery_pin("+2348012345678", "Amina Bello", "PL-2026-TEST", "654321")
+        assert res.status == NotificationDeliveryStatus.FAILED
+        assert "400" in (res.error_details or "")
+
+
+def test_notification_outbox_persistence_and_retry():
+    """Verify notification outbox records are created in DB and process_notification_outbox retries them."""
+    from backend.app.models.notification_outbox import NotificationOutbox
+    from backend.app.services.delivery_service import process_notification_outbox
+    from backend.app.services.notification_service import NotificationDeliveryStatus
+
+    token = get_auth_token("dispatch@postcodelink.ng", "MerchantPass123!")
+    create_res = client.post("/api/v1/deliveries/", json={
+        "recipient_name": "Outbox Recipient",
+        "recipient_phone": "08012344321",
+        "destination_address": "45 Broad St, Lagos Island",
+        "destination_area": "Lagos Island",
+        "destination_state": "Lagos",
+        "postcode_input": "100001",
+        "package_description": "Documents",
+        "fee": 2500.0
+    }, headers={"Authorization": f"Bearer {token}"})
+    assert create_res.status_code == 201
+    deliv_id = create_res.json()["delivery"]["id"]
+
+    db = SessionLocal()
+    try:
+        outbox_entry = db.query(NotificationOutbox).filter(NotificationOutbox.delivery_id == deliv_id).first()
+        assert outbox_entry is not None
+        assert outbox_entry.delivery_id == deliv_id
+        assert outbox_entry.status in [NotificationDeliveryStatus.SIMULATED, NotificationDeliveryStatus.SENT]
+        assert outbox_entry.recipient_phone == "08012344321"
+
+        # Manually set to FAILED to test the outbox processor retry
+        outbox_entry.status = NotificationDeliveryStatus.FAILED
+        outbox_entry.retry_count = 0
+        db.commit()
+
+        processed = process_notification_outbox(db, max_items=5)
+        assert processed >= 1
+
+        db.refresh(outbox_entry)
+        assert outbox_entry.retry_count == 1
+    finally:
+        db.close()
+
+
+def test_operator_workload_counter_no_double_decrement_on_failed_to_cancelled():
+    """Verify that moving FAILED -> CANCELLED does NOT decrement active_deliveries_count a second time."""
+    admin_token = get_auth_token("admin@postcodelink.ng", "AdminSecure2026!")
+    merchant_token = get_auth_token("dispatch@postcodelink.ng", "MerchantPass123!")
+
+    # 1. Create operator with multiple active deliveries
+    op_res = client.post("/api/v1/operators/", json={
+        "business_name": "Multi-Trip Logistics",
+        "phone": "+2348098765432",
+        "vehicle_type": "van",
+        "service_areas": ["Lagos", "Ikoyi"],
+        "max_capacity": 10
+    }, headers={"Authorization": f"Bearer {admin_token}"}).json()
+    op_id = op_res["id"]
+    initial_active = op_res["active_deliveries_count"]
+
+    # 2. Create 2 orders and assign to operator -> active count = initial + 2
+    order1 = client.post("/api/v1/deliveries/", json={
+        "recipient_name": "Trip 1",
+        "recipient_phone": "08011112222",
+        "destination_address": "1 First Ave",
+        "destination_area": "Ikoyi",
+        "destination_state": "Lagos",
+        "postcode_input": "101233",
+        "package_description": "Order 1",
+        "fee": 2500.0
+    }, headers={"Authorization": f"Bearer {merchant_token}"}).json()["delivery"]["id"]
+
+    order2 = client.post("/api/v1/deliveries/", json={
+        "recipient_name": "Trip 2",
+        "recipient_phone": "08033334444",
+        "destination_address": "2 Second Ave",
+        "destination_area": "Ikoyi",
+        "destination_state": "Lagos",
+        "postcode_input": "101233",
+        "package_description": "Order 2",
+        "fee": 2500.0
+    }, headers={"Authorization": f"Bearer {merchant_token}"}).json()["delivery"]["id"]
+
+    asgn1 = client.post(f"/api/v1/deliveries/{order1}/assign", json={"operator_id": op_id}, headers={"Authorization": f"Bearer {merchant_token}"})
+    assert asgn1.status_code == 200, asgn1.text
+    asgn2 = client.post(f"/api/v1/deliveries/{order2}/assign", json={"operator_id": op_id}, headers={"Authorization": f"Bearer {merchant_token}"})
+    assert asgn2.status_code == 200, asgn2.text
+
+    op_check1 = client.get(f"/api/v1/operators/{op_id}", headers={"Authorization": f"Bearer {admin_token}"}).json()
+    assert op_check1["active_deliveries_count"] == initial_active + 2
+
+    # 3. Advance order1 to PICKED_UP then FAILED -> count decrements by 1 (to initial + 1)
+    client.post(f"/api/v1/deliveries/{order1}/status", json={"new_status": "picked_up"}, headers={"Authorization": f"Bearer {admin_token}"})
+    client.post(f"/api/v1/deliveries/{order1}/status", json={"new_status": "failed", "note": "Customer unreachable"}, headers={"Authorization": f"Bearer {admin_token}"})
+
+    op_check2 = client.get(f"/api/v1/operators/{op_id}", headers={"Authorization": f"Bearer {admin_token}"}).json()
+    assert op_check2["active_deliveries_count"] == initial_active + 1
+
+    # 4. Now transition order1 from FAILED -> CANCELLED
+    # CRITICAL TEST: Active count MUST NOT be decremented again! It must remain initial_active + 1
+    client.post(f"/api/v1/deliveries/{order1}/status", json={"new_status": "cancelled", "note": "Cancelled after failed delivery"}, headers={"Authorization": f"Bearer {admin_token}"})
+
+    op_check3 = client.get(f"/api/v1/operators/{op_id}", headers={"Authorization": f"Bearer {admin_token}"}).json()
+    assert op_check3["active_deliveries_count"] == initial_active + 1, (
+        f"Double decrement bug detected! Expected {initial_active + 1}, got {op_check3['active_deliveries_count']}"
+    )
+
+
+def test_postcode_conflict_detection_when_conflicting_area_is_in_address_text():
+    """Verify that a conflicting area in area_hint AND in address text is flagged as CONFLICT."""
+    # User provides Lekki Phase 1 postcode 105102, but says area is Ikeja and address includes Ikeja
+    cleanse_res = client.post("/api/v1/postcodes/cleanse", json={
+        "address": "Plot 12 Commercial Avenue, Ikeja, Lagos",
+        "area": "Ikeja",
+        "postcode": "105102",  # 105102 is Lekki Phase 1, NOT Ikeja!
+        "state": "Lagos"
+    }).json()
+
+    # Must be marked CONFLICT, confidence lowered, address_consistent False
+    assert cleanse_res["postcode_status"] == "conflict"
+    assert cleanse_res["address_consistent"] is False
+    assert cleanse_res["confidence"] <= 0.50
+    assert cleanse_res["dispatch_confidence"] <= 0.50
+
+
+def test_login_rate_limiting_lockout():
+    """Verify that repeated failed login attempts trigger HTTP 429 lockout."""
+    target_email = "lockout_victim@postcodelink.ng"
+    # First register user
+    client.post("/api/v1/auth/register", json={
+        "full_name": "Rate Limit Target",
+        "email": target_email,
+        "password": "ValidPassword123!"
+    })
+
+    # Attempt 1-4: Invalid password -> 401 Unauthorized
+    for i in range(4):
+        resp = client.post("/api/v1/auth/login", json={
+            "email": target_email,
+            "password": f"WrongPass{i}"
+        })
+        assert resp.status_code == 401
+        assert "attempt(s) remaining" in resp.json()["detail"]
+
+    # Attempt 5: 5th failure -> triggers 429 lockout
+    resp5 = client.post("/api/v1/auth/login", json={
+        "email": target_email,
+        "password": "WrongPass5"
+    })
+    assert resp5.status_code == 429
+    assert "locked" in resp5.json()["detail"].lower()
+
+    # Attempt 6: Even with correct password, locked out with 429
+    resp6 = client.post("/api/v1/auth/login", json={
+        "email": target_email,
+        "password": "ValidPassword123!"
+    })
+    assert resp6.status_code == 429
+
+
+def test_national_postcode_coverage_eleven_states():
+    """Verify that the official postcode directory covers all 11 Nigerian states."""
+    expected_states = [
+        "Lagos", "Abuja FCT", "Rivers", "Oyo", "Ogun",
+        "Kano", "Kaduna", "Enugu", "Delta", "Edo", "Anambra"
+    ]
+    for st in expected_states:
+        res = client.get(f"/api/v1/postcodes/lookup?state={st}")
+        assert res.status_code == 200
+        records = res.json()["matches"]
+        assert len(records) >= 1, f"No postcode records found for state {st}"
+        assert any(st.lower() in r["state"].lower() for r in records)
+

@@ -7,6 +7,7 @@ from backend.app.models.customer import Customer
 from backend.app.models.delivery import Delivery
 from backend.app.models.delivery_event import DeliveryEvent
 from backend.app.models.postcode import PostcodeDirectory
+from backend.app.models.notification_outbox import NotificationOutbox
 
 __all__ = [
     "Base",
@@ -20,5 +21,6 @@ __all__ = [
     "Delivery",
     "DeliveryEvent",
     "PostcodeDirectory",
+    "NotificationOutbox",
 ]
 

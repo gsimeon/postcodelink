@@ -19,14 +19,20 @@ export function generateDeliveryReference(prefix: string = 'PL'): string {
   return `${prefix}-${year}-${randomPart.slice(0, 6)}`;
 }
 
-export function generateSecureOtp(): string {
+export function generateSecureOtp(length: number = 6): string {
   if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
     const array = new Uint32Array(1);
     crypto.getRandomValues(array);
-    // 4-digit code between 1000 and 9999
-    const code = 1000 + (array[0] % 9000);
+    if (length === 4) {
+      return (1000 + (array[0] % 9000)).toString();
+    }
+    // 6-digit PIN between 100000 and 999999 matching backend enterprise standard
+    const code = 100000 + (array[0] % 900000);
     return code.toString();
   }
-  return Math.floor(1000 + Math.random() * 9000).toString();
+  if (length === 4) {
+    return Math.floor(1000 + Math.random() * 9000).toString();
+  }
+  return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
