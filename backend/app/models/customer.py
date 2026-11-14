@@ -20,7 +20,7 @@ class Customer(Base):
     default_address = Column(String(500), nullable=False)
     area = Column(String(100), nullable=False)
     state = Column(String(100), nullable=False)
-    postcode = Column(String(10), nullable=True)
+    postcode = Column(String(20), nullable=True)
     total_orders = Column(Integer, nullable=False, default=1)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)

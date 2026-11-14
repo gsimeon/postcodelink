@@ -27,7 +27,7 @@ class Delivery(Base):
     destination_state = Column(String(100), nullable=False)
     postcode_input = Column(String(20), nullable=False)
     postcode_status = Column(SAEnum(PostcodeStatus), nullable=False, default=PostcodeStatus.UNVERIFIED)
-    verified_postcode = Column(String(10), nullable=True)
+    verified_postcode = Column(String(20), nullable=True)
     
     # Package & Fee (Stored as Numeric with 2 decimal precision)
     package_description = Column(String(500), nullable=False)

@@ -29,8 +29,27 @@ def upgrade() -> None:
     op.add_column('notification_outbox', sa.Column('recipient_name', sa.String(length=128), nullable=True))
     op.add_column('notification_outbox', sa.Column('message_payload', sa.String(length=500), nullable=True))
 
+    # 4. Expand postcode columns to support digital postcodes (up to 20 chars, e.g. LAG-IKJ-0012)
+    with op.batch_alter_table('postcodes') as batch_op:
+        batch_op.alter_column('code', existing_type=sa.String(length=10), type_=sa.String(length=20))
+
+    with op.batch_alter_table('deliveries') as batch_op:
+        batch_op.alter_column('verified_postcode', existing_type=sa.String(length=10), type_=sa.String(length=20))
+
+    with op.batch_alter_table('customers') as batch_op:
+        batch_op.alter_column('postcode', existing_type=sa.String(length=10), type_=sa.String(length=20))
+
 
 def downgrade() -> None:
+    with op.batch_alter_table('customers') as batch_op:
+        batch_op.alter_column('postcode', existing_type=sa.String(length=20), type_=sa.String(length=10))
+
+    with op.batch_alter_table('deliveries') as batch_op:
+        batch_op.alter_column('verified_postcode', existing_type=sa.String(length=20), type_=sa.String(length=10))
+
+    with op.batch_alter_table('postcodes') as batch_op:
+        batch_op.alter_column('code', existing_type=sa.String(length=20), type_=sa.String(length=10))
+
     op.drop_column('notification_outbox', 'message_payload')
     op.drop_column('notification_outbox', 'recipient_name')
     op.drop_index(op.f('ix_deliveries_idempotency_key'), table_name='deliveries')
