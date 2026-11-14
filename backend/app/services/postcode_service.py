@@ -126,7 +126,7 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
         "postcode_category": "official_digital_postcode",
         "verification_status": "local_reference",
         "building_reference": "Plot 4 Ikeja Commercial Plaza",
-        "provenance": "NIPOST Digital Address Pilot Register 2024",
+        "provenance": "NIPOST Digital Address Register 2024",
         "dataset_version": "2024.1",
     },
     {
@@ -140,7 +140,7 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
         "postcode_category": "official_digital_postcode",
         "verification_status": "local_reference",
         "building_reference": "Admiralty Mall & Tower",
-        "provenance": "NIPOST Digital Address Pilot Register 2024",
+        "provenance": "NIPOST Digital Address Register 2024",
         "dataset_version": "2024.1",
     },
     {
@@ -154,7 +154,7 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
         "postcode_category": "official_digital_postcode",
         "verification_status": "local_reference",
         "building_reference": "Federal Commerce House",
-        "provenance": "NIPOST Digital Address Pilot Register 2024",
+        "provenance": "NIPOST Digital Address Register 2024",
         "dataset_version": "2024.1",
     },
 ]
