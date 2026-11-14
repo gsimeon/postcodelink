@@ -602,6 +602,11 @@ def test_otp_verification_lockout_and_single_use():
     }, headers={"Authorization": f"Bearer {token}"})
     assert create_res.status_code == 201
     deliv_id = create_res.json()["delivery"]["id"]
+
+    premature = client.post(f"/api/v1/deliveries/{deliv_id}/verify-otp", json={
+        "otp": "000000"
+    }, headers={"Authorization": f"Bearer {token}"})
+    assert premature.status_code == 409
     set_delivery_out_for_delivery(deliv_id)
 
     # Attempt 1: Wrong PIN
@@ -646,6 +651,11 @@ def test_otp_verification_lockout_and_single_use():
         }, headers={"Authorization": f"Bearer {token}"}).json()
         fresh_id = fresh_order["delivery"]["id"]
         fresh_pin = mock_send.call_args.kwargs["pin"]
+
+    premature_success = client.post(f"/api/v1/deliveries/{fresh_id}/verify-otp", json={
+        "otp": fresh_pin
+    }, headers={"Authorization": f"Bearer {token}"})
+    assert premature_success.status_code == 409
     set_delivery_out_for_delivery(fresh_id)
 
     # Verify once -> DELIVERED (200 OK)
