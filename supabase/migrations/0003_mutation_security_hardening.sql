@@ -160,6 +160,38 @@ create trigger deliveries_guard_mutation
 before update on public.deliveries
 for each row execute function public.guard_delivery_mutation();
 
+
+-- Operator accounts may self-manage only their availability and service areas.
+-- Business identity and profile ownership require an administrator.
+create or replace function public.guard_operator_mutation()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $
+begin
+  if auth.uid() is null or public.is_admin() then
+    return new;
+  end if;
+
+  if old.profile_id is distinct from auth.uid()
+     or new.id is distinct from old.id
+     or new.profile_id is distinct from old.profile_id
+     or new.business_name is distinct from old.business_name
+     or new.created_at is distinct from old.created_at then
+    raise exception 'Operator may change only availability and service areas'
+      using errcode = '42501';
+  end if;
+
+  return new;
+end;
+$;
+
+drop trigger if exists operators_guard_mutation on public.operators;
+create trigger operators_guard_mutation
+before update on public.operators
+for each row execute function public.guard_operator_mutation();
+
 -- Replace overly broad legacy policies with role-scoped policies.
 drop policy if exists "Users can update their own profile" on public.profiles;
 drop policy if exists "Admins can manage all profiles" on public.profiles;
