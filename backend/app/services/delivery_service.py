@@ -340,13 +340,6 @@ def verify_delivery_otp(db: Session, delivery_id: str, request: DeliveryVerifyOT
     if current_user.role != AppRole.ADMIN and not is_owner and not is_assigned:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to confirm delivery for this order.")
 
-    # Recipient confirmation is valid only at the final delivery hand-off stage.
-    if delivery.status != DeliveryStatus.OUT_FOR_DELIVERY:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Delivery PIN can only be verified when the order is out for delivery."
-        )
-
     now = datetime.now(timezone.utc)
 
     # 1. Single-use guard: Cannot verify an already finalized/delivered order
@@ -354,6 +347,13 @@ def verify_delivery_otp(db: Session, delivery_id: str, request: DeliveryVerifyOT
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Delivery order has already been verified and delivered."
+        )
+
+    # Recipient confirmation is valid only at the final delivery hand-off stage.
+    if delivery.status != DeliveryStatus.OUT_FOR_DELIVERY:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Delivery PIN can only be verified when the order is out for delivery."
         )
 
     # 2. Check lockout
