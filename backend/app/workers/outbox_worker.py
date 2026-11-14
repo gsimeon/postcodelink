@@ -47,3 +47,40 @@ async def run_outbox_worker_loop(
             await asyncio.sleep(1)
 
     logger.info("Notification Outbox Worker loop stopped cleanly.")
+
+
+def main():
+    """CLI entry point for running the Outbox Worker as a standalone process/daemon."""
+    import argparse
+    import signal
+    import secrets
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    parser = argparse.ArgumentParser(description="PostcodeLink Outbox Dispatch Worker Process")
+    parser.add_argument("--interval", type=int, default=settings.OUTBOX_WORKER_INTERVAL_SECONDS, help="Polling interval in seconds")
+    parser.add_argument("--worker-id", type=str, default=None, help="Worker instance identifier")
+    args = parser.parse_args()
+
+    assigned_id = args.worker_id or f"standalone-worker-{secrets.token_hex(4)}"
+    stop_event = asyncio.Event()
+
+    def _handle_signal(sig, frame):
+        logger.info(f"Received termination signal ({sig}). Stopping outbox worker loop...")
+        stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _handle_signal)
+        except Exception:
+            pass
+
+    try:
+        asyncio.run(run_outbox_worker_loop(stop_event, poll_interval=args.interval, worker_id=assigned_id))
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Outbox Worker process exited.")
+
+
+if __name__ == "__main__":
+    main()
+

@@ -8,8 +8,10 @@ from backend.app.schemas.postcode import (
     PostcodeLookupResponse,
     CleanseAddressRequest,
     CleanseAddressResponse,
+    PostcodeRecordSchema,
 )
 from backend.app.services.postcode_service import find_postcodes, cleanse_address
+from backend.app.services.nipost_client import get_nipost_client, NIPOSTClient
 
 router = APIRouter(prefix="/postcodes", tags=["postcodes"])
 
@@ -19,9 +21,35 @@ def api_lookup_postcodes(
     state: Optional[str] = Query(None),
     area: Optional[str] = Query(None),
     code: Optional[str] = Query(None),
+    client: NIPOSTClient = Depends(get_nipost_client),
     db: Session = Depends(get_db),
 ):
-    """Search official Nigerian postal codes from the local NIPOST reference dataset."""
+    """Search official Nigerian postal codes from live NIPOST API or local reference dataset."""
+    if client.is_configured and code:
+        live_res = client.lookup_postcode(code)
+        if live_res:
+            schema_rec = PostcodeRecordSchema(
+                code=live_res.get("code", code),
+                area=live_res.get("area", "Official Zone"),
+                state=live_res.get("state", "Nigeria"),
+                lga=live_res.get("lga"),
+                lat=live_res.get("lat"),
+                lng=live_res.get("lng"),
+                postcode_type=live_res.get("postcode_type", "official_digital_postcode" if len(code) > 6 else "legacy_postal_code"),
+                building_reference=live_res.get("building_reference"),
+                verification_status="official_verified",
+                provenance="NIPOST Official Digital Directory (Live API)",
+                dataset_version="Live Gateway",
+            )
+            return PostcodeLookupResponse(
+                source="live_nipost_api",
+                count=1,
+                matches=[schema_rec],
+                is_live_nipost=True,
+                dataset_version="Live Gateway",
+                provenance="NIPOST Official Digital Directory (Live API)",
+            )
+
     matches = find_postcodes(db=db, state=state, area=area, code=code)
     return PostcodeLookupResponse(
         source="local_nipost_reference_dataset",

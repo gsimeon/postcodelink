@@ -30,9 +30,9 @@ async def lifespan(app: FastAPI):
         logger.info(
             "Production environment: Skipping automatic DDL. Schema managed strictly via Alembic migrations ('alembic upgrade head')."
         )
-        if settings.SEED_DEMO_DATA:
+        if settings.SEED_DEMO_DATA or settings.SEED_DEMO_ACCOUNTS:
             raise RuntimeError(
-                "Fatal Security Error: SEED_DEMO_DATA cannot be enabled in production environment."
+                "Fatal Security Error: SEED_DEMO_DATA and SEED_DEMO_ACCOUNTS cannot be enabled in production environment."
             )
     else:
         logger.info("Development/Test environment: Initializing local tables if not existing...")

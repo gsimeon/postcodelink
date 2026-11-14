@@ -30,7 +30,12 @@ from backend.app.schemas.delivery import (
 )
 from backend.app.services.state_machine import can_transition
 from backend.app.services.postcode_service import cleanse_address, normalize_string
-from backend.app.core.security import hash_otp, verify_otp_hash
+from backend.app.core.security import (
+    hash_otp,
+    verify_otp_hash,
+    encrypt_authenticated_pin,
+    decrypt_authenticated_pin,
+)
 from backend.app.services.notification_service import (
     notification_provider,
     get_notification_provider,
@@ -57,28 +62,28 @@ def adjust_operator_workload_count(operator: Operator, old_status: DeliveryStatu
         operator.active_deliveries_count += 1
 
 
-def encrypt_transit_pin(pin: str, secret_key: str) -> str:
-    """Symmetric encryption for transit PIN using SHA-256 HMAC-based stream cipher."""
-    key = hashlib.sha256(secret_key.encode()).digest()
-    pin_bytes = pin.encode()
-    nonce = secrets.token_bytes(8)
-    keystream = hashlib.sha256(key + nonce).digest()
-    ciphertext = bytes(b ^ k for b, k in zip(pin_bytes, keystream[:len(pin_bytes)]))
-    return (nonce + ciphertext).hex()
+def encrypt_transit_pin(pin: str, secret_key: Optional[str] = None) -> str:
+    """Authenticated encryption for transit PIN using HMAC-SHA256 authenticated envelope."""
+    key = secret_key or getattr(settings, "OUTBOX_ENCRYPTION_KEY", None) or settings.SECRET_KEY
+    return encrypt_authenticated_pin(pin, key)
 
 
-def decrypt_transit_pin(token: str, secret_key: str) -> Optional[str]:
-    """Decrypts transit PIN using the application secret key."""
-    try:
-        raw = bytes.fromhex(token)
-        nonce = raw[:8]
-        ciphertext = raw[8:]
-        key = hashlib.sha256(secret_key.encode()).digest()
-        keystream = hashlib.sha256(key + nonce).digest()
-        pin_bytes = bytes(c ^ k for c, k in zip(ciphertext, keystream[:len(ciphertext)]))
-        return pin_bytes.decode()
-    except Exception:
-        return None
+def decrypt_transit_pin(token: str, secret_key: Optional[str] = None) -> Optional[str]:
+    """Decrypts and verifies authenticated transit PIN envelope."""
+    if secret_key:
+        res = decrypt_authenticated_pin(token, secret_key)
+        if res is not None:
+            return res
+    outbox_key = getattr(settings, "OUTBOX_ENCRYPTION_KEY", None)
+    if outbox_key and outbox_key != secret_key:
+        res = decrypt_authenticated_pin(token, outbox_key)
+        if res is not None:
+            return res
+    if settings.SECRET_KEY != secret_key and settings.SECRET_KEY != outbox_key:
+        res = decrypt_authenticated_pin(token, settings.SECRET_KEY)
+        if res is not None:
+            return res
+    return None
 
 
 def generate_reference(db: Session) -> str:
@@ -193,8 +198,8 @@ def create_delivery(
     db.add(init_event)
 
     # Persistent notification outbox record (QUEUED) created atomically with delivery
-    # Transit PIN is securely encrypted with SECRET_KEY so only the outbox worker can dispatch it
-    encrypted_pin = encrypt_transit_pin(raw_otp, settings.SECRET_KEY)
+    # Transit PIN is securely encrypted with dedicated OUTBOX_ENCRYPTION_KEY so only the outbox worker can dispatch it
+    encrypted_pin = encrypt_transit_pin(raw_otp, settings.OUTBOX_ENCRYPTION_KEY)
     outbox_entry = NotificationOutbox(
         delivery_id=delivery.id,
         channel="SMS",
@@ -203,6 +208,7 @@ def create_delivery(
         message_payload=encrypted_pin,
         provider=settings.SMS_PROVIDER,
         notification_type="otp_delivery_pin",
+        delivery_version=delivery.version,
         status=NotificationDeliveryStatus.QUEUED,
         idempotency_key=f"outbox-{delivery.id}-{uuid.uuid4().hex[:12]}",
     )
@@ -672,7 +678,23 @@ def resend_delivery_pin(db: Session, delivery_id: str, current_user: Profile) ->
             detail=f"Cannot resend PIN: delivery order is already in '{delivery.status.value}' terminal status."
         )
 
-    # Generate fresh cryptographically secure 6-digit PIN
+    # 1. Atomically supersede all prior queued or retrying PIN notifications for this delivery
+    prior_pin_items = (
+        db.query(NotificationOutbox)
+        .filter(
+            NotificationOutbox.delivery_id == delivery.id,
+            NotificationOutbox.status.in_([NotificationDeliveryStatus.QUEUED, NotificationDeliveryStatus.FAILED]),
+            NotificationOutbox.notification_type.in_(["otp_delivery_pin", "otp", "otp_resend"]),
+        )
+        .all()
+    )
+    for prior in prior_pin_items:
+        prior.status = NotificationDeliveryStatus.SUPERSEDED
+        prior.error_details = f"Superseded by fresh PIN generation at delivery version {delivery.version + 1}."
+        prior.locked_at = None
+        prior.locked_by = None
+
+    # 2. Generate fresh cryptographically secure 6-digit PIN
     raw_pin = f"{secrets.randbelow(900000) + 100000}"
     delivery.otp_hash = hash_otp(raw_pin)
     delivery.otp_attempts = 0
@@ -680,7 +702,7 @@ def resend_delivery_pin(db: Session, delivery_id: str, current_user: Profile) ->
     delivery.otp_expires_at = datetime.now(timezone.utc) + timedelta(hours=settings.OTP_EXPIRE_HOURS)
     delivery.version += 1
 
-    encrypted_pin = encrypt_transit_pin(raw_pin, settings.SECRET_KEY)
+    encrypted_pin = encrypt_transit_pin(raw_pin, settings.OUTBOX_ENCRYPTION_KEY)
 
     # Atomic Outbox Entry: strictly queued for asynchronous worker dispatch
     outbox_entry = NotificationOutbox(
@@ -691,6 +713,7 @@ def resend_delivery_pin(db: Session, delivery_id: str, current_user: Profile) ->
         provider=settings.SMS_PROVIDER,
         status=NotificationDeliveryStatus.QUEUED,
         notification_type="otp_resend",
+        delivery_version=delivery.version,
         message_payload=encrypted_pin,
         idempotency_key=f"resend-{delivery.id}-{uuid.uuid4().hex[:12]}",
     )
@@ -771,6 +794,12 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
         dispatch_res = None
         # Handle PIN notification types
         if item.notification_type in ["otp_delivery_pin", "otp", "otp_resend"]:
+            if item.status == NotificationDeliveryStatus.SUPERSEDED:
+                item.locked_at = None
+                item.locked_by = None
+                processed += 1
+                continue
+
             deliv = db.query(Delivery).filter(Delivery.id == item.delivery_id).first()
             if not deliv or deliv.status in [DeliveryStatus.DELIVERED, DeliveryStatus.CANCELLED]:
                 item.status = NotificationDeliveryStatus.FAILED
@@ -781,19 +810,36 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
                 processed += 1
                 continue
 
-            # Decrypt existing transit PIN or generate fresh PIN if not present
             target_pin = None
             if item.message_payload:
-                target_pin = decrypt_transit_pin(item.message_payload, settings.SECRET_KEY)
+                target_pin = decrypt_transit_pin(item.message_payload, settings.OUTBOX_ENCRYPTION_KEY)
+                if not target_pin:
+                    item.status = NotificationDeliveryStatus.FAILED
+                    item.failure_classification = "invalid_pin_payload"
+                    item.error_details = "PIN payload could not be decrypted or failed authentication verification."
+                    item.locked_at = None
+                    item.locked_by = None
+                    processed += 1
+                    continue
 
-            if not target_pin:
+                # Stale PIN guard: verify decrypted PIN matches current active delivery OTP hash
+                if not verify_otp_hash(target_pin, deliv.otp_hash):
+                    item.status = NotificationDeliveryStatus.SUPERSEDED
+                    item.failure_classification = "stale_pin_superseded"
+                    item.error_details = f"PIN payload does not match current delivery OTP hash (delivery version: {deliv.version}); superseded."
+                    item.locked_at = None
+                    item.locked_by = None
+                    processed += 1
+                    continue
+            else:
+                # Fresh PIN generation when payload is absent (e.g. zero-knowledge PIN rotation on dispatch)
                 target_pin = generate_otp()
                 deliv.otp_hash = hash_otp(target_pin)
                 deliv.otp_attempts = 0
                 deliv.otp_locked_until = None
                 deliv.otp_expires_at = now + timedelta(hours=settings.OTP_EXPIRE_HOURS)
                 deliv.version += 1
-                item.message_payload = encrypt_transit_pin(target_pin, settings.SECRET_KEY)
+                item.message_payload = encrypt_transit_pin(target_pin, settings.OUTBOX_ENCRYPTION_KEY)
                 db.flush()
 
             dispatch_res = active_provider.send_delivery_pin(

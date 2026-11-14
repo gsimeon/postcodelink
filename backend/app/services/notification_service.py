@@ -27,6 +27,7 @@ class NotificationDeliveryStatus(str, Enum):
     SENT = "SENT"
     SIMULATED = "SIMULATED"
     FAILED = "FAILED"
+    SUPERSEDED = "SUPERSEDED"
 
 
 class NotificationDispatchResult(BaseModel):

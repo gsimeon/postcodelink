@@ -24,6 +24,7 @@ class NotificationOutbox(Base):
         index=True,
     )
     notification_type = Column(String(32), nullable=False, default="otp_delivery_pin")
+    delivery_version = Column(Integer, nullable=True, default=1)
     idempotency_key = Column(String(64), unique=True, nullable=True, index=True)
     retry_count = Column(Integer, nullable=False, default=0)
     max_retries = Column(Integer, nullable=False, default=3)

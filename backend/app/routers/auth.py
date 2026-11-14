@@ -199,14 +199,23 @@ def api_login(request: UserLoginRequest, req: Request, db: Session = Depends(get
         db.add(failed_record)
         db.commit()
 
-        new_failed_count = account_failed_count + 1
-        if new_failed_count >= MAX_LOGIN_ATTEMPTS:
+        # Concurrency-safe atomic check of committed failed attempts
+        current_failed_count = (
+            db.query(LoginAttempt)
+            .filter(
+                LoginAttempt.email == clean_email,
+                LoginAttempt.attempted_at >= window_start,
+                LoginAttempt.is_successful == False,
+            )
+            .count()
+        )
+        if current_failed_count >= MAX_LOGIN_ATTEMPTS:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Too many failed login attempts. Account is temporarily locked for 15 minutes."
             )
         else:
-            remaining = MAX_LOGIN_ATTEMPTS - new_failed_count
+            remaining = max(0, MAX_LOGIN_ATTEMPTS - current_failed_count)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=f"Invalid email or password. {remaining} attempt(s) remaining.",

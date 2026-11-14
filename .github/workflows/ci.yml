@@ -56,6 +56,7 @@ jobs:
         env:
           DATABASE_URL: postgresql+psycopg2://postgres:postgrespassword@localhost:5432/postcodelink_test
           SECRET_KEY: "postcodelink_ci_secret_key_32_characters_minimum"
+          OUTBOX_ENCRYPTION_KEY: "postcodelink_ci_outbox_key_32_characters_minimum"
           ENVIRONMENT: "development"
         run: |
           python -m pytest backend/tests -v
@@ -64,6 +65,7 @@ jobs:
         env:
           DATABASE_URL: sqlite:///./postcodelink_ci_test.db
           SECRET_KEY: "postcodelink_ci_secret_key_32_characters_minimum"
+          OUTBOX_ENCRYPTION_KEY: "postcodelink_ci_outbox_key_32_characters_minimum"
           ENVIRONMENT: "development"
         run: |
           python -m alembic upgrade head

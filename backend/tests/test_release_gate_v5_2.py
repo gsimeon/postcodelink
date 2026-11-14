@@ -299,6 +299,7 @@ def test_production_configuration_gate_rejects_simulated_and_missing_credentials
     valid = Settings(
         ENVIRONMENT="production",
         SECRET_KEY="a_valid_production_secret_key_at_least_32_chars_long",
+        OUTBOX_ENCRYPTION_KEY="a_valid_outbox_encryption_key_at_least_32_chars_long",
         SMS_PROVIDER="termii",
         TERMII_API_KEY="valid_key_12345",
         OUTBOX_WORKER_ENABLED=True,

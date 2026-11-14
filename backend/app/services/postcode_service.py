@@ -123,8 +123,10 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
         "lat": 6.5921,
         "lng": 3.3541,
         "postcode_type": "digital_location",
+        "postcode_category": "official_digital_postcode",
+        "verification_status": "local_reference",
         "building_reference": "Plot 4 Ikeja Commercial Plaza",
-        "provenance": "NIPOST Digital Address Register 2024",
+        "provenance": "NIPOST Digital Address Pilot Register 2024",
         "dataset_version": "2024.1",
     },
     {
@@ -135,8 +137,10 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
         "lat": 6.4421,
         "lng": 3.4751,
         "postcode_type": "digital_location",
+        "postcode_category": "official_digital_postcode",
+        "verification_status": "local_reference",
         "building_reference": "Admiralty Mall & Tower",
-        "provenance": "NIPOST Digital Address Register 2024",
+        "provenance": "NIPOST Digital Address Pilot Register 2024",
         "dataset_version": "2024.1",
     },
     {
@@ -147,8 +151,10 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
         "lat": 9.0321,
         "lng": 7.4891,
         "postcode_type": "digital_location",
+        "postcode_category": "official_digital_postcode",
+        "verification_status": "local_reference",
         "building_reference": "Federal Commerce House",
-        "provenance": "NIPOST Digital Address Register 2024",
+        "provenance": "NIPOST Digital Address Pilot Register 2024",
         "dataset_version": "2024.1",
     },
 ]
@@ -266,6 +272,7 @@ def cleanse_address(
                 is_digital_location = False
 
     postcode_type = "digital_location" if is_digital_location else "conventional_area"
+    postcode_category = "official_digital_postcode" if is_digital_location else "legacy_postal_code"
     resolution_level = "building_location" if is_digital_location else "area_district"
 
     # 2. Database-First Candidates Selection
@@ -284,8 +291,10 @@ def cleanse_address(
                         "lat": r.lat,
                         "lng": r.lng,
                         "postcode_type": getattr(r, "postcode_type", "conventional_area"),
+                        "postcode_category": getattr(r, "postcode_category", "legacy_postal_code"),
+                        "verification_status": getattr(r, "verification_status", "local_reference"),
                         "building_reference": getattr(r, "building_reference", None),
-                        "provenance": getattr(r, "provenance", "NIPOST Official Digital Postcode Directory"),
+                        "provenance": getattr(r, "provenance", "NIPOST 6-Digit Postal Directory (Zone Reference)"),
                         "dataset_version": getattr(r, "dataset_version", "2024.2"),
                     }
                     for r in db_records
@@ -380,7 +389,8 @@ def cleanse_address(
         matched_area_norm = normalize_string(best_match["area"])
         matched_lga_norm = normalize_string(detected_lga) if detected_lga else ""
         rec_type = best_match.get("postcode_type", postcode_type)
-        rec_resolution = "building_location" if rec_type == "digital_location" else "area_district"
+        rec_category = best_match.get("postcode_category", postcode_category)
+        rec_resolution = "building_location" if (rec_type == "digital_location" or rec_category == "official_digital_postcode") else "area_district"
 
         # Strict Area Consistency Verification:
         # 1. Compare supplied area hint strictly against the matched postcode record
@@ -435,8 +445,10 @@ def cleanse_address(
                 lga=detected_lga,
                 postcode=verified_code,
                 postcode_type=rec_type,
+                postcode_category=rec_category,
                 resolution_level=rec_resolution,
                 postcode_status="verified",
+                verification_status=best_match.get("verification_status", "local_reference"),
                 confidence=0.95,
                 postcode_valid=True,
                 address_consistent=True,
@@ -444,7 +456,7 @@ def cleanse_address(
                 source=source_name,
                 matched_record=PostcodeRecordSchema(**best_match),
                 changes_made=changes,
-                provenance=best_match.get("provenance", "NIPOST Official Digital Postcode Directory"),
+                provenance=best_match.get("provenance", "NIPOST 6-Digit Postal Directory (Zone Reference)"),
             )
         else:
             # Conflict detected: Postcode is valid, but supplied area/state contradicts postcode directory!
@@ -460,8 +472,10 @@ def cleanse_address(
                 lga=detected_lga,
                 postcode=verified_code,
                 postcode_type=postcode_type,
+                postcode_category=postcode_category,
                 resolution_level=resolution_level,
                 postcode_status="conflict",
+                verification_status="local_reference",
                 confidence=0.50,
                 postcode_valid=True,
                 address_consistent=False,
@@ -469,7 +483,7 @@ def cleanse_address(
                 source=source_name,
                 matched_record=PostcodeRecordSchema(**best_match),
                 changes_made=changes,
-                provenance=best_match.get("provenance", "NIPOST Official Digital Postcode Directory"),
+                provenance=best_match.get("provenance", "NIPOST 6-Digit Postal Directory (Zone Reference)"),
             )
 
     # CASE 2: Area recognized in address without explicit matching code (estimated postcode)
@@ -488,8 +502,10 @@ def cleanse_address(
             lga=detected_lga,
             postcode=suggested_code,
             postcode_type=postcode_type,
+            postcode_category=postcode_category,
             resolution_level=resolution_level,
             postcode_status="estimated",
+            verification_status="estimated",
             confidence=0.70,
             postcode_valid=postcode_valid,
             address_consistent=True,
@@ -497,7 +513,7 @@ def cleanse_address(
             source=source_name,
             matched_record=PostcodeRecordSchema(**best_match),
             changes_made=changes,
-            provenance=best_match.get("provenance", "NIPOST Official Digital Postcode Directory"),
+            provenance=best_match.get("provenance", "NIPOST 6-Digit Postal Directory (Zone Reference)"),
         )
 
     # CASE 3: Unrecognized address / No postcode match (UNVERIFIED)
@@ -511,8 +527,10 @@ def cleanse_address(
             lga=None,
             postcode="",
             postcode_type=postcode_type,
+            postcode_category=postcode_category,
             resolution_level=resolution_level,
             postcode_status="unverified",
+            verification_status="unverified",
             confidence=0.20,
             postcode_valid=False,
             address_consistent=False,
@@ -520,5 +538,5 @@ def cleanse_address(
             source=source_name,
             matched_record=None,
             changes_made=changes,
-            provenance="NIPOST Official Digital Postcode Directory",
+            provenance="Unverified Address Input",
         )
