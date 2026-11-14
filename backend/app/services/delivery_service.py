@@ -30,6 +30,23 @@ from backend.app.services.notification_service import notification_provider
 
 logger = logging.getLogger("delivery_service")
 
+ACTIVE_WORKLOAD_STATUSES = {
+    DeliveryStatus.ASSIGNED,
+    DeliveryStatus.PICKED_UP,
+    DeliveryStatus.IN_TRANSIT,
+    DeliveryStatus.OUT_FOR_DELIVERY,
+}
+
+
+def adjust_operator_workload_count(operator: Operator, old_status: DeliveryStatus, new_status: DeliveryStatus) -> None:
+    """Change the active workload count only when a delivery crosses the active boundary."""
+    was_active = old_status in ACTIVE_WORKLOAD_STATUSES
+    is_active = new_status in ACTIVE_WORKLOAD_STATUSES
+    if was_active and not is_active:
+        operator.active_deliveries_count = max(0, operator.active_deliveries_count - 1)
+    elif not was_active and is_active:
+        operator.active_deliveries_count += 1
+
 
 def generate_reference(db: Session) -> str:
     """Generate a unique, collision-resistant delivery reference."""
@@ -287,12 +304,7 @@ def update_delivery_status(db: Session, delivery_id: str, request: DeliveryStatu
     if delivery.operator_id:
         op = db.query(Operator).filter(Operator.id == delivery.operator_id).with_for_update().first()
         if op:
-            # When leaving active workload:
-            if request.new_status in [DeliveryStatus.PENDING, DeliveryStatus.CANCELLED, DeliveryStatus.FAILED]:
-                op.active_deliveries_count = max(0, op.active_deliveries_count - 1)
-            # When re-attempting from failed:
-            elif old_status == DeliveryStatus.FAILED and request.new_status == DeliveryStatus.OUT_FOR_DELIVERY:
-                op.active_deliveries_count += 1
+            adjust_operator_workload_count(op, old_status, request.new_status)
 
     # When unassigned back to pending, clear the operator assignment
     if request.new_status == DeliveryStatus.PENDING:
@@ -327,6 +339,13 @@ def verify_delivery_otp(db: Session, delivery_id: str, request: DeliveryVerifyOT
 
     if current_user.role != AppRole.ADMIN and not is_owner and not is_assigned:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to confirm delivery for this order.")
+
+    # Recipient confirmation is valid only at the final delivery hand-off stage.
+    if delivery.status != DeliveryStatus.OUT_FOR_DELIVERY:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Delivery PIN can only be verified when the order is out for delivery."
+        )
 
     now = datetime.now(timezone.utc)
 
@@ -379,7 +398,7 @@ def verify_delivery_otp(db: Session, delivery_id: str, request: DeliveryVerifyOT
         if delivery.operator_id:
             op = db.query(Operator).filter(Operator.id == delivery.operator_id).first()
             if op:
-                op.active_deliveries_count = max(0, op.active_deliveries_count - 1)
+                adjust_operator_workload_count(op, DeliveryStatus.OUT_FOR_DELIVERY, DeliveryStatus.DELIVERED)
                 op.completed_deliveries += 1
 
         event = DeliveryEvent(
