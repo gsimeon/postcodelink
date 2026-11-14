@@ -46,6 +46,7 @@ def reset_login_attempts():
     db = SessionLocal()
     try:
         db.query(LoginAttempt).delete()
+        db.query(NotificationOutbox).delete()
         db.commit()
     finally:
         db.close()
@@ -335,7 +336,7 @@ def test_secure_pin_resend_endpoint():
     assert resend_res.status_code == 200
     resend_data = resend_res.json()
     assert resend_data["notification_dispatch"]["recipient_phone"] == "08055551234"
-    assert resend_data["notification_dispatch"]["status"] in ["SENT", "SIMULATED"]
+    assert resend_data["notification_dispatch"]["status"] in ["QUEUED", "SENT", "SIMULATED"]
 
     # 3. Verify in database: PIN hash was rotated securely and attempts reset
     db = SessionLocal()

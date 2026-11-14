@@ -16,7 +16,7 @@ class PostcodeDirectory(Base):
     lng = Column(Float, nullable=True)
     postcode_type = Column(String(24), nullable=False, default="conventional_area")
     building_reference = Column(String(64), nullable=True)
-    provenance = Column(String(128), nullable=False, default="NIPOST Official Digital Postcode Directory")
+    provenance = Column(String(128), nullable=False, default="Local Verification Dataset")
     dataset_version = Column(String(32), nullable=False, default="2024.2")
     is_active = Column(Boolean, nullable=False, default=True)
 

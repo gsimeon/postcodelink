@@ -415,20 +415,21 @@ class SimulatedNotificationProvider(BaseNotificationProvider):
 
 
 def get_notification_provider(provider_type: Optional[str] = None) -> BaseNotificationProvider:
-    """Factory selecting provider based on configured parameter or environment variables."""
-    selected = (provider_type or os.getenv("SMS_PROVIDER", "")).strip().lower()
+    """Factory selecting provider based on configured parameter or Pydantic settings."""
+    from backend.app.config import settings
+    selected = (provider_type or settings.SMS_PROVIDER).strip().lower()
 
-    if selected == "termii" or (not selected and os.getenv("TERMII_API_KEY")):
-        termii_key = os.getenv("TERMII_API_KEY", "")
-        sender_id = os.getenv("TERMII_SENDER_ID", "PostcodeLnk")
-        return TermiiNotificationProvider(api_key=termii_key, sender_id=sender_id)
+    if selected == "termii" or (not selected and settings.TERMII_API_KEY):
+        return TermiiNotificationProvider(
+            api_key=settings.TERMII_API_KEY,
+            sender_id=settings.TERMII_SENDER_ID
+        )
 
-    if selected == "twilio" or (not selected and os.getenv("TWILIO_ACCOUNT_SID")):
-        twilio_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
-        twilio_token = os.getenv("TWILIO_AUTH_TOKEN", "")
-        twilio_from = os.getenv("TWILIO_FROM_NUMBER", "")
+    if selected == "twilio" or (not selected and settings.TWILIO_ACCOUNT_SID):
         return TwilioNotificationProvider(
-            account_sid=twilio_sid, auth_token=twilio_token, from_number=twilio_from
+            account_sid=settings.TWILIO_ACCOUNT_SID,
+            auth_token=settings.TWILIO_AUTH_TOKEN,
+            from_number=settings.TWILIO_FROM_NUMBER
         )
 
     return SimulatedNotificationProvider()

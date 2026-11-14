@@ -2,11 +2,13 @@
 import secrets
 import logging
 import uuid
+import hashlib
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 
 from backend.app.config import settings
 from backend.app.models.delivery import Delivery
@@ -53,6 +55,30 @@ def adjust_operator_workload_count(operator: Operator, old_status: DeliveryStatu
         operator.active_deliveries_count = max(0, operator.active_deliveries_count - 1)
     elif not was_active and is_active:
         operator.active_deliveries_count += 1
+
+
+def encrypt_transit_pin(pin: str, secret_key: str) -> str:
+    """Symmetric encryption for transit PIN using SHA-256 HMAC-based stream cipher."""
+    key = hashlib.sha256(secret_key.encode()).digest()
+    pin_bytes = pin.encode()
+    nonce = secrets.token_bytes(8)
+    keystream = hashlib.sha256(key + nonce).digest()
+    ciphertext = bytes(b ^ k for b, k in zip(pin_bytes, keystream[:len(pin_bytes)]))
+    return (nonce + ciphertext).hex()
+
+
+def decrypt_transit_pin(token: str, secret_key: str) -> Optional[str]:
+    """Decrypts transit PIN using the application secret key."""
+    try:
+        raw = bytes.fromhex(token)
+        nonce = raw[:8]
+        ciphertext = raw[8:]
+        key = hashlib.sha256(secret_key.encode()).digest()
+        keystream = hashlib.sha256(key + nonce).digest()
+        pin_bytes = bytes(c ^ k for c, k in zip(ciphertext, keystream[:len(ciphertext)]))
+        return pin_bytes.decode()
+    except Exception:
+        return None
 
 
 def generate_reference(db: Session) -> str:
@@ -167,58 +193,62 @@ def create_delivery(
     db.add(init_event)
 
     # Persistent notification outbox record (QUEUED) created atomically with delivery
+    # Transit PIN is securely encrypted with SECRET_KEY so only the outbox worker can dispatch it
+    encrypted_pin = encrypt_transit_pin(raw_otp, settings.SECRET_KEY)
     outbox_entry = NotificationOutbox(
         delivery_id=delivery.id,
         channel="SMS",
         recipient_phone=delivery.recipient_phone,
         recipient_name=delivery.recipient_name,
-        message_payload=f"Hello {delivery.recipient_name}, your delivery {delivery.id} confirmation PIN is issued.",
+        message_payload=encrypted_pin,
         provider=settings.SMS_PROVIDER,
         notification_type="otp_delivery_pin",
         status=NotificationDeliveryStatus.QUEUED,
+        idempotency_key=f"outbox-{delivery.id}-{uuid.uuid4().hex[:12]}",
     )
     db.add(outbox_entry)
-    if commit:
-        db.commit()
-        db.refresh(delivery)
-        db.refresh(outbox_entry)
-    else:
-        db.flush()
 
-    if async_notification:
-        notification = NotificationDispatchPayload(
-            recipient_phone=delivery.recipient_phone,
-            status=NotificationDeliveryStatus.QUEUED.value,
-            channel="Asynchronous Outbox Queue",
-            message_preview="Queued in durable outbox for asynchronous dispatch.",
-        )
-    else:
-        # Dispatch PIN out-of-band via notification provider (Zero-knowledge: never returned in HTTP body, never stored in plaintext)
-        dispatch_res = notification_provider.send_delivery_pin(
-            recipient_phone=delivery.recipient_phone,
-            recipient_name=delivery.recipient_name,
-            delivery_id=delivery.id,
-            pin=raw_otp,
-        )
+    try:
+        if commit:
+            db.commit()
+            db.refresh(delivery)
+            db.refresh(outbox_entry)
+        else:
+            db.flush()
+    except IntegrityError:
+        db.rollback()
+        # Concurrency race on (merchant_id, idempotency_key): return the existing delivery safely
+        if getattr(request, "idempotency_key", None) and request.idempotency_key.strip():
+            existing = (
+                db.query(Delivery)
+                .filter(
+                    Delivery.merchant_id == current_user.id,
+                    Delivery.idempotency_key == request.idempotency_key.strip(),
+                )
+                .first()
+            )
+            if existing:
+                return DeliveryCreateResponse(
+                    delivery=DeliveryResponse.model_validate(existing),
+                    notification_dispatch=NotificationDispatchPayload(
+                        recipient_phone=existing.recipient_phone,
+                        status="IDEMPOTENT_REPLAY",
+                        channel="Idempotency Cache",
+                        message_preview=f"Idempotent replay: Delivery {existing.id} already created.",
+                    ),
+                )
+        raise
 
-        # Update outbox record status with dispatch result
-        outbox_entry.status = dispatch_res.status
-        outbox_entry.provider = dispatch_res.provider
-        outbox_entry.error_details = dispatch_res.error_details
-        if dispatch_res.status in [NotificationDeliveryStatus.SENT, NotificationDeliveryStatus.SIMULATED]:
-            outbox_entry.sent_at = datetime.now(timezone.utc)
-        db.commit()
-
-        notification = NotificationDispatchPayload(
-            recipient_phone=delivery.recipient_phone,
-            status=dispatch_res.status.value,
-            channel=dispatch_res.channel,
-            message_preview=dispatch_res.message_preview,
-        )
+    notification = NotificationDispatchPayload(
+        recipient_phone=delivery.recipient_phone,
+        status=NotificationDeliveryStatus.QUEUED.value,
+        channel="Transactional Outbox Queue",
+        message_preview="Queued in durable outbox for asynchronous dispatch by notification worker.",
+    )
 
     return DeliveryCreateResponse(
         delivery=DeliveryResponse.model_validate(delivery),
-        notification_dispatch=notification
+        notification_dispatch=notification,
     )
 
 
@@ -647,57 +677,44 @@ def resend_delivery_pin(db: Session, delivery_id: str, current_user: Profile) ->
     delivery.otp_hash = hash_otp(raw_pin)
     delivery.otp_attempts = 0
     delivery.otp_locked_until = None
-    delivery.otp_expires_at = datetime.now(timezone.utc) + timedelta(hours=2)
+    delivery.otp_expires_at = datetime.now(timezone.utc) + timedelta(hours=settings.OTP_EXPIRE_HOURS)
     delivery.version += 1
 
-    # Atomic Outbox Entry
+    encrypted_pin = encrypt_transit_pin(raw_pin, settings.SECRET_KEY)
+
+    # Atomic Outbox Entry: strictly queued for asynchronous worker dispatch
     outbox_entry = NotificationOutbox(
         delivery_id=delivery.id,
         channel="SMS",
         recipient_phone=delivery.recipient_phone,
-        provider="simulated",
+        recipient_name=delivery.recipient_name,
+        provider=settings.SMS_PROVIDER,
         status=NotificationDeliveryStatus.QUEUED,
         notification_type="otp_resend",
+        message_payload=encrypted_pin,
         idempotency_key=f"resend-{delivery.id}-{uuid.uuid4().hex[:12]}",
     )
     db.add(outbox_entry)
-    db.commit()
-    db.refresh(delivery)
-    db.refresh(outbox_entry)
-
-    # Dispatch fresh PIN out-of-band via notification provider
-    dispatch_res = notification_provider.send_delivery_pin(
-        recipient_phone=delivery.recipient_phone,
-        recipient_name=delivery.recipient_name,
-        delivery_id=delivery.id,
-        pin=raw_pin,
-    )
-
-    outbox_entry.status = dispatch_res.status
-    outbox_entry.provider = dispatch_res.provider
-    outbox_entry.error_details = dispatch_res.error_details
-    if dispatch_res.status in [NotificationDeliveryStatus.SENT, NotificationDeliveryStatus.SIMULATED]:
-        outbox_entry.sent_at = datetime.now(timezone.utc)
-    else:
-        outbox_entry.failure_classification = "provider_rejection" if "rejection" in (dispatch_res.error_details or "").lower() else "transient_network_error"
 
     event = DeliveryEvent(
         delivery_id=delivery.id,
         status=delivery.status,
         actor_name=current_user.full_name,
         actor_role=current_user.role.value,
-        note=f"Resent confirmation PIN out-of-band via {dispatch_res.channel} ({dispatch_res.status.value}).",
+        note="Queued confirmation PIN resend in outbox for asynchronous worker dispatch.",
         occurred_at=datetime.now(timezone.utc),
     )
     db.add(event)
+
     db.commit()
     db.refresh(delivery)
+    db.refresh(outbox_entry)
 
     notification = NotificationDispatchPayload(
         recipient_phone=delivery.recipient_phone,
-        status=dispatch_res.status.value,
-        channel=dispatch_res.channel,
-        message_preview=dispatch_res.message_preview,
+        status=NotificationDeliveryStatus.QUEUED.value,
+        channel="Transactional Outbox Queue",
+        message_preview="Queued in durable outbox for asynchronous dispatch by worker.",
     )
 
     return DeliveryCreateResponse(
@@ -715,6 +732,7 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
     bind = db.get_bind()
     is_postgres = bind is not None and getattr(bind.dialect, "name", "") == "postgresql"
 
+    lease_timeout_minutes = getattr(settings, "OUTBOX_LEASE_TIMEOUT_MINUTES", 5)
     query = (
         db.query(NotificationOutbox)
         .filter(
@@ -726,7 +744,7 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
             ),
             or_(
                 NotificationOutbox.locked_at.is_(None),
-                NotificationOutbox.locked_at <= now - timedelta(minutes=5),
+                NotificationOutbox.locked_at <= now - timedelta(minutes=lease_timeout_minutes),
             ),
         )
         .order_by(NotificationOutbox.created_at.asc())
@@ -763,19 +781,26 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
                 processed += 1
                 continue
 
-            # Zero-knowledge: generate fresh PIN, rotate hash in DB, dispatch out-of-band
-            fresh_pin = generate_otp()
-            deliv.otp_hash = hash_otp(fresh_pin)
-            deliv.otp_attempts = 0
-            deliv.otp_locked_until = None
-            deliv.version += 1
-            db.flush()
+            # Decrypt existing transit PIN or generate fresh PIN if not present
+            target_pin = None
+            if item.message_payload:
+                target_pin = decrypt_transit_pin(item.message_payload, settings.SECRET_KEY)
+
+            if not target_pin:
+                target_pin = generate_otp()
+                deliv.otp_hash = hash_otp(target_pin)
+                deliv.otp_attempts = 0
+                deliv.otp_locked_until = None
+                deliv.otp_expires_at = now + timedelta(hours=settings.OTP_EXPIRE_HOURS)
+                deliv.version += 1
+                item.message_payload = encrypt_transit_pin(target_pin, settings.SECRET_KEY)
+                db.flush()
 
             dispatch_res = active_provider.send_delivery_pin(
                 recipient_phone=item.recipient_phone,
                 recipient_name=item.recipient_name or deliv.recipient_name,
                 delivery_id=item.delivery_id,
-                pin=fresh_pin,
+                pin=target_pin,
             )
         else:
             status_text = item.message_payload or f"Update for delivery {item.delivery_id}"

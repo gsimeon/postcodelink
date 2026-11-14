@@ -50,25 +50,43 @@ class Settings(BaseSettings):
     ]
 
     # SMS & WhatsApp Out-of-band Dispatch Gateway
-    SMS_PROVIDER: str = os.getenv("SMS_PROVIDER", "simulated").strip().lower()
-    TERMII_API_KEY: str = os.getenv("TERMII_API_KEY", "")
-    TERMII_SENDER_ID: str = os.getenv("TERMII_SENDER_ID", "PostcodeLnk")
-    TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")
-    TWILIO_AUTH_TOKEN: str = os.getenv("TWILIO_AUTH_TOKEN", "")
-    TWILIO_FROM_NUMBER: str = os.getenv("TWILIO_FROM_NUMBER", "")
+    SMS_PROVIDER: str = "simulated"
+    TERMII_API_KEY: str = ""
+    TERMII_SENDER_ID: str = "PostcodeLnk"
+    TWILIO_ACCOUNT_SID: str = ""
+    TWILIO_AUTH_TOKEN: str = ""
+    TWILIO_FROM_NUMBER: str = ""
 
     # Background Outbox Retry Worker
-    OUTBOX_WORKER_ENABLED: bool = os.getenv("OUTBOX_WORKER_ENABLED", "false").lower() in ("true", "1")
+    OUTBOX_WORKER_ENABLED: bool = False
     OUTBOX_WORKER_INTERVAL_SECONDS: int = 5
     OUTBOX_LEASE_TIMEOUT_MINUTES: int = 5
 
     @model_validator(mode="after")
     def validate_production_security(self):
-        """Reject startup if running in production without explicit, secure SECRET_KEY."""
+        """Reject startup if running in production with weak secret, simulated provider, or disabled worker."""
         if self.ENVIRONMENT == "production":
             raw_secret = self.SECRET_KEY
             if not raw_secret or len(raw_secret) < 32 or raw_secret.startswith("postcodelink_dev"):
                 raise ValueError("Fatal Security Error: In production, SECRET_KEY must be set to a strong secret (at least 32 characters).")
+
+            # Production SMS Gateway validation
+            provider = (self.SMS_PROVIDER or "").strip().lower()
+            if provider not in ["termii", "twilio"]:
+                raise ValueError(
+                    f"Fatal Production Configuration Error: SMS_PROVIDER must be 'termii' or 'twilio', got '{self.SMS_PROVIDER}'. Simulated SMS dispatch is strictly prohibited in production."
+                )
+
+            if provider == "termii" and not self.TERMII_API_KEY:
+                raise ValueError("Fatal Production Configuration Error: TERMII_API_KEY must be configured when SMS_PROVIDER is 'termii'.")
+
+            if provider == "twilio" and not (self.TWILIO_ACCOUNT_SID and self.TWILIO_AUTH_TOKEN and self.TWILIO_FROM_NUMBER):
+                raise ValueError("Fatal Production Configuration Error: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_FROM_NUMBER must be configured when SMS_PROVIDER is 'twilio'.")
+
+            # Worker validation
+            if not self.OUTBOX_WORKER_ENABLED:
+                raise ValueError("Fatal Production Configuration Error: OUTBOX_WORKER_ENABLED must be true in production to ensure durable delivery notification dispatch.")
+
         return self
 
     model_config = SettingsConfigDict(

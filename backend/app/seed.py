@@ -24,26 +24,50 @@ def seed_database():
 
     db = SessionLocal()
     try:
-        # 1. Seed Postcodes across all 11 covered Nigerian states
-        existing_codes = {p.code for p in db.query(PostcodeDirectory.code).all()}
+        # 1. Seed & Backfill Postcodes across all 11 covered Nigerian states
+        db_records = {p.code: p for p in db.query(PostcodeDirectory).all()}
         inserted_count = 0
+        updated_count = 0
         for pc in OFFICIAL_POSTCODES:
-            if pc["code"] not in existing_codes:
+            code = pc["code"]
+            if code not in db_records:
                 db_pc = PostcodeDirectory(
-                    code=pc["code"],
+                    code=code,
                     area=pc["area"],
                     state=pc["state"],
                     lga=pc.get("lga"),
                     lat=pc.get("lat"),
                     lng=pc.get("lng"),
+                    postcode_type=pc.get("postcode_type", "conventional_area"),
+                    building_reference=pc.get("building_reference"),
+                    provenance=pc.get("provenance", "Local Verification Dataset"),
+                    dataset_version=pc.get("dataset_version", "2024.2"),
                     is_active=True
                 )
                 db.add(db_pc)
-                existing_codes.add(pc["code"])
+                db_records[code] = db_pc
                 inserted_count += 1
-        if inserted_count > 0:
+            else:
+                existing = db_records[code]
+                needs_update = False
+                if pc.get("postcode_type") and existing.postcode_type != pc["postcode_type"]:
+                    existing.postcode_type = pc["postcode_type"]
+                    needs_update = True
+                if pc.get("building_reference") and existing.building_reference != pc["building_reference"]:
+                    existing.building_reference = pc["building_reference"]
+                    needs_update = True
+                if pc.get("provenance") and existing.provenance != pc["provenance"]:
+                    existing.provenance = pc["provenance"]
+                    needs_update = True
+                if pc.get("dataset_version") and existing.dataset_version != pc["dataset_version"]:
+                    existing.dataset_version = pc["dataset_version"]
+                    needs_update = True
+                if needs_update:
+                    updated_count += 1
+
+        if inserted_count > 0 or updated_count > 0:
             db.commit()
-            logger.info(f"Seeded {inserted_count} new official Nigerian postcodes (Total active: {len(existing_codes)}).")
+            logger.info(f"Postcode directory synced: {inserted_count} new, {updated_count} updated (Total active: {len(db_records)}).")
 
         # 2. Seed Default Merchant, Admin, and Operator Profiles
         merchant = db.query(Profile).filter(Profile.email == "dispatch@postcodelink.ng").first()

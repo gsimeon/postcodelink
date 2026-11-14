@@ -21,12 +21,14 @@ client = TestClient(app)
 
 @pytest.fixture(autouse=True)
 def reset_login_attempts():
-    """Ensure clean login attempt tracking between test executions."""
+    """Ensure clean login attempt tracking and outbox between test executions."""
     from backend.app.models.login_attempt import LoginAttempt
+    from backend.app.models.notification_outbox import NotificationOutbox
     LOGIN_ATTEMPTS.clear()
     db = SessionLocal()
     try:
         db.query(LoginAttempt).delete()
+        db.query(NotificationOutbox).delete()
         db.commit()
     finally:
         db.close()
@@ -35,6 +37,7 @@ def reset_login_attempts():
     db = SessionLocal()
     try:
         db.query(LoginAttempt).delete()
+        db.query(NotificationOutbox).delete()
         db.commit()
     finally:
         db.close()
@@ -213,7 +216,7 @@ def test_zero_knowledge_pin_no_raw_pin_in_api_response():
     """CRITICAL REGRESSION TEST: Verify PIN is never returned in any API response or notification payload."""
     token = get_auth_token("dispatch@postcodelink.ng", "MerchantPass123!")
 
-    with patch("backend.app.services.delivery_service.notification_provider.send_delivery_pin") as mock_send:
+    with patch("backend.app.services.notification_service.SimulatedNotificationProvider.send_delivery_pin") as mock_send:
         mock_send.return_value = NotificationDispatchResult(
             status=NotificationDeliveryStatus.SIMULATED,
             channel="Simulated SMS Gateway (Local Sandbox)",
@@ -245,12 +248,18 @@ def test_zero_knowledge_pin_no_raw_pin_in_api_response():
         notif = resp_data["notification_dispatch"]
         assert "delivery_pin" not in notif
         assert "otp" not in notif
-        assert notif["status"] == "SIMULATED"
+        assert notif["status"] in ["QUEUED", "SIMULATED", "SENT"]
 
         # 3. Whole response string must not contain any 6-digit PIN attribute
         assert "pin" not in resp_data["notification_dispatch"]
 
-        # 4. Out-of-band notification provider was called with the PIN
+        # 4. Outbox worker processes queued item and dispatches PIN out-of-band
+        from backend.app.services.delivery_service import process_notification_outbox
+        db_proc = SessionLocal()
+        try:
+            process_notification_outbox(db_proc, max_items=10)
+        finally:
+            db_proc.close()
         assert mock_send.called
         call_kwargs = mock_send.call_args.kwargs
         assert call_kwargs["recipient_phone"] == "08055667788"
@@ -662,7 +671,7 @@ def test_otp_verification_lockout_and_single_use():
     assert "locked for 15 minutes" in try3.json()["detail"]
 
     # Test Single-use on a fresh order:
-    with patch("backend.app.services.delivery_service.notification_provider.send_delivery_pin") as mock_send:
+    with patch("backend.app.services.notification_service.SimulatedNotificationProvider.send_delivery_pin") as mock_send:
         mock_send.return_value = NotificationDispatchResult(
             status=NotificationDeliveryStatus.SIMULATED,
             channel="Simulated SMS",
@@ -681,6 +690,12 @@ def test_otp_verification_lockout_and_single_use():
             "fee": 2000.0
         }, headers={"Authorization": f"Bearer {token}"}).json()
         fresh_id = fresh_order["delivery"]["id"]
+        from backend.app.services.delivery_service import process_notification_outbox
+        db_proc = SessionLocal()
+        try:
+            process_notification_outbox(db_proc, max_items=10)
+        finally:
+            db_proc.close()
         fresh_pin = mock_send.call_args.kwargs["pin"]
 
     # Advance fresh order to OUT_FOR_DELIVERY
@@ -713,10 +728,13 @@ def test_production_config_secret_guard():
             SECRET_KEY="postcodelink_dev_secret_key_12345"
         )
 
-    # Valid secret in production passes
+    # Valid secret, provider, credentials, and worker in production passes
     valid_prod_settings = Settings(
         ENVIRONMENT="production",
-        SECRET_KEY="a_very_strong_production_secret_key_that_is_at_least_32_chars_long"
+        SECRET_KEY="a_very_strong_production_secret_key_that_is_at_least_32_chars_long",
+        SMS_PROVIDER="termii",
+        TERMII_API_KEY="valid_termii_api_key_test_12345",
+        OUTBOX_WORKER_ENABLED=True,
     )
     assert valid_prod_settings.ENVIRONMENT == "production"
 
@@ -829,7 +847,7 @@ def test_notification_outbox_persistence_and_retry():
         outbox_entry = db.query(NotificationOutbox).filter(NotificationOutbox.delivery_id == deliv_id).first()
         assert outbox_entry is not None
         assert outbox_entry.delivery_id == deliv_id
-        assert outbox_entry.status in [NotificationDeliveryStatus.SIMULATED, NotificationDeliveryStatus.SENT]
+        assert outbox_entry.status in [NotificationDeliveryStatus.QUEUED, NotificationDeliveryStatus.SIMULATED, NotificationDeliveryStatus.SENT]
         assert outbox_entry.recipient_phone == "08012344321"
 
         # Manually set to FAILED to test the outbox processor retry
