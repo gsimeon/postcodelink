@@ -14,7 +14,17 @@ from backend.app.services.notification_service import (
     NotificationDeliveryStatus,
 )
 
+from backend.app.routers.auth import LOGIN_ATTEMPTS
+
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def reset_login_attempts():
+    """Ensure clean login attempt tracking between test executions."""
+    LOGIN_ATTEMPTS.clear()
+    yield
+    LOGIN_ATTEMPTS.clear()
 
 
 def get_auth_token(email: str, password: str) -> str:

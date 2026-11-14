@@ -67,6 +67,7 @@ jobs:
           ENVIRONMENT: "development"
         run: |
           python -m alembic upgrade head
+          python -m backend.app.seed
           python -m pytest backend/tests -v
 
   frontend-verification:
