@@ -93,6 +93,7 @@ begin
        or new.merchant_id is distinct from old.merchant_id
        or new.operator_id is distinct from old.operator_id
        or new.reference is distinct from old.reference
+       or new.fee is distinct from old.fee
        or new.status is distinct from old.status
        or old.status not in (
          'draft'::public.delivery_status,
@@ -118,9 +119,11 @@ begin
     limit 1;
 
     if v_operator_id is null or old.operator_id is distinct from v_operator_id
+       or new.id is distinct from old.id
        or new.operator_id is distinct from old.operator_id
        or new.merchant_id is distinct from old.merchant_id
        or new.reference is distinct from old.reference
+       or new.fee is distinct from old.fee
        or new.recipient_name is distinct from old.recipient_name
        or new.recipient_phone is distinct from old.recipient_phone
        or new.destination_address is distinct from old.destination_address
@@ -202,6 +205,12 @@ with check (
   merchant_id = (select auth.uid())
   and status in ('draft'::public.delivery_status, 'pending_assignment'::public.delivery_status)
 );
+
+create policy "Admins update all deliveries"
+on public.deliveries for update
+to authenticated
+using (public.is_admin())
+with check (public.is_admin());
 
 create policy "Assigned operators update assigned delivery status"
 on public.deliveries for update
