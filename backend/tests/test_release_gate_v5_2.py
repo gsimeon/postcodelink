@@ -137,8 +137,8 @@ def test_single_dispatch_architecture_create_and_resend_queues_outbox_without_di
             assert outbox is not None
             assert outbox.status == NotificationDeliveryStatus.QUEUED
             assert outbox.message_payload is not None
-            # Payload is encrypted transit PIN
-            decrypted = decrypt_transit_pin(outbox.message_payload, settings.SECRET_KEY)
+            # Payload is encrypted transit PIN bound to delivery context
+            decrypted = decrypt_transit_pin(outbox.message_payload, settings.SECRET_KEY, delivery_id=deliv_id)
             assert decrypted is not None
             assert len(decrypted) == 6
         finally:

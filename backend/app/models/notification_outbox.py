@@ -36,6 +36,10 @@ class NotificationOutbox(Base):
     failure_classification = Column(String(32), nullable=True)
     error_details = Column(String(500), nullable=True)
     
+    # Reconciliation tracking
+    reconciliation_request_id = Column(String(64), nullable=True, index=True)
+    evidence_type = Column(String(64), nullable=True)
+
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(
         DateTime,

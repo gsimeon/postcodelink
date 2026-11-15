@@ -6,56 +6,92 @@ PostcodeLink bridges the gap between customer addresses (often described with in
 
 ---
 
-## Architecture & Security Hardening (Release Gate v5.4 Production Standard)
+## Strategic Product Architecture & Modularity
 
-Following an in-depth security and architectural audit of the FastAPI backend and Next.js frontend, the platform has completed enterprise-grade hardening covering all Release Gate v5.4 requirements:
+PostcodeLink is architected as two decoupled, enterprise-ready product modules sharing a unified digital address intelligence foundation:
 
-### 1. P1 — Standard Authenticated Cryptography (AES-256-GCM)
-- **AEAD Encryption**: Replaced XOR stream cipher with industry-standard **AES-256-GCM** via Python's `cryptography` library (`AESGCM`).
-- **Context-Bound Associated Data (AAD)**: Transit OTPs stored in `notification_outbox` use 96-bit cryptographically secure random nonces and are cryptographically bound to their delivery context via Authenticated Additional Data (`f"delivery:{delivery_id}".encode()`). Any tampering with the ciphertext, nonce, or delivery association immediately fails decryption and tag verification.
-- **Key Rotation & Backward Compatibility**: Supports dedicated `OUTBOX_ENCRYPTION_KEY` and candidate fallback keys via `OUTBOX_PREVIOUS_ENCRYPTION_KEYS`. Gracefully migrates and verifies legacy `v1:` HMAC and unversioned hex stream payloads.
-- **Envelope Standard**: Versioned ciphertext envelopes format: `v2:<nonce_hex>:<aad_hex>:<ciphertext_and_tag_hex>`.
+```mermaid
+graph TD
+    subgraph Foundation [Shared Postcode Intelligence Foundation]
+        NIPOST[Official NIPOST Verification Gateway]
+        TAX[National Taxonomy & Address Cleanser]
+        SEC[Zero-Knowledge Cryptography & Distributed Redis Engine]
+    end
 
-### 2. P1 — Official National Digital Postcode Standard (11 Characters, 5 Components)
-- **October 2026 National Standard**: Full support for Nigeria's 11-character 5-component digital address standard:
-  - `State` (2 letters)
-  - `LGA` (2 alphanumeric)
-  - `District` (3 alphanumeric)
-  - `Area` (2 alphanumeric)
-  - `Building` (2 alphanumeric)
-  - Canonical format: `SS-LL-DDD-AA-BB` (e.g. `FC-02-A09-DB-09`, `LA-01-A04-IK-02`).
-- **Strict Taxonomy & Provenance**:
-  - `official_digital_postcode`: Reserved **exclusively** for codes verified against an authoritative NIPOST directory/API with `verification_status="official_verified"`. (Length alone no longer grants official status).
-  - `local_address_reference`: Assigned to pilot, internal, or mock codes (e.g. `LAG-IKJ-0012`).
-  - `legacy_postal_code`: Traditional 6-digit postal codes.
-  - Unverified input syntax is explicitly classified with provenance `"Unverified Address Input"` and `source_owner="PostcodeLink"`, eliminating misleading references to official directories.
+    subgraph ModuleA [Module 1: Postcode Intelligence Platform]
+        API_SUB[API Subscriptions & Tiered Metering]
+        MERCH_SDK[Merchant E-Commerce Plugins & Autocomplete]
+        ADDR_CLEAN[Address Standardization & Spatial Classification]
+    end
 
-### 3. P1 — Authoritative NIPOST Client Status Discrimination
-- **Explicit Status Discrimination**:
-  - `FOUND` (200 + valid schema match)
-  - `NOT_FOUND` (404 authoritative non-existence: does **not** fall back to local data, preventing false validations of non-existent codes)
-  - `UNAVAILABLE` (503 / network timeout: triggers graceful fallback to local cache/database)
-  - `UNAUTHORIZED` (401 / 403 API key or permission failure)
-  - `INVALID_RESPONSE` (malformed schema or mismatched code)
-- **Zero Masking of Missing Records**: An authoritative 404 from NIPOST reports 0 matches and does not contaminate results with speculative local estimates.
+    subgraph ModuleB [Module 2: Last-Mile Logistics Platform]
+        ORDER_DISP[Durable Outbox Dispatch & Fleet Assignment]
+        COURIER_APP[Rider Manifest, Waybills & Live Dispatch Radar]
+        POD[6-Digit OTP Proof-of-Delivery Verification]
+    end
 
-### 4. P2 — Process Role Separation (`PROCESS_ROLE`)
-- **Independent Execution Roles**:
-  - `PROCESS_ROLE="api"`: Dedicated HTTP API server. Disables embedded outbox processing loops in production to ensure predictability and prevent background thread starvation.
-  - `PROCESS_ROLE="worker"`: Dedicated background worker process running `backend/app/workers/outbox_worker.py`.
-  - `PROCESS_ROLE="all_in_one"`: Permitted in development or single-container staging deployments.
-- **Production Gate**: The system refuses startup in production if `PROCESS_ROLE` is unset or invalid.
+    Foundation --> ModuleA
+    Foundation --> ModuleB
+```
 
-### 5. P2 — Outbox Delivery Guarantees & Duplicate Prevention
-- **Provider Message Tracking**: Added `provider_message_id` and `status_reconciled_at` to `notification_outbox`.
-- **At-Most-Once Provider Dispatch**: If a worker process crashes after the SMS provider (Termii/Twilio) has accepted the message, subsequent retry loops inspect `provider_message_id` and reconcile directly to `SENT` without sending duplicate SMS messages to the customer.
+1. **Postcode Intelligence Platform**: Standalone API subscriptions, national digital postcode autocomplete, address standardization, and enterprise integration for e-commerce checkouts, banks, and utility providers without logistics overhead.
+2. **Last-Mile Delivery Platform**: Dedicated courier fleet management, merchant dispatch queues, interactive radar tracking, and fraud-proof PIN verification.
 
-### 6. P2 — Complete API Key Lifecycle Management
-- **Key Issuance & Management**:
-  - `POST /api/v1/api-keys/` — Issue new merchant API keys with custom monthly quotas and prefix `pkl_live_...`.
-  - `GET /api/v1/api-keys/` — List active keys with usage telemetry (last used timestamp, total calls, remaining quota).
-  - `DELETE /api/v1/api-keys/{id}` — Immediate key revocation.
-- **Authentication Middleware**: Supports authentication via `x-api-key` header with atomic call increments and monthly quota enforcement (HTTP 429 when quota exceeded).
+---
+
+## Architecture & Security Hardening (Release Gate v5.8 Production Standard)
+
+Following the comprehensive production-readiness review of Release Gate v5.7, the platform has completed enterprise-grade hardening across distributed coordination, provider reconciliation, and lifecycle reliability:
+
+### 1. P1 — Termii Crash Recovery Without Saved Message ID (Zero Duplicate Dispatches)
+- **Documented API Boundary**: Verified that Termii's public REST gateway does not provide an outbound query endpoint by recipient phone or client_reference without an authoritative `provider_message_id`.
+- **Zero-Duplicate Invariant**: When a worker crashes after provider HTTP acceptance but before `provider_message_id` is committed to PostgreSQL, `check_message_status` safely returns `None`. The outbox worker immediately routes the item to `RECONCILIATION_REQUIRED` and **never automatically re-dispatches**, completely eliminating duplicate customer SMS risks.
+
+### 2. P1 — Twilio Outbound Verification with Delivery Fingerprint Matching
+- **Delivery Fingerprint Binding**: Outbound PIN SMS messages embed an explicit order fingerprint (`Your PostcodeLink delivery confirmation PIN for order {delivery_id} is {pin}.`).
+- **Ambiguity Rejection**: Outbound status inquiries by recipient phone verify that returned messages contain the specific delivery fingerprint. Unrelated messages or multiple ambiguous results are rejected (`return None`), routing to administrator reconciliation rather than misassociating an unrelated delivery's SMS.
+
+### 3. P1 & P2 — Distributed Sliding-Window Rate Limiting with Atomic Lua Script
+- **Atomic Lua Sliding Window**: Rate limits are evaluated in Redis via a single atomic Lua script executing `ZREMRANGEBYSCORE`, `ZCARD`, conditional `ZADD`, and `EXPIRE`.
+- **No Accumulation of Rejected Requests**: Requests that exceed limits are strictly **not** added to the sorted set, preventing throttling cascades and ensuring accurate `Retry-After` calculation.
+- **Connection Retry with Bounded Backoff**: Replaced one-shot connection caching with a resilient retry loop (15s backoff). If Redis temporarily fails and recovers, the client reconnects automatically.
+- **Configurable Production Fail-Closed Policy**: Supports `RATE_LIMIT_REDIS_FAIL_CLOSED=true` to reject requests with HTTP 503 rather than silently partitioning distributed allowances across multi-instance nodes.
+- **Operational Monitoring**: Exposes rate-limiter backend health (`redis` vs `in_memory_fallback`) in `/health/rate-limiter` and `/health/integrations`.
+
+### 4. P1 — Transaction-Level Concurrent API Key Rotation Race Tests
+- **Multi-Thread Concurrency Proof**: Verified simultaneous rotation requests via `ThreadPoolExecutor` against PostgreSQL and SQLite. Exactly one request succeeds (HTTP 201) while competing requests receive HTTP 409 Conflict.
+- **Quota Inheritance**: New credentials inherit exact billing period usage without reset bypasses.
+
+### 5. P2 — Persistent Worker Heartbeat Lifecycle & Graceful Shutdown
+- **Worker Lifecycle Tracking**: Added `last_successful_process_at` and `stop_reason` to the `worker_heartbeats` table (migration `a1b2c3d4e5f6`).
+- **Clean Signal Handling**: Outbox worker daemon intercepts `SIGINT` and `SIGTERM`, recording `status="stopped"` and reason in the database before process termination.
+- **Observability Telemetry**: `/health/worker` surfaces `active_workers`, `stale_workers` (heartbeat age > threshold), `stopped_workers`, `outbox_backlog`, and `last_successful_process_at`.
+
+### 6. P2 — Stronger Reconciliation Evidence Handling & Immutable Audit Trail
+- **Evidence Classification**: Reconciliation requests explicitly distinguish `manual_operator_asserted` from `provider_telemetry_verified`. Provider-verified resolutions strictly require `provider_message_id` (HTTP 422 if omitted).
+- **Client Tracking Reference**: Tracks `reconciliation_request_id` across outbox items and audit logs.
+- **Database-Level Immutability**: `DeliveryEvent` records are enforced append-only via SQLAlchemy event hooks that reject modifications with `ValueError`.
+
+### 7. P2 — Production Policy for Multi-Instance Redis
+- **Mandatory Production Redis**: When `REDIS_REQUIRED_IN_PRODUCTION=true` is set, the application strictly refuses to start in `ENVIRONMENT=production` if `REDIS_URL` is omitted.
+
+### 8. P0 — Dual PostgreSQL 16 & Redis 7 CI/CD Pipeline
+- **Continuous Integration (`.github/workflows/ci.yml`)**:
+  - Spin up `postgres:16` and `redis:7` service containers with health checks.
+  - Run Alembic migrations and database seeding against PostgreSQL 16.
+  - Run 103/103 Pytest security, cryptography, and API integration tests against PostgreSQL and Redis.
+  - Run 7/7 Node.js state-machine and 6-digit OTP security tests.
+  - Compile production Next.js 15 build with 0 errors.
+
+### 5. P2 — Configurable Operator Capacity & Service Area Routing
+- **Configurable Fleet Limits**: Respects each logistics operator's configured `max_active_deliveries` limit across operator directories, dispatch assignments, and capacity indicators (`has_capacity = active_deliveries_count < max_active_deliveries`).
+- **Service Area Filtering**: Merchants can filter available couriers by coverage zones (`GET /api/v1/operators/?service_area=Ikeja`).
+
+### 6. P2 — Production Health & Observability Probes
+- `/health/live`: Application process liveness probe (HTTP 200).
+- `/health/ready`: Database connectivity readiness check; returns HTTP 503 Service Unavailable without leaking internal exception traces if disconnected.
+- `/health/worker`: Outbox queue depth, lease timing, worker heartbeat, and reconciliation alert telemetry.
+- `/health/integrations`: SMS gateway and NIPOST upstream configuration and production readiness checks.
 
 ### 7. P2 — Anti-DoS Scoped Login Rate Limiting
 - **Composite Brute-Force Bucket**: Scoped failed attempt counters by `(client_ip, email)`.
@@ -102,7 +138,7 @@ Following an in-depth security and architectural audit of the FastAPI backend an
 ### 4. Public Customer Tracking Portal
 - **Reference Lookup**: Recipients and merchants can track any delivery reference (e.g. `PL-2048`).
 - **Interactive Progress Stepper**: Order Placed → Postcode Verified → Out for Delivery → Delivered.
-- **Protected 4-Digit Delivery PIN (OTP)**: Fraud-prevention security code with phone verification challenge.
+- **Protected 6-Digit Delivery PIN (OTP)**: Fraud-prevention security code with phone verification challenge.
 - **Direct Courier Communication**: Direct one-click links to Call Courier or Chat via WhatsApp.
 - **Simulated Route Visualizer**: Vector route connecting merchant origin hub (Sabo-Yaba) to destination.
 
@@ -206,26 +242,32 @@ All state modifications are enforced server-side by the lifecycle state machine:
 - **System & Health**:
   - `GET /` — API root, service status, version info.
   - `GET /health` — Verifies database engine and connection health.
-- **Deliveries**:
+  - `GET /health/live` — Liveness probe (process up).
+  - `GET /health/ready` — Readiness probe (database and engine connectivity).
+  - `GET /health/worker` — Background outbox worker queue depth and heartbeat telemetry.
+  - `GET /health/integrations` — Upstream NIPOST and SMS gateway connectivity status (credentials omitted).
+- **Deliveries** (Supports Bearer JWT and `x-api-key` header):
   - `POST /api/v1/deliveries/` — Create new delivery with automated NIPOST verification and outbox PIN dispatch.
   - `GET /api/v1/deliveries/` — List deliveries (scoped to authenticated merchant/courier).
   - `GET /api/v1/deliveries/{id}` — Full merchant/operator delivery details.
+  - `POST /api/v1/deliveries/bulk` — Batch import and cleanse multi-order dispatch.
   - `GET /api/v1/deliveries/track/{tracking_token}` — Strict token-only public recipient tracking portal.
   - `POST /api/v1/deliveries/{id}/regenerate-token` — Regenerate and revoke public tracking URL token.
   - `POST /api/v1/deliveries/{id}/assign` — Assign courier fleet operator with capacity check.
   - `POST /api/v1/deliveries/{id}/status` — Advance lifecycle status with complete role permission matrix.
   - `POST /api/v1/deliveries/{id}/verify-otp` — Verify recipient PIN and confirm delivery (single-use revocation).
-- **Postcodes & Address Cleanser**:
-  - `GET /api/v1/postcodes/lookup` — Search official postcodes by area, state, or 6-digit code.
+- **Postcodes & Address Cleanser** (Supports `x-api-key` metering):
+  - `GET /api/v1/postcodes/lookup` — Search official postcodes by area, state, or 6-digit/11-character code.
   - `POST /api/v1/postcodes/cleanse` — Normalize and standardize messy addresses against postal records.
-- **Fleet Operators & Customers**:
-  - `GET /api/v1/operators/` & `POST /api/v1/operators/` — Manage courier fleet.
-  - `GET /api/v1/customers/` & `POST /api/v1/customers/` — Recipient directory.
+- **Fleet Operators & Customers** (Supports `x-api-key`):
+  - `GET /api/v1/operators/` & `POST /api/v1/operators/` — Manage courier fleet and capacity. Filter by `?service_area=...`.
+  - `GET /api/v1/customers/` & `POST /api/v1/customers/` — Recipient directory with merchant tenant isolation.
 - **API Keys & Integrations**:
   - `POST /api/v1/api-keys/` — Issue new merchant API keys with custom monthly quotas.
   - `GET /api/v1/api-keys/` — List active API keys and inspect call usage metrics.
+  - `POST /api/v1/api-keys/{id}/rotate` — Atomically rotate an API key, issuing a new key and revoking the old one.
   - `DELETE /api/v1/api-keys/{id}` — Revoke an API key immediately.
-- **Analytics**:
+- **Analytics** (Supports `x-api-key`):
   - `GET /api/v1/analytics/overview` — Operations KPIs, verification accuracy, and fulfillment revenues.
 
 Interactive OpenAPI documentation is live at **`http://127.0.0.1:8000/docs`** and ReDoc at **`http://127.0.0.1:8000/redoc`**.
