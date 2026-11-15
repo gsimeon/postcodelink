@@ -1,15 +1,20 @@
 """Deliveries router with authentication, tenant isolation, and RBAC."""
 import secrets
-from typing import List, Optional
+from pydantic import BaseModel, Field
+from typing import List, Optional, Literal
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Query, status, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
 from backend.app.database import get_db
 from backend.app.models.delivery import Delivery
+from backend.app.models.delivery_event import DeliveryEvent
 from backend.app.models.operator import Operator
 from backend.app.models.profile import Profile
+from backend.app.models.notification_outbox import NotificationOutbox
 from backend.app.models.enums import DeliveryStatus, AppRole
+from backend.app.services.notification_service import NotificationDeliveryStatus, mask_phone
 from backend.app.schemas.delivery import (
     DeliveryCreateRequest,
     DeliveryCreateResponse,
@@ -30,7 +35,12 @@ from backend.app.services.delivery_service import (
     regenerate_tracking_token,
     resend_delivery_pin,
 )
-from backend.app.core.auth_deps import get_current_user, require_roles
+from backend.app.core.auth_deps import (
+    get_current_user,
+    require_roles,
+    get_current_actor,
+    get_authenticated_merchant_or_api_key,
+)
 
 router = APIRouter(prefix="/deliveries", tags=["deliveries"])
 
@@ -38,10 +48,10 @@ router = APIRouter(prefix="/deliveries", tags=["deliveries"])
 @router.post("/", response_model=DeliveryCreateResponse, status_code=status.HTTP_201_CREATED)
 def api_create_delivery(
     request: DeliveryCreateRequest,
-    current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
+    current_user: Profile = Depends(get_authenticated_merchant_or_api_key),
     db: Session = Depends(get_db),
 ):
-    """Create a new delivery record scoped strictly to the authenticated merchant."""
+    """Create a new delivery record scoped strictly to the authenticated merchant (Bearer JWT or x-api-key)."""
     return create_delivery(db, request, current_user)
 
 
@@ -49,7 +59,7 @@ def api_create_delivery(
 def api_bulk_create_deliveries(
     items: List[DeliveryCreateRequest],
     batch_id: Optional[str] = Query(None),
-    current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
+    current_user: Profile = Depends(get_authenticated_merchant_or_api_key),
     db: Session = Depends(get_db),
 ):
     """Batch import delivery orders into the authenticated merchant's account with atomic per-item reporting."""
@@ -109,10 +119,10 @@ def api_list_deliveries(
     search: Optional[str] = Query(None),
     limit: int = Query(50, le=100),
     offset: int = Query(0, ge=0),
-    current_user: Profile = Depends(get_current_user),
+    current_user: Profile = Depends(get_current_actor),
     db: Session = Depends(get_db),
 ):
-    """List deliveries scoped by tenant role (Merchants see their orders; Operators see assigned trips)."""
+    """List deliveries scoped by tenant role (Merchants see their orders; Operators see assigned trips; supports x-api-key)."""
     query = db.query(Delivery)
 
     # Tenant isolation
@@ -145,7 +155,7 @@ def api_list_deliveries(
 @router.get("/{delivery_id}", response_model=DeliveryResponse)
 def api_get_delivery(
     delivery_id: str,
-    current_user: Profile = Depends(get_current_user),
+    current_user: Profile = Depends(get_current_actor),
     db: Session = Depends(get_db),
 ):
     """Get full details of a delivery (enforcing tenant access permissions)."""
@@ -244,3 +254,117 @@ def api_delete_delivery(
 
     db.delete(delivery)
     db.commit()
+
+
+# ==============================================================================
+# ==============================================================================
+# Outbox Manual Reconciliation Workflows (Admin Only & Privacy-Hardened)
+# ==============================================================================
+class OutboxReconciliationRequest(BaseModel):
+    resolution: Literal["mark_sent", "requeue", "mark_failed"]
+    reason: str = Field(..., min_length=10, description="Mandatory operator audit reason and resolution evidence.")
+    provider_message_id: Optional[str] = Field(None, description="External provider message ID if confirmed delivered.")
+    evidence_reference: Optional[str] = Field(None, description="External ticket, telco reference, or customer contact note.")
+
+
+@router.get("/outbox/reconciliation", status_code=status.HTTP_200_OK)
+def api_list_outbox_reconciliations(
+    current_user: Profile = Depends(require_roles([AppRole.ADMIN])),
+    db: Session = Depends(get_db),
+):
+    """List all outbox notification items currently in RECONCILIATION_REQUIRED state.
+    
+    Strictly restricted to Admin profiles. Recipient phone numbers are masked to protect customer privacy.
+    """
+    items = (
+        db.query(NotificationOutbox)
+        .filter(NotificationOutbox.status == NotificationDeliveryStatus.RECONCILIATION_REQUIRED)
+        .order_by(NotificationOutbox.updated_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id": it.id,
+            "delivery_id": it.delivery_id,
+            "recipient_phone_masked": mask_phone(it.recipient_phone),
+            "provider": it.provider,
+            "idempotency_key": it.idempotency_key,
+            "provider_message_id": it.provider_message_id,
+            "failure_classification": it.failure_classification,
+            "error_details": it.error_details,
+            "retry_count": it.retry_count,
+            "created_at": it.created_at,
+            "updated_at": it.updated_at,
+        }
+        for it in items
+    ]
+
+
+@router.post("/outbox/{outbox_id}/reconcile", status_code=status.HTTP_200_OK)
+def api_reconcile_outbox_item(
+    outbox_id: str,
+    req: OutboxReconciliationRequest,
+    current_user: Profile = Depends(require_roles([AppRole.ADMIN])),
+    db: Session = Depends(get_db),
+):
+    """Manual reconciliation workflow: resolve an ambiguous outbox item with mandatory audit reasoning."""
+    item = db.query(NotificationOutbox).filter(NotificationOutbox.id == outbox_id).first()
+    if not item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Outbox notification record not found.")
+
+    if req.resolution == "mark_sent" and not (req.provider_message_id or req.evidence_reference):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Marking an outbox notification as 'mark_sent' requires explicit evidence: provide provider_message_id or evidence_reference.",
+        )
+
+    now = datetime.now(timezone.utc)
+    resolution_audit_desc = f"Outbox manual reconciliation: action='{req.resolution}', reason='{req.reason}'"
+
+    if req.resolution == "mark_sent":
+        item.status = NotificationDeliveryStatus.SENT
+        item.provider_message_id = req.provider_message_id or item.provider_message_id or f"MANUAL_RECONCILED_{current_user.id[:8]}"
+        item.status_reconciled_at = now
+        item.sent_at = item.sent_at or now
+        item.error_details = f"Manually verified sent by admin {current_user.email}. Reason: {req.reason}. Evidence: {req.evidence_reference or req.provider_message_id}."
+        item.locked_at = None
+        item.locked_by = None
+    elif req.resolution == "requeue":
+        item.status = NotificationDeliveryStatus.QUEUED
+        item.failure_classification = None
+        item.error_details = f"Requeued by admin {current_user.email}. Reason: {req.reason}."
+        item.next_attempt_at = now
+        item.locked_at = None
+        item.locked_by = None
+    elif req.resolution == "mark_failed":
+        item.status = NotificationDeliveryStatus.FAILED
+        item.failure_classification = "manually_marked_failed"
+        item.error_details = f"Marked permanently failed by admin {current_user.email}. Reason: {req.reason}."
+        item.locked_at = None
+        item.locked_by = None
+
+    # Append immutable audit entry to delivery events
+    deliv = db.query(Delivery).filter(Delivery.id == item.delivery_id).first()
+    if deliv:
+        event = DeliveryEvent(
+            delivery_id=item.delivery_id,
+            status=deliv.status,
+            actor_name=current_user.full_name or current_user.email,
+            actor_role=current_user.role.value,
+            note=f"{resolution_audit_desc}, actor='{current_user.email}'.",
+            occurred_at=now,
+        )
+        db.add(event)
+
+    db.commit()
+    db.refresh(item)
+    return {
+        "id": item.id,
+        "delivery_id": item.delivery_id,
+        "status": item.status.value,
+        "provider_message_id": item.provider_message_id,
+        "error_details": item.error_details,
+        "reconciled_by": current_user.email,
+        "reconciled_at": now.isoformat(),
+        "audit_reason": req.reason,
+    }
