@@ -360,9 +360,9 @@ def test_manual_reconciliation_requires_evidence_and_records_audit_event():
         assert "Verified carrier dispatch log" in event.note
         assert event.actor_role == "admin"
     finally:
-        db.query(DeliveryEvent).filter(DeliveryEvent.delivery_id == "PL-AUDIT-TEST-01").delete()
         db.query(NotificationOutbox).filter(NotificationOutbox.delivery_id == "PL-AUDIT-TEST-01").delete()
         db.query(Delivery).filter(Delivery.id == "PL-AUDIT-TEST-01").delete()
+        db.query(DeliveryEvent).filter(DeliveryEvent.delivery_id == "PL-AUDIT-TEST-01").delete()
         db.commit()
         db.close()
 

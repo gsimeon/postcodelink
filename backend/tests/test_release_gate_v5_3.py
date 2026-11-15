@@ -364,6 +364,7 @@ def test_production_startup_security_guard_rejects_insecure_keys_and_demo_flags(
             SMS_PROVIDER="termii",
             TERMII_API_KEY="valid_termii_api_key_test_12345",
             OUTBOX_WORKER_ENABLED=True,
+            REDIS_URL="redis://localhost:6379/0",
             SEED_DEMO_ACCOUNTS=True,
         )
 
@@ -376,6 +377,7 @@ def test_production_startup_security_guard_rejects_insecure_keys_and_demo_flags(
             SMS_PROVIDER="termii",
             TERMII_API_KEY="valid_termii_api_key_test_12345",
             OUTBOX_WORKER_ENABLED=True,
+            REDIS_URL="redis://localhost:6379/0",
             SEED_DEMO_DATA=True,
         )
 

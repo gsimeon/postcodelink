@@ -15,7 +15,7 @@ graph TD
     subgraph Foundation [Shared Postcode Intelligence Foundation]
         NIPOST[Official NIPOST Verification Gateway]
         TAX[National Taxonomy & Address Cleanser]
-        SEC[Zero-Knowledge Cryptography & Distributed Redis Engine]
+        SEC[Cryptographic Security Engine & Distributed Redis Cluster]
     end
 
     subgraph ModuleA [Module 1: Postcode Intelligence Platform]
@@ -36,6 +36,47 @@ graph TD
 
 1. **Postcode Intelligence Platform**: Standalone API subscriptions, national digital postcode autocomplete, address standardization, and enterprise integration for e-commerce checkouts, banks, and utility providers without logistics overhead.
 2. **Last-Mile Delivery Platform**: Dedicated courier fleet management, merchant dispatch queues, interactive radar tracking, and fraud-proof PIN verification.
+
+---
+
+## Architecture & Security Hardening (Release Gate v5.9 Production Standard)
+
+Following the production-readiness review of Release Gate v5.8, Release Gate v5.9 introduces engine-level database audit guarantees, live upstream provider verification, and distributed fail-closed reliability:
+
+### 1. P1 — Live Provider Telemetry Verification for Manual Outbox Reconciliation
+- **Authoritative Gateway Verification**: When administrators resolve stuck outbox records with `evidence_type = "provider_telemetry_verified"`, the API actively calls the configured notification provider's upstream gateway (`check_message_status`) with the operator-provided `provider_message_id`.
+- **Rejection of Fabricated References**: If the carrier gateway cannot authenticate the dispatch status or if the returned status is not confirmed delivered/sent, the reconciliation request is rejected with HTTP 422 Unprocessable Content, preventing operators from asserting unverified message IDs.
+
+### 2. P1 — PostgreSQL & SQLite Database-Level Audit Trail Immutability
+- **Engine-Level Trigger Enforcement**: Implemented database migration `b2c3d4e5f6a7` adding native triggers:
+  - **PostgreSQL**: `prevent_delivery_events_tampering()` row-level trigger preventing direct SQL `UPDATE` and `DELETE` on `delivery_events`.
+  - **SQLite**: `trg_delivery_events_no_update` and `trg_delivery_events_no_delete` triggers aborting modifications at the database layer.
+- **Relational Integrity**: Prohibits direct manipulation of compliance and transition audit logs while respecting parent delivery cascading lifecycle operations.
+
+### 3. P1 — Mandatory Production Redis Policy & Default Fail-Closed Throttling
+- **Mandatory Redis in Production**: `REDIS_REQUIRED_IN_PRODUCTION=true` is enforced by default. In `ENVIRONMENT=production`, the application refuses to start if `REDIS_URL` is omitted, eliminating unintentional single-node in-memory rate-limiting in multi-instance deployments.
+- **Fail-Closed Protection**: In `production` with `RATE_LIMIT_REDIS_FAIL_CLOSED=true` (default), API key requests that cannot connect to Redis are rejected with HTTP 503 Service Unavailable, preventing quota exhaustion and denial-of-service bypasses. Single-instance testing environments can explicitly opt out via `ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION=true`.
+
+### 4. P2 — Redis Lua Script Sliding-Window Integration Verification
+- **Cardinality Verification**: Verified that requests exceeding the sliding-window threshold are never added to the Redis sorted set (`ZCARD` remains strictly at `limit`), preventing memory growth and unbounded throttling cascades.
+
+### 5. P2 — Real Worker Loop Signal Handling & Stale Worker Telemetry
+- **Graceful Signal Handling**: Integration tested that `run_outbox_worker_loop` listening to `stop_event` cleanly records `status="stopped"` and `stop_reason="graceful_shutdown"` in `worker_heartbeats`.
+- **Abrupt Termination Telemetry**: Verified `/health/worker` marks workers whose heartbeat exceeds the timeout as `stale_workers` and returns `status="degraded"`.
+
+### 6. P2 — Automatic Retry Reset on Manual Requeue
+- **Worker Re-eligibility**: When an administrator requeues an exhausted outbox notification (`retry_count == max_retries`), the API automatically resets `retry_count = 0`, immediately making the record eligible for outbox worker processing.
+
+### 7. P2 — Verified Current Capabilities vs Planned Roadmap
+- **Verified Current Production Implementation**:
+  - Authenticated payload encryption in transit via **AES-256-GCM** bound to delivery context AAD (`delivery_id`).
+  - Cryptographic one-way **SHA-256** hash verification for 6-digit proof-of-delivery PINs.
+  - Multi-factor phone verification challenge to unmask tracking PINs.
+  - Dual PostgreSQL 16 and SQLite 3 migration, trigger, and regression test suites.
+- **Planned Post-v5.9 Capabilities**:
+  - Asymmetric client-side public-key encryption for end-to-end zero-knowledge recipient secrets.
+  - Native telecommunication SMPP bindings for direct telco SMSC integration.
+  - Live GPS rider telemetry stream ingestion.
 
 ---
 

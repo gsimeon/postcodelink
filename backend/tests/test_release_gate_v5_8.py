@@ -477,8 +477,8 @@ def test_reconciliation_evidence_types_and_event_immutability():
     finally:
         if outbox_id:
             db.query(NotificationOutbox).filter(NotificationOutbox.id == outbox_id).delete()
-        db.query(DeliveryEvent).filter(DeliveryEvent.delivery_id == delivery_id).delete()
         db.query(Delivery).filter(Delivery.id == delivery_id).delete()
+        db.query(DeliveryEvent).filter(DeliveryEvent.delivery_id == delivery_id).delete()
         db.commit()
         db.close()
 

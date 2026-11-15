@@ -1,7 +1,8 @@
 """Out-of-band notification service supporting real SMS and WhatsApp dispatch providers.
 
-Enforces zero-knowledge PIN privacy:
-- Plaintext PIN is never stored in application memory.
+Enforces cryptographic PIN privacy:
+- Plaintext PIN is never stored in persistent database columns; stored as one-way SHA-256 hash on Delivery.
+- In-transit payloads are encrypted via AES-256-GCM bound to Delivery ID AAD.
 - Plaintext PIN is never written to log files.
 - Real HTTP requests to Termii and Twilio with timeout and error handling.
 - Accurate status reporting: SIMULATED (dev), SENT (confirmed API dispatch), FAILED (API or network error).

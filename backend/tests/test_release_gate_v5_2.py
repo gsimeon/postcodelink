@@ -303,6 +303,7 @@ def test_production_configuration_gate_rejects_simulated_and_missing_credentials
         SMS_PROVIDER="termii",
         TERMII_API_KEY="valid_key_12345",
         OUTBOX_WORKER_ENABLED=True,
+        REDIS_URL="redis://localhost:6379/0",
     )
     assert valid.ENVIRONMENT == "production"
     assert valid.SMS_PROVIDER == "termii"

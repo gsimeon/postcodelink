@@ -1019,7 +1019,7 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
                     processed += 1
                     continue
             else:
-                # Fresh PIN generation when payload is absent (e.g. zero-knowledge PIN rotation on dispatch)
+                # Fresh PIN generation when payload is absent (e.g. dynamic PIN rotation on dispatch)
                 target_pin = generate_otp()
                 deliv.otp_hash = hash_otp(target_pin)
                 deliv.otp_attempts = 0

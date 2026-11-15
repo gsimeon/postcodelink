@@ -329,11 +329,37 @@ def api_reconcile_outbox_item(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Marking an outbox notification as 'mark_sent' requires explicit evidence: provide provider_message_id or evidence_reference.",
             )
-        if req.evidence_type == "provider_telemetry_verified" and not req.provider_message_id:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Provider-verified resolution requires an authoritative provider_message_id.",
-            )
+        if req.evidence_type == "provider_telemetry_verified":
+            if not req.provider_message_id:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Provider-verified resolution requires an authoritative provider_message_id.",
+                )
+            # Contact the configured provider to verify message existence, status, and delivery association
+            from backend.app.services.notification_service import get_notification_provider
+            provider_name = item.provider if item.provider in ["termii", "twilio", "simulated"] else settings.SMS_PROVIDER
+            active_provider = get_notification_provider(provider_name)
+            telemetry_res = None
+            if active_provider and hasattr(active_provider, "check_message_status"):
+                try:
+                    telemetry_res = active_provider.check_message_status(
+                        idempotency_key=item.idempotency_key or "",
+                        provider_message_id=req.provider_message_id,
+                        recipient_phone=item.recipient_phone,
+                        delivery_id=item.delivery_id,
+                    )
+                except Exception as exc:
+                    logger.warning(f"Provider telemetry verification check exception: {exc}")
+
+            if not telemetry_res or telemetry_res.status not in [NotificationDeliveryStatus.SENT, NotificationDeliveryStatus.SIMULATED]:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        f"Provider telemetry verification failed: message ID '{req.provider_message_id}' "
+                        f"could not be confirmed as successfully dispatched by provider '{provider_name}'. "
+                        "Verify carrier logs or use 'manual_operator_asserted' with supporting ticket reference."
+                    ),
+                )
 
     now = datetime.now(timezone.utc)
     recon_id = req.reconciliation_request_id or f"recon-{uuid.uuid4().hex[:12]}"
@@ -361,7 +387,8 @@ def api_reconcile_outbox_item(
     elif req.resolution == "requeue":
         item.status = NotificationDeliveryStatus.QUEUED
         item.failure_classification = None
-        item.error_details = f"Requeued by admin {current_user.email}. Reason: {req.reason}."
+        item.retry_count = 0  # Reset retry counter so exhausted items are eligible for processing
+        item.error_details = f"Requeued by admin {current_user.email} (retry counter reset for manual retry allowance). Reason: {req.reason}."
         item.next_attempt_at = now
         item.locked_at = None
         item.locked_by = None
