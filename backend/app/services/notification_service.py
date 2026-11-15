@@ -75,6 +75,7 @@ class BaseNotificationProvider(ABC):
         idempotency_key: str,
         provider_message_id: Optional[str] = None,
         recipient_phone: Optional[str] = None,
+        delivery_id: Optional[str] = None,
     ) -> Optional[NotificationDispatchResult]:
         """Check status of a prior dispatch with the provider for crash recovery and reconciliation.
         
@@ -173,7 +174,7 @@ class TermiiNotificationProvider(BaseNotificationProvider):
                 idempotency_key=idempotency_key,
             )
 
-        message = f"Your PostcodeLink delivery confirmation PIN is {pin}. Do not share this code."
+        message = f"Your PostcodeLink delivery confirmation PIN for order {delivery_id} is {pin}. Do not share this code."
         payload = {
             "to": dest_msisdn,
             "from": self.sender_id,
@@ -244,7 +245,7 @@ class TermiiNotificationProvider(BaseNotificationProvider):
         payload = {
             "to": dest_msisdn,
             "from": self.sender_id,
-            "sms": f"PostcodeLink Alert: {status_message}",
+            "sms": f"PostcodeLink Alert for order {delivery_id}: {status_message}",
             "type": "plain",
             "channel": "generic",
             "api_key": self.api_key,
@@ -278,9 +279,21 @@ class TermiiNotificationProvider(BaseNotificationProvider):
         idempotency_key: str,
         provider_message_id: Optional[str] = None,
         recipient_phone: Optional[str] = None,
+        delivery_id: Optional[str] = None,
     ) -> Optional[NotificationDispatchResult]:
-        """Check status of a message on Termii gateway for crash recovery and status reconciliation."""
+        """Check status of a message on Termii gateway for crash recovery and status reconciliation.
+        
+        NOTE: Termii's public REST API does NOT provide an outbound search endpoint by recipient phone
+        or client_reference without an authoritative message_id. When provider_message_id was lost
+        in a crash before persistence, Termii status cannot be verified automatically.
+        In this scenario, this method returns None, and the caller (delivery_service) MUST transition
+        the outbox item to RECONCILIATION_REQUIRED to prevent duplicate SMS dispatches.
+        """
         if not provider_message_id:
+            logger.info(
+                f"[Termii Gateway] Outbound status inquiry without provider_message_id is unsupported by Termii. "
+                "Returning None to trigger administrator reconciliation and prevent duplicate dispatch."
+            )
             return None
         try:
             url = f"https://api.ng.termii.com/api/sms/inbox"
@@ -345,7 +358,7 @@ class TwilioNotificationProvider(BaseNotificationProvider):
                 idempotency_key=idempotency_key,
             )
 
-        message = f"Your PostcodeLink delivery confirmation PIN is {pin}. Do not share this code."
+        message = f"Your PostcodeLink delivery confirmation PIN for order {delivery_id} is {pin}. Do not share this code."
         req_headers = {}
         post_data = {"To": e164_phone, "From": self.from_number, "Body": message}
         if idempotency_key:
@@ -413,7 +426,7 @@ class TwilioNotificationProvider(BaseNotificationProvider):
         try:
             resp = httpx.post(
                 self.base_url,
-                data={"To": e164_phone, "From": self.from_number, "Body": f"PostcodeLink Alert: {status_message}"},
+                data={"To": e164_phone, "From": self.from_number, "Body": f"PostcodeLink Alert for order {delivery_id}: {status_message}"},
                 auth=(self.account_sid, self.auth_token),
                 timeout=self.timeout,
             )
@@ -444,6 +457,7 @@ class TwilioNotificationProvider(BaseNotificationProvider):
         idempotency_key: str,
         provider_message_id: Optional[str] = None,
         recipient_phone: Optional[str] = None,
+        delivery_id: Optional[str] = None,
     ) -> Optional[NotificationDispatchResult]:
         """Check status of a message on Twilio gateway for crash recovery and status reconciliation."""
         try:
@@ -472,20 +486,29 @@ class TwilioNotificationProvider(BaseNotificationProvider):
                             error_details=data.get("error_message") or f"Twilio status: {tw_status}",
                             message_id=provider_message_id,
                         )
-            elif recipient_phone:
-                # Outbound message recovery: search messages sent to recipient when provider_message_id was lost in crash
+            elif recipient_phone and delivery_id:
+                # Outbound message recovery: search messages sent to recipient when provider_message_id was lost in crash.
+                # Strictly requires matching recipient AND specific delivery_id fingerprint in the message body.
                 e164_phone, _ = normalize_nigerian_phone(recipient_phone)
                 url = f"https://api.twilio.com/2010-04-01/Accounts/{self.account_sid}/Messages.json"
                 resp = httpx.get(
                     url,
-                    params={"To": e164_phone, "PageSize": 5},
+                    params={"To": e164_phone, "PageSize": 10},
                     auth=(self.account_sid, self.auth_token),
                     timeout=self.timeout,
                 )
                 if resp.status_code == 200:
                     data = resp.json() if callable(getattr(resp, "json", None)) else {}
                     messages = data.get("messages", [])
+                    matching_msgs = []
                     for msg in messages:
+                        body = msg.get("body") or ""
+                        if delivery_id in body or f"order {delivery_id}" in body.lower():
+                            matching_msgs.append(msg)
+
+                    # Exact unambiguous match required: if multiple or 0 matches found, refuse to guess
+                    if len(matching_msgs) == 1:
+                        msg = matching_msgs[0]
                         tw_status = msg.get("status", "").lower()
                         if tw_status in ["queued", "sending", "sent", "delivered"]:
                             return NotificationDispatchResult(
@@ -493,7 +516,7 @@ class TwilioNotificationProvider(BaseNotificationProvider):
                                 channel="Twilio SMS Gateway",
                                 recipient_masked=mask_phone(msg.get("to", recipient_phone)),
                                 provider="twilio",
-                                message_preview="Message confirmed sent by Twilio via outbound query.",
+                                message_preview="Message confirmed sent by Twilio via delivery fingerprint query.",
                                 message_id=msg.get("sid"),
                             )
                         elif tw_status in ["failed", "undelivered"]:
@@ -506,6 +529,11 @@ class TwilioNotificationProvider(BaseNotificationProvider):
                                 error_details=msg.get("error_message") or f"Twilio status: {tw_status}",
                                 message_id=msg.get("sid"),
                             )
+                    else:
+                        logger.warning(
+                            f"[Twilio Gateway] Ambiguous or zero matching messages ({len(matching_msgs)}) for recipient "
+                            f"{mask_phone(recipient_phone)} and delivery {delivery_id}. Routing to reconciliation."
+                        )
         except Exception as exc:
             logger.warning(f"[Twilio Gateway] Status check exception for {provider_message_id}: {exc}")
         return None
@@ -553,6 +581,7 @@ class SimulatedNotificationProvider(BaseNotificationProvider):
         idempotency_key: str,
         provider_message_id: Optional[str] = None,
         recipient_phone: Optional[str] = None,
+        delivery_id: Optional[str] = None,
     ) -> Optional[NotificationDispatchResult]:
         """Check status of simulated notification by idempotency key, provider message ID, or recipient."""
         if idempotency_key and idempotency_key in self._dispatched_idempotency_keys:
@@ -601,6 +630,7 @@ class SimulatedNotificationProvider(BaseNotificationProvider):
         idempotency_key: str,
         provider_message_id: Optional[str] = None,
         recipient_phone: Optional[str] = None,
+        delivery_id: Optional[str] = None,
     ) -> Optional[NotificationDispatchResult]:
         """Check status of simulated notification by idempotency key, provider message ID, or recipient."""
         if idempotency_key and idempotency_key in self._dispatched_idempotency_keys:

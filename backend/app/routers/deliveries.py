@@ -1,4 +1,5 @@
 """Deliveries router with authentication, tenant isolation, and RBAC."""
+import uuid
 import secrets
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
@@ -265,6 +266,14 @@ class OutboxReconciliationRequest(BaseModel):
     reason: str = Field(..., min_length=10, description="Mandatory operator audit reason and resolution evidence.")
     provider_message_id: Optional[str] = Field(None, description="External provider message ID if confirmed delivered.")
     evidence_reference: Optional[str] = Field(None, description="External ticket, telco reference, or customer contact note.")
+    evidence_type: Literal["manual_operator_asserted", "provider_telemetry_verified"] = Field(
+        "manual_operator_asserted",
+        description="Distinguishes manually asserted audit justification from provider-verified telemetry evidence.",
+    )
+    reconciliation_request_id: Optional[str] = Field(
+        None,
+        description="Optional client reconciliation tracking ID; auto-generated if omitted.",
+    )
 
 
 @router.get("/outbox/reconciliation", status_code=status.HTTP_200_OK)
@@ -293,6 +302,8 @@ def api_list_outbox_reconciliations(
             "failure_classification": it.failure_classification,
             "error_details": it.error_details,
             "retry_count": it.retry_count,
+            "evidence_type": getattr(it, "evidence_type", None),
+            "reconciliation_request_id": getattr(it, "reconciliation_request_id", None),
             "created_at": it.created_at,
             "updated_at": it.updated_at,
         }
@@ -312,21 +323,39 @@ def api_reconcile_outbox_item(
     if not item:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Outbox notification record not found.")
 
-    if req.resolution == "mark_sent" and not (req.provider_message_id or req.evidence_reference):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Marking an outbox notification as 'mark_sent' requires explicit evidence: provide provider_message_id or evidence_reference.",
-        )
+    if req.resolution == "mark_sent":
+        if not (req.provider_message_id or req.evidence_reference):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Marking an outbox notification as 'mark_sent' requires explicit evidence: provide provider_message_id or evidence_reference.",
+            )
+        if req.evidence_type == "provider_telemetry_verified" and not req.provider_message_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Provider-verified resolution requires an authoritative provider_message_id.",
+            )
 
     now = datetime.now(timezone.utc)
-    resolution_audit_desc = f"Outbox manual reconciliation: action='{req.resolution}', reason='{req.reason}'"
+    recon_id = req.reconciliation_request_id or f"recon-{uuid.uuid4().hex[:12]}"
+    item.reconciliation_request_id = recon_id
+    item.evidence_type = req.evidence_type
+
+    resolution_audit_desc = (
+        f"Outbox manual reconciliation [{recon_id}]: action='{req.resolution}', "
+        f"evidence_type='{req.evidence_type}', reason='{req.reason}', "
+        f"evidence='{req.evidence_reference or req.provider_message_id}'"
+    )
 
     if req.resolution == "mark_sent":
         item.status = NotificationDeliveryStatus.SENT
         item.provider_message_id = req.provider_message_id or item.provider_message_id or f"MANUAL_RECONCILED_{current_user.id[:8]}"
         item.status_reconciled_at = now
         item.sent_at = item.sent_at or now
-        item.error_details = f"Manually verified sent by admin {current_user.email}. Reason: {req.reason}. Evidence: {req.evidence_reference or req.provider_message_id}."
+        item.failure_classification = "manual_asserted_resolution" if req.evidence_type == "manual_operator_asserted" else "provider_verified_resolution"
+        item.error_details = (
+            f"Manually verified sent by admin {current_user.email} (evidence_type: {req.evidence_type}). "
+            f"Reason: {req.reason}. Evidence: {req.evidence_reference or req.provider_message_id}."
+        )
         item.locked_at = None
         item.locked_by = None
     elif req.resolution == "requeue":

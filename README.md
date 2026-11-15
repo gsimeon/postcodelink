@@ -6,51 +6,80 @@ PostcodeLink bridges the gap between customer addresses (often described with in
 
 ---
 
-## Architecture & Security Hardening (Release Gate v5.7 Production Standard)
+## Strategic Product Architecture & Modularity
 
-Following an in-depth security, operational, and distributed systems audit of the FastAPI backend and Next.js frontend, the platform has completed enterprise-grade hardening covering all Release Gate v5.7 requirements:
+PostcodeLink is architected as two decoupled, enterprise-ready product modules sharing a unified digital address intelligence foundation:
 
-### 1. P1 — Targeted Postcode Migration (Exact Demonstration Fixture Isolation)
-- **Narrow Migration Matching**: Alembic migration `e5f6a7b8c9d0` strictly targets known demonstration fixtures by exact code (`WHERE code IN ('FC-02-A09-DB-09', 'LA-01-A04-IK-02')`). All broad text-based heuristics (`LIKE '%Demonstration%'`, `LIKE '%Pilot%'`, `LIKE '%Local Reference%'`) have been eliminated.
-- **Strict Verification Preservation**: Legitimate government-verified records with NIPOST provenance are preserved without exception as `verification_status="official_verified"`.
-- **Reversibility**: Downgrade routines are documented and tested, restoring demonstration fixtures cleanly. Real Alembic migration execution tests run on every CI build.
+```mermaid
+graph TD
+    subgraph Foundation [Shared Postcode Intelligence Foundation]
+        NIPOST[Official NIPOST Verification Gateway]
+        TAX[National Taxonomy & Address Cleanser]
+        SEC[Zero-Knowledge Cryptography & Distributed Redis Engine]
+    end
 
-### 2. P1 — Resilient SMS Crash Recovery & Outbound Status Reconciliation
-- **Crash Recovery Without Saved Message ID**: When a background worker crashes between provider HTTP acceptance and database commit, `provider_message_id` is lost. Upon recovery, the worker queries the provider by `recipient_phone` and `idempotency_key`. If the provider cannot conclusively confirm delivery, the item transitions to `RECONCILIATION_REQUIRED` and is **never blindly re-dispatched**, eliminating duplicate customer SMS risks.
-- **Provider Gateway Status Inquiries**: `check_message_status` implemented across `SimulatedNotificationProvider`, `TwilioNotificationProvider` (querying recent outbound messages to recipient by E.164), and `TermiiNotificationProvider`.
+    subgraph ModuleA [Module 1: Postcode Intelligence Platform]
+        API_SUB[API Subscriptions & Tiered Metering]
+        MERCH_SDK[Merchant E-Commerce Plugins & Autocomplete]
+        ADDR_CLEAN[Address Standardization & Spatial Classification]
+    end
 
-### 3. P1 — Privacy-Hardened, Admin-Only Manual Reconciliation Workflows
-- **Strict RBAC Enforcement**: `GET /api/v1/deliveries/outbox/reconciliation` and `POST /api/v1/deliveries/outbox/{id}/reconcile` are restricted exclusively to `AppRole.ADMIN`. Courier operators receive HTTP 403 Forbidden.
-- **Customer Privacy Protection**: Full recipient phone numbers are masked in reconciliation listings (`recipient_phone_masked: "+234803***789"`), preventing unauthorized inspection of merchant customer records.
-- **Mandatory Audit Reason & Evidence**: Manual resolutions (`mark_sent`, `requeue`, `mark_failed`) require an explicit reason (`reason` >= 10 characters). Marking an item as sent strictly requires carrier evidence (`provider_message_id` or `evidence_reference`). Every resolution appends an immutable `DeliveryEvent` audit entry recording actor email, role, action, and rationale.
+    subgraph ModuleB [Module 2: Last-Mile Logistics Platform]
+        ORDER_DISP[Durable Outbox Dispatch & Fleet Assignment]
+        COURIER_APP[Rider Manifest, Waybills & Live Dispatch Radar]
+        POD[6-Digit OTP Proof-of-Delivery Verification]
+    end
 
-### 4. P1 — Strict NIPOST Verification with Input Validation
-- **Mandatory Postcode Parameter**: In strict verification mode (`GET /api/v1/postcodes/lookup?strict=true`), omitting the `code` parameter raises HTTP 422 Unprocessable Content. Area-only discovery is barred from strict verification.
-- **Zero Local Fallback in Strict Mode**: If upstream NIPOST is unavailable or returns an error, the API fails closed (HTTP 502/503) and never silently falls back to local reference fixtures.
+    Foundation --> ModuleA
+    Foundation --> ModuleB
+```
 
-### 5. P2 — Distributed Redis-Backed Rate Limiting
-- **Pluggable Sliding-Window Store**: Per-minute API key rate limits use an atomic Redis sorted-set sliding window (`ZREMRANGEBYSCORE` / `ZCARD` / `ZADD` / `EXPIRE`) when `REDIS_URL` is configured, guaranteeing shared enforcement across distributed API instances and process restarts.
-- **Memory-Safe In-Memory Fallback**: When Redis is unconfigured, falls back to an in-memory thread-safe sliding window with periodic TTL eviction of stale keys (every 120s) to prevent memory leaks.
-- **Invalid Configuration Rejection**: Non-positive rate limits (`<= 0`) are rejected immediately with HTTP 400 Bad Request rather than treated as unlimited.
+1. **Postcode Intelligence Platform**: Standalone API subscriptions, national digital postcode autocomplete, address standardization, and enterprise integration for e-commerce checkouts, banks, and utility providers without logistics overhead.
+2. **Last-Mile Delivery Platform**: Dedicated courier fleet management, merchant dispatch queues, interactive radar tracking, and fraud-proof PIN verification.
 
-### 6. P2 — Persistent Cross-Process Worker Heartbeat
-- **Database Heartbeat Persistence**: Worker instances record heartbeats in the `worker_heartbeats` table (migration `f6a7b8c9d0e1`), storing `worker_id`, `process_id`, `hostname`, `status`, `processed_count`, and `last_heartbeat_at`.
-- **Standalone Process Monitoring**: `/health/worker` queries persistent database heartbeats, reliably monitoring standalone worker daemon processes (`python -m backend.app.workers.outbox_worker`) across isolated OS processes and containers. Reports `status="operational"` or `status="degraded"` if heartbeats exceed the configurable threshold (`OUTBOX_WORKER_HEARTBEAT_THRESHOLD_SECONDS = 120`).
+---
 
-### 7. P2 — Sanitized, Real Integration Health Probes
-- **Live Reachability & Authentication Probes**: `/health/integrations` tests external provider status using bounded network probes (1.5s timeout), separating `configured`, `reachable`, `authenticated`, `last_successful_check`, and `last_error_category`.
-- **Zero Information Leakage**: Internal infrastructure URLs (`base_url`, `url`), API keys, and credentials are completely omitted from the public health response.
+## Architecture & Security Hardening (Release Gate v5.8 Production Standard)
 
-### 8. P2 — Concurrent API-Key Rotation Protection
-- **Atomic Conditional Updates**: `POST /api/v1/api-keys/{id}/rotate` executes an atomic conditional update (`is_active = False, is_revoked = True WHERE is_active = True AND is_revoked = False`). Simultaneous rotation requests race safely: exactly one generates a replacement credential, while competing requests receive HTTP 409 Conflict.
-- **Quota Inheritance**: Replacement credentials inherit billing period usage (`period_usage_count`) and lifetime usage from the rotated key, preventing quota reset bypasses.
+Following the comprehensive production-readiness review of Release Gate v5.7, the platform has completed enterprise-grade hardening across distributed coordination, provider reconciliation, and lifecycle reliability:
 
-### 9. P0 — Dual PostgreSQL 16 & Redis 7 CI/CD Pipeline
-- **GitHub Actions Workflow (`.github/workflows/ci.yml`)**:
+### 1. P1 — Termii Crash Recovery Without Saved Message ID (Zero Duplicate Dispatches)
+- **Documented API Boundary**: Verified that Termii's public REST gateway does not provide an outbound query endpoint by recipient phone or client_reference without an authoritative `provider_message_id`.
+- **Zero-Duplicate Invariant**: When a worker crashes after provider HTTP acceptance but before `provider_message_id` is committed to PostgreSQL, `check_message_status` safely returns `None`. The outbox worker immediately routes the item to `RECONCILIATION_REQUIRED` and **never automatically re-dispatches**, completely eliminating duplicate customer SMS risks.
+
+### 2. P1 — Twilio Outbound Verification with Delivery Fingerprint Matching
+- **Delivery Fingerprint Binding**: Outbound PIN SMS messages embed an explicit order fingerprint (`Your PostcodeLink delivery confirmation PIN for order {delivery_id} is {pin}.`).
+- **Ambiguity Rejection**: Outbound status inquiries by recipient phone verify that returned messages contain the specific delivery fingerprint. Unrelated messages or multiple ambiguous results are rejected (`return None`), routing to administrator reconciliation rather than misassociating an unrelated delivery's SMS.
+
+### 3. P1 & P2 — Distributed Sliding-Window Rate Limiting with Atomic Lua Script
+- **Atomic Lua Sliding Window**: Rate limits are evaluated in Redis via a single atomic Lua script executing `ZREMRANGEBYSCORE`, `ZCARD`, conditional `ZADD`, and `EXPIRE`.
+- **No Accumulation of Rejected Requests**: Requests that exceed limits are strictly **not** added to the sorted set, preventing throttling cascades and ensuring accurate `Retry-After` calculation.
+- **Connection Retry with Bounded Backoff**: Replaced one-shot connection caching with a resilient retry loop (15s backoff). If Redis temporarily fails and recovers, the client reconnects automatically.
+- **Configurable Production Fail-Closed Policy**: Supports `RATE_LIMIT_REDIS_FAIL_CLOSED=true` to reject requests with HTTP 503 rather than silently partitioning distributed allowances across multi-instance nodes.
+- **Operational Monitoring**: Exposes rate-limiter backend health (`redis` vs `in_memory_fallback`) in `/health/rate-limiter` and `/health/integrations`.
+
+### 4. P1 — Transaction-Level Concurrent API Key Rotation Race Tests
+- **Multi-Thread Concurrency Proof**: Verified simultaneous rotation requests via `ThreadPoolExecutor` against PostgreSQL and SQLite. Exactly one request succeeds (HTTP 201) while competing requests receive HTTP 409 Conflict.
+- **Quota Inheritance**: New credentials inherit exact billing period usage without reset bypasses.
+
+### 5. P2 — Persistent Worker Heartbeat Lifecycle & Graceful Shutdown
+- **Worker Lifecycle Tracking**: Added `last_successful_process_at` and `stop_reason` to the `worker_heartbeats` table (migration `a1b2c3d4e5f6`).
+- **Clean Signal Handling**: Outbox worker daemon intercepts `SIGINT` and `SIGTERM`, recording `status="stopped"` and reason in the database before process termination.
+- **Observability Telemetry**: `/health/worker` surfaces `active_workers`, `stale_workers` (heartbeat age > threshold), `stopped_workers`, `outbox_backlog`, and `last_successful_process_at`.
+
+### 6. P2 — Stronger Reconciliation Evidence Handling & Immutable Audit Trail
+- **Evidence Classification**: Reconciliation requests explicitly distinguish `manual_operator_asserted` from `provider_telemetry_verified`. Provider-verified resolutions strictly require `provider_message_id` (HTTP 422 if omitted).
+- **Client Tracking Reference**: Tracks `reconciliation_request_id` across outbox items and audit logs.
+- **Database-Level Immutability**: `DeliveryEvent` records are enforced append-only via SQLAlchemy event hooks that reject modifications with `ValueError`.
+
+### 7. P2 — Production Policy for Multi-Instance Redis
+- **Mandatory Production Redis**: When `REDIS_REQUIRED_IN_PRODUCTION=true` is set, the application strictly refuses to start in `ENVIRONMENT=production` if `REDIS_URL` is omitted.
+
+### 8. P0 — Dual PostgreSQL 16 & Redis 7 CI/CD Pipeline
+- **Continuous Integration (`.github/workflows/ci.yml`)**:
   - Spin up `postgres:16` and `redis:7` service containers with health checks.
   - Run Alembic migrations and database seeding against PostgreSQL 16.
-  - Run 95/95 Pytest security, cryptography, and API integration tests against PostgreSQL and Redis.
-  - Verify SQLite migration and local fallback test compatibility.
+  - Run 103/103 Pytest security, cryptography, and API integration tests against PostgreSQL and Redis.
   - Run 7/7 Node.js state-machine and 6-digit OTP security tests.
   - Compile production Next.js 15 build with 0 errors.
 

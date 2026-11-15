@@ -159,7 +159,7 @@ def health_ready(db: Session = Depends(get_db)):
 
 @app.get("/health/worker", tags=["system"])
 def health_worker(db: Session = Depends(get_db)):
-    """Worker monitoring: checks persistent cross-process worker heartbeats, queue depth, and reconciliation items."""
+    """Worker monitoring: checks persistent cross-process worker heartbeats, lifecycle states, and queue backlog."""
     from backend.app.models.notification_outbox import NotificationOutbox
     from backend.app.models.worker_heartbeat import WorkerHeartbeat
     from backend.app.services.notification_service import NotificationDeliveryStatus
@@ -179,18 +179,49 @@ def health_worker(db: Session = Depends(get_db)):
     ).scalar() or 0
 
     now = datetime.now(timezone.utc)
-    latest_hb = (
-        db.query(WorkerHeartbeat)
-        .order_by(WorkerHeartbeat.last_heartbeat_at.desc())
-        .first()
-    )
+    threshold = getattr(settings, "OUTBOX_WORKER_HEARTBEAT_THRESHOLD_SECONDS", 120)
+
+    heartbeats = db.query(WorkerHeartbeat).all()
+    active_workers = []
+    stale_workers = []
+    stopped_workers = []
+    latest_hb = None
+    latest_success_process_at = None
+
+    for hb in heartbeats:
+        hb_time = hb.last_heartbeat_at
+        if hb_time.tzinfo is None:
+            hb_time = hb_time.replace(tzinfo=timezone.utc)
+        age = max(0, int((now - hb_time).total_seconds()))
+
+        if latest_hb is None:
+            latest_hb = hb
+        else:
+            latest_time = latest_hb.last_heartbeat_at
+            if latest_time.tzinfo is None:
+                latest_time = latest_time.replace(tzinfo=timezone.utc)
+            if hb_time > latest_time:
+                latest_hb = hb
+
+        if hb.last_successful_process_at:
+            proc_time = hb.last_successful_process_at
+            if proc_time.tzinfo is None:
+                proc_time = proc_time.replace(tzinfo=timezone.utc)
+            if latest_success_process_at is None or proc_time > latest_success_process_at:
+                latest_success_process_at = proc_time
+
+        if hb.status == "stopped":
+            stopped_workers.append({"worker_id": hb.worker_id, "stop_reason": hb.stop_reason})
+        elif age > threshold:
+            stale_workers.append({"worker_id": hb.worker_id, "seconds_since_heartbeat": age})
+        else:
+            active_workers.append({"worker_id": hb.worker_id, "process_id": hb.process_id, "seconds_since_heartbeat": age})
 
     worker_status = "operational"
     heartbeat_str = None
     seconds_since = None
     worker_pid = None
     worker_id = None
-    threshold = getattr(settings, "OUTBOX_WORKER_HEARTBEAT_THRESHOLD_SECONDS", 120)
 
     if latest_hb:
         worker_id = latest_hb.worker_id
@@ -201,7 +232,7 @@ def health_worker(db: Session = Depends(get_db)):
         heartbeat_str = hb_time.isoformat()
         seconds_since = max(0, int((now - hb_time).total_seconds()))
 
-        if seconds_since > threshold:
+        if seconds_since > threshold or len(stale_workers) > 0:
             worker_status = "degraded"
         else:
             worker_status = "operational"
@@ -216,12 +247,24 @@ def health_worker(db: Session = Depends(get_db)):
         "active_worker_pid": worker_pid,
         "last_heartbeat": heartbeat_str,
         "seconds_since_last_heartbeat": seconds_since,
+        "last_successful_process_at": latest_success_process_at.isoformat() if latest_success_process_at else None,
+        "active_workers": active_workers,
+        "stale_workers": stale_workers,
+        "stopped_workers": stopped_workers,
         "poll_interval_seconds": settings.OUTBOX_WORKER_INTERVAL_SECONDS,
         "lease_timeout_minutes": settings.OUTBOX_LEASE_TIMEOUT_MINUTES,
         "outbox_pending_count": pending_count,
         "outbox_reconciliation_required_count": reconciliation_count,
+        "outbox_backlog": pending_count + reconciliation_count,
         "reconciliation_alert": reconciliation_count > 0,
     }
+
+
+@app.get("/health/rate-limiter", tags=["system"])
+def health_rate_limiter():
+    """Rate limiter monitoring: inspects active backend (Redis vs in-memory), fail-closed policy, and connection health."""
+    from backend.app.core.rate_limiter import get_rate_limiter_status
+    return get_rate_limiter_status()
 
 
 @app.get("/health/integrations", tags=["system"])
@@ -337,6 +380,9 @@ def health_integrations():
         else:
             sms_error_category = "unconfigured"
 
+    from backend.app.core.rate_limiter import get_rate_limiter_status
+    rate_limiter_info = get_rate_limiter_status()
+
     overall_status = "operational"
     if settings.ENVIRONMENT == "production":
         if not sms_configured or settings.SMS_PROVIDER == "simulated" or not sms_authenticated:
@@ -361,6 +407,7 @@ def health_integrations():
                         "last_successful_check": sms_last_check,
                         "last_error_category": sms_error_category,
                     },
+                    "rate_limiter": rate_limiter_info,
                 },
             )
 
@@ -381,4 +428,5 @@ def health_integrations():
             "last_successful_check": sms_last_check,
             "last_error_category": sms_error_category,
         },
+        "rate_limiter": rate_limiter_info,
     }

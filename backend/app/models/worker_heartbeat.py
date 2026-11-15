@@ -15,5 +15,7 @@ class WorkerHeartbeat(Base):
     status = Column(String(32), nullable=False, default="active")  # active | idle | busy | stopped
     active_jobs_count = Column(Integer, nullable=False, default=0)
     processed_count = Column(Integer, nullable=False, default=0)
+    last_successful_process_at = Column(DateTime, nullable=True)
+    stop_reason = Column(String(128), nullable=True)
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

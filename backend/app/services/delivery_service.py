@@ -771,6 +771,7 @@ def record_worker_heartbeat(
     status: str = "active",
     processed_count: int = 0,
     worker_role: str = "outbox_worker",
+    stop_reason: Optional[str] = None,
 ) -> None:
     """Record or update persistent worker heartbeat in the database for cross-process health monitoring."""
     import os
@@ -788,6 +789,8 @@ def record_worker_heartbeat(
                 status=status,
                 active_jobs_count=0,
                 processed_count=processed_count,
+                last_successful_process_at=now if processed_count > 0 else None,
+                stop_reason=stop_reason,
                 created_at=now,
                 updated_at=now,
             )
@@ -798,11 +801,36 @@ def record_worker_heartbeat(
             hb.status = status
             hb.hostname = socket.gethostname()
             hb.processed_count += processed_count
+            if processed_count > 0:
+                hb.last_successful_process_at = now
+            if stop_reason:
+                hb.stop_reason = stop_reason
             hb.updated_at = now
         db.commit()
     except Exception as exc:
         db.rollback()
         logger.warning(f"Failed to record worker heartbeat: {exc}")
+
+
+def record_worker_shutdown(
+    db: Session,
+    worker_id: str,
+    reason: str = "graceful_shutdown",
+) -> None:
+    """Record clean worker termination in worker_heartbeats."""
+    now = datetime.now(timezone.utc)
+    try:
+        hb = db.query(WorkerHeartbeat).filter(WorkerHeartbeat.worker_id == worker_id).first()
+        if hb:
+            hb.status = "stopped"
+            hb.stop_reason = reason
+            hb.last_heartbeat_at = now
+            hb.updated_at = now
+            db.commit()
+            logger.info(f"[Worker Heartbeat] Recorded graceful shutdown for worker '{worker_id}' (reason: {reason}).")
+    except Exception as exc:
+        db.rollback()
+        logger.warning(f"Failed to record worker shutdown: {exc}")
 
 
 def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Optional[str] = None) -> int:
@@ -892,6 +920,7 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
                         idempotency_key=item.idempotency_key,
                         provider_message_id=getattr(item, "provider_message_id", None),
                         recipient_phone=getattr(item, "recipient_phone", None),
+                        delivery_id=getattr(item, "delivery_id", None),
                     )
                 except Exception as exc:
                     logger.warning(f"[Outbox Worker] Provider status check failed for item {item.id}: {exc}")
@@ -922,7 +951,7 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
             # to prevent duplicate SMS (at-least-once dispatch with duplicate prevention)
             item.status = NotificationDeliveryStatus.RECONCILIATION_REQUIRED
             item.failure_classification = "unconfirmed_crash_window"
-            item.error_details = "Worker crashed during HTTP dispatch; provider status could not be verified automatically. Flagged for operator reconciliation."
+            item.error_details = "Worker crashed during HTTP dispatch; provider status could not be verified automatically. Flagged for administrator reconciliation."
             item.locked_at = None
             item.locked_by = None
             db.commit()
