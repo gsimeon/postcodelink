@@ -10,14 +10,14 @@ from backend.app.models.operator import Operator
 from backend.app.models.customer import Customer
 from backend.app.models.profile import Profile
 from backend.app.models.enums import DeliveryStatus, PostcodeStatus, AppRole
-from backend.app.core.auth_deps import get_current_user
+from backend.app.core.auth_deps import get_current_user, get_current_actor
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 
 @router.get("/overview")
 def api_get_analytics_overview(
-    current_user: Profile = Depends(get_current_user),
+    current_user: Profile = Depends(get_current_actor),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     """Get high-level operations, verification accuracy, and fleet KPIs (scoped strictly to tenant)."""

@@ -78,6 +78,13 @@ class Settings(BaseSettings):
     OUTBOX_WORKER_ENABLED: bool = False
     OUTBOX_WORKER_INTERVAL_SECONDS: int = 5
     OUTBOX_LEASE_TIMEOUT_MINUTES: int = 5
+    OUTBOX_WORKER_HEARTBEAT_THRESHOLD_SECONDS: int = 120
+
+    # Redis Cache & Distributed Rate Limiting
+    REDIS_URL: Optional[str] = os.getenv("REDIS_URL", None)
+    REDIS_REQUIRED_IN_PRODUCTION: bool = True
+    RATE_LIMIT_REDIS_FAIL_CLOSED: bool = True
+    ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION: bool = os.getenv("ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION", "false").lower() in ["true", "1"]
 
     @model_validator(mode="before")
     @classmethod
@@ -126,6 +133,14 @@ class Settings(BaseSettings):
 
             if raw_outbox_key == raw_secret:
                 raise ValueError("Fatal Security Error: OUTBOX_ENCRYPTION_KEY must be distinct from SECRET_KEY to ensure cryptographic domain separation.")
+
+            # Distributed rate limiting requires Redis by default in production
+            if self.REDIS_REQUIRED_IN_PRODUCTION and not self.REDIS_URL and not self.ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION:
+                raise ValueError(
+                    "Fatal Production Configuration Error: REDIS_URL must be configured in production "
+                    "for distributed rate limiting. Set ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION=true only "
+                    "if explicitly running an isolated single-instance development or staging deployment."
+                )
 
             # Demo account seeding is strictly forbidden in production
             if self.SEED_DEMO_ACCOUNTS:
