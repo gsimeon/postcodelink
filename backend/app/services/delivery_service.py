@@ -35,6 +35,7 @@ from backend.app.core.security import (
     verify_otp_hash,
     encrypt_authenticated_pin,
     decrypt_authenticated_pin,
+    migrate_legacy_transit_pin,
 )
 from backend.app.services.notification_service import (
     notification_provider,
@@ -68,19 +69,28 @@ def encrypt_transit_pin(pin: str, secret_key: Optional[str] = None, delivery_id:
     return encrypt_authenticated_pin(pin, master_key=key, delivery_id=delivery_id)
 
 
-def decrypt_transit_pin(token: str, secret_key: Optional[str] = None, delivery_id: Optional[str] = None) -> Optional[str]:
-    """Decrypts and verifies authenticated transit PIN envelope using AES-256-GCM and key rotation."""
+def decrypt_transit_pin(
+    token: str,
+    secret_key: Optional[str] = None,
+    delivery_id: Optional[str] = None,
+    allow_legacy: bool = False,
+) -> Optional[str]:
+    """Decrypts and verifies authenticated transit PIN envelope using AES-256-GCM and key rotation.
+    
+    Strictly enforces context-bound delivery AAD when delivery_id is supplied.
+    Legacy v1 and unversioned envelopes are strictly rejected unless allow_legacy=True.
+    """
     if secret_key:
-        res = decrypt_authenticated_pin(token, master_key=secret_key, delivery_id=delivery_id)
+        res = decrypt_authenticated_pin(token, master_key=secret_key, delivery_id=delivery_id, allow_legacy=allow_legacy)
         if res is not None:
             return res
     outbox_key = getattr(settings, "OUTBOX_ENCRYPTION_KEY", None)
     if outbox_key and outbox_key != secret_key:
-        res = decrypt_authenticated_pin(token, master_key=outbox_key, delivery_id=delivery_id)
+        res = decrypt_authenticated_pin(token, master_key=outbox_key, delivery_id=delivery_id, allow_legacy=allow_legacy)
         if res is not None:
             return res
     if settings.SECRET_KEY != secret_key and settings.SECRET_KEY != outbox_key:
-        res = decrypt_authenticated_pin(token, master_key=settings.SECRET_KEY, delivery_id=delivery_id)
+        res = decrypt_authenticated_pin(token, master_key=settings.SECRET_KEY, delivery_id=delivery_id, allow_legacy=allow_legacy)
         if res is not None:
             return res
     return None
@@ -759,7 +769,11 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
     query = (
         db.query(NotificationOutbox)
         .filter(
-            NotificationOutbox.status.in_([NotificationDeliveryStatus.QUEUED, NotificationDeliveryStatus.FAILED]),
+            NotificationOutbox.status.in_([
+                NotificationDeliveryStatus.QUEUED,
+                NotificationDeliveryStatus.FAILED,
+                NotificationDeliveryStatus.DISPATCHING,
+            ]),
             NotificationOutbox.retry_count < NotificationOutbox.max_retries,
             or_(
                 NotificationOutbox.next_attempt_at.is_(None),
@@ -787,10 +801,17 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
         item.retry_count += 1
         item.updated_at = now
 
+        # Select provider based on item configuration early for idempotent cache checks
+        provider_name = item.provider if item.provider in ["termii", "twilio", "simulated"] else settings.SMS_PROVIDER
+        active_provider = get_notification_provider(provider_name)
+
+        # Ensure unique idempotency key is assigned for provider deduplication
+        if not getattr(item, "idempotency_key", None):
+            item.idempotency_key = f"outbox_{item.id}_{item.delivery_version}_{item.retry_count}"
+
         # Idempotent reconciliation guard:
         # If the item already has a provider_message_id recorded (e.g. from previous dispatch attempt
-        # where the provider accepted the SMS but local database commit crashed), reconcile to SENT
-        # immediately without re-dispatching a duplicate SMS to the customer.
+        # where the provider accepted the SMS), reconcile to SENT immediately without re-dispatching.
         if getattr(item, "provider_message_id", None):
             logger.info(
                 f"[Outbox Worker] Item {item.id} already has provider_message_id '{item.provider_message_id}'. "
@@ -801,12 +822,39 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
             item.sent_at = item.sent_at or now
             item.locked_at = None
             item.locked_by = None
+            db.commit()
             processed += 1
             continue
 
-        # Select provider based on item configuration
-        provider_name = item.provider if item.provider in ["termii", "twilio", "simulated"] else settings.SMS_PROVIDER
-        active_provider = get_notification_provider(provider_name)
+        # Crash-window recovery: if worker crashed while actively dispatching (DISPATCHING state)
+        if item.status == NotificationDeliveryStatus.DISPATCHING and item.retry_count > 1:
+            logger.warning(
+                f"[Outbox Worker] Item {item.id} found in DISPATCHING state from prior worker crash. "
+                "Checking provider idempotency or flagging for reconciliation."
+            )
+            # If simulated provider or provider has recorded this idempotency key
+            if active_provider and hasattr(active_provider, "_dispatched_idempotency_keys"):
+                cached = active_provider._dispatched_idempotency_keys.get(item.idempotency_key)
+                if cached and cached.status in [NotificationDeliveryStatus.SENT, NotificationDeliveryStatus.SIMULATED]:
+                    item.status = cached.status
+                    item.provider_message_id = cached.message_id
+                    item.status_reconciled_at = now
+                    item.sent_at = item.sent_at or now
+                    item.locked_at = None
+                    item.locked_by = None
+                    db.commit()
+                    processed += 1
+                    continue
+
+            # If unconfirmed whether provider sent the SMS, route to RECONCILIATION_REQUIRED to prevent duplicate SMS
+            item.status = NotificationDeliveryStatus.RECONCILIATION_REQUIRED
+            item.failure_classification = "unconfirmed_crash_window"
+            item.error_details = "Worker crashed during HTTP dispatch; flagged for reconciliation to prevent duplicate SMS."
+            item.locked_at = None
+            item.locked_by = None
+            db.commit()
+            processed += 1
+            continue
 
         dispatch_res = None
         # Handle PIN notification types
@@ -824,18 +872,37 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
                 item.error_details = "Delivery is in terminal status (delivered/cancelled) or not found."
                 item.locked_at = None
                 item.locked_by = None
+                db.commit()
                 processed += 1
                 continue
 
             target_pin = None
             if item.message_payload:
-                target_pin = decrypt_transit_pin(item.message_payload, settings.OUTBOX_ENCRYPTION_KEY, delivery_id=item.delivery_id)
+                target_pin = decrypt_transit_pin(
+                    item.message_payload,
+                    settings.OUTBOX_ENCRYPTION_KEY,
+                    delivery_id=item.delivery_id,
+                    allow_legacy=False,
+                )
+                if not target_pin and (item.message_payload.startswith("v1:") or not item.message_payload.startswith("v2:")):
+                    # Explicit controlled migration path for unmigrated legacy outbox items
+                    migrated_pin, upgraded_envelope = migrate_legacy_transit_pin(
+                        item.message_payload,
+                        delivery_id=item.delivery_id,
+                        master_key=settings.OUTBOX_ENCRYPTION_KEY,
+                    )
+                    if migrated_pin and upgraded_envelope:
+                        target_pin = migrated_pin
+                        item.message_payload = upgraded_envelope
+                        db.flush()
+
                 if not target_pin:
                     item.status = NotificationDeliveryStatus.FAILED
                     item.failure_classification = "invalid_pin_payload"
                     item.error_details = "PIN payload could not be decrypted or failed authentication verification."
                     item.locked_at = None
                     item.locked_by = None
+                    db.commit()
                     processed += 1
                     continue
 
@@ -846,6 +913,7 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
                     item.error_details = f"PIN payload does not match current delivery OTP hash (delivery version: {deliv.version}); superseded."
                     item.locked_at = None
                     item.locked_by = None
+                    db.commit()
                     processed += 1
                     continue
             else:
@@ -859,19 +927,30 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
                 item.message_payload = encrypt_transit_pin(target_pin, settings.OUTBOX_ENCRYPTION_KEY, delivery_id=deliv.id)
                 db.flush()
 
+            # Persist DISPATCHING intent state to disk before executing external HTTP network call
+            item.status = NotificationDeliveryStatus.DISPATCHING
+            item.updated_at = now
+            db.commit()
+
             dispatch_res = active_provider.send_delivery_pin(
                 recipient_phone=item.recipient_phone,
                 recipient_name=item.recipient_name or deliv.recipient_name,
                 delivery_id=item.delivery_id,
                 pin=target_pin,
+                idempotency_key=item.idempotency_key,
             )
         else:
             status_text = item.message_payload or f"Update for delivery {item.delivery_id}"
+            item.status = NotificationDeliveryStatus.DISPATCHING
+            item.updated_at = now
+            db.commit()
+
             dispatch_res = active_provider.send_status_alert(
                 recipient_phone=item.recipient_phone,
                 recipient_name=item.recipient_name or "Recipient",
                 delivery_id=item.delivery_id,
                 status_message=status_text,
+                idempotency_key=item.idempotency_key,
             )
 
         # Inspect provider response
@@ -879,6 +958,7 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
         item.provider = dispatch_res.provider
         if getattr(dispatch_res, "message_id", None):
             item.provider_message_id = dispatch_res.message_id
+            item.status_reconciled_at = datetime.now(timezone.utc)
 
         if dispatch_res.status in [NotificationDeliveryStatus.SENT, NotificationDeliveryStatus.SIMULATED]:
             item.sent_at = now
@@ -905,10 +985,9 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
                 backoff_seconds = 30 * (2 ** (item.retry_count - 1))
                 item.next_attempt_at = now + timedelta(seconds=backoff_seconds)
 
-        # Release lease
+        # Release lease and persist immediately per item to eliminate crash window
         item.locked_at = None
         item.locked_by = None
+        db.commit()
         processed += 1
-
-    db.commit()
     return processed

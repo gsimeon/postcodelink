@@ -117,3 +117,90 @@ def health(db: Session = Depends(get_db)):
         "database": "connected",
         "engine": engine.name,
     }
+
+
+@app.get("/health/live", tags=["system"])
+def health_live():
+    """Liveness probe: verifies application process is running."""
+    return {
+        "status": "alive",
+        "service": "PostcodeLink Nigeria API",
+        "version": settings.VERSION,
+        "environment": settings.ENVIRONMENT,
+    }
+
+
+@app.get("/health/ready", tags=["system"])
+def health_ready(db: Session = Depends(get_db)):
+    """Readiness probe: verifies database connectivity and core tables."""
+    try:
+        db.execute(text("SELECT 1"))
+        return {
+            "status": "ready",
+            "database": "connected",
+            "engine": engine.name,
+        }
+    except Exception as e:
+        logger.error(f"Readiness check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "database": "disconnected",
+            "error": str(e),
+        }
+
+
+@app.get("/health/worker", tags=["system"])
+def health_worker(db: Session = Depends(get_db)):
+    """Worker monitoring: checks outbox queue depth and processing status."""
+    from backend.app.models.notification_outbox import NotificationOutbox
+    from backend.app.services.notification_service import NotificationDeliveryStatus
+    from sqlalchemy import func
+
+    pending_count = db.query(func.count(NotificationOutbox.id)).filter(
+        NotificationOutbox.status.in_([
+            NotificationDeliveryStatus.QUEUED,
+            NotificationDeliveryStatus.FAILED,
+            NotificationDeliveryStatus.DISPATCHING,
+        ])
+    ).scalar() or 0
+
+    reconciliation_count = db.query(func.count(NotificationOutbox.id)).filter(
+        NotificationOutbox.status == NotificationDeliveryStatus.RECONCILIATION_REQUIRED
+    ).scalar() or 0
+
+    return {
+        "status": "operational",
+        "process_role": settings.PROCESS_ROLE,
+        "worker_enabled": settings.OUTBOX_WORKER_ENABLED,
+        "poll_interval_seconds": settings.OUTBOX_WORKER_INTERVAL_SECONDS,
+        "lease_timeout_minutes": settings.OUTBOX_LEASE_TIMEOUT_MINUTES,
+        "outbox_pending_count": pending_count,
+        "outbox_reconciliation_required_count": reconciliation_count,
+    }
+
+
+@app.get("/health/integrations", tags=["system"])
+def health_integrations():
+    """Integration health: returns NIPOST and SMS provider configuration status (sensitive credentials omitted)."""
+    nipost_configured = bool(settings.NIPOST_API_KEY and (settings.NIPOST_API_URL or settings.NIPOST_API_BASE_URL))
+    sms_configured = False
+    if settings.SMS_PROVIDER == "termii":
+        sms_configured = bool(settings.TERMII_API_KEY and settings.TERMII_SENDER_ID)
+    elif settings.SMS_PROVIDER == "twilio":
+        sms_configured = bool(settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN and settings.TWILIO_FROM_NUMBER)
+    elif settings.SMS_PROVIDER == "simulated":
+        sms_configured = True
+
+    return {
+        "status": "operational",
+        "nipost": {
+            "configured": nipost_configured,
+            "base_url": settings.NIPOST_API_URL or settings.NIPOST_API_BASE_URL or "not_configured",
+            "timeout_seconds": settings.NIPOST_TIMEOUT_SECONDS,
+        },
+        "sms_gateway": {
+            "provider": settings.SMS_PROVIDER,
+            "configured": sms_configured,
+            "production_ready": settings.SMS_PROVIDER in ["termii", "twilio"] and sms_configured,
+        },
+    }

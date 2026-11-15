@@ -25,11 +25,13 @@ class NotificationChannel(str, Enum):
 
 class NotificationDeliveryStatus(str, Enum):
     QUEUED = "QUEUED"
+    DISPATCHING = "DISPATCHING"
     SENT = "SENT"
     SIMULATED = "SIMULATED"
     FAILED = "FAILED"
     SUPERSEDED = "SUPERSEDED"
     RECONCILED = "RECONCILED"
+    RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
 
 
 class NotificationDispatchResult(BaseModel):
@@ -40,6 +42,7 @@ class NotificationDispatchResult(BaseModel):
     message_preview: str
     error_details: Optional[str] = None
     message_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
 
 
 class BaseNotificationProvider(ABC):
@@ -50,6 +53,7 @@ class BaseNotificationProvider(ABC):
         recipient_name: str,
         delivery_id: str,
         pin: str,
+        idempotency_key: Optional[str] = None,
     ) -> NotificationDispatchResult:
         """Dispatch delivery PIN out-of-band to recipient."""
         pass
@@ -61,6 +65,7 @@ class BaseNotificationProvider(ABC):
         recipient_name: str,
         delivery_id: str,
         status_message: str,
+        idempotency_key: Optional[str] = None,
     ) -> NotificationDispatchResult:
         """Dispatch delivery status notification out-of-band to recipient."""
         pass
@@ -135,6 +140,7 @@ class TermiiNotificationProvider(BaseNotificationProvider):
         recipient_name: str,
         delivery_id: str,
         pin: str,
+        idempotency_key: Optional[str] = None,
     ) -> NotificationDispatchResult:
         masked = mask_phone(recipient_phone)
         logger.info(
@@ -152,6 +158,7 @@ class TermiiNotificationProvider(BaseNotificationProvider):
                 provider="termii",
                 message_preview="Invalid recipient phone format.",
                 error_details=str(exc),
+                idempotency_key=idempotency_key,
             )
 
         message = f"Your PostcodeLink delivery confirmation PIN is {pin}. Do not share this code."
@@ -163,6 +170,9 @@ class TermiiNotificationProvider(BaseNotificationProvider):
             "channel": "generic",
             "api_key": self.api_key,
         }
+        if idempotency_key:
+            payload["client_reference"] = idempotency_key
+            payload["sms_id"] = idempotency_key
 
         try:
             resp = httpx.post(self.base_url, json=payload, timeout=self.timeout)
@@ -274,6 +284,7 @@ class TwilioNotificationProvider(BaseNotificationProvider):
         recipient_name: str,
         delivery_id: str,
         pin: str,
+        idempotency_key: Optional[str] = None,
     ) -> NotificationDispatchResult:
         masked = mask_phone(recipient_phone)
         logger.info(
@@ -291,13 +302,21 @@ class TwilioNotificationProvider(BaseNotificationProvider):
                 provider="twilio",
                 message_preview="Invalid recipient phone format.",
                 error_details=str(exc),
+                idempotency_key=idempotency_key,
             )
 
         message = f"Your PostcodeLink delivery confirmation PIN is {pin}. Do not share this code."
+        req_headers = {}
+        post_data = {"To": e164_phone, "From": self.from_number, "Body": message}
+        if idempotency_key:
+            req_headers["Idempotency-Key"] = idempotency_key
+            post_data["ClientReference"] = idempotency_key
+
         try:
             resp = httpx.post(
                 self.base_url,
-                data={"To": e164_phone, "From": self.from_number, "Body": message},
+                data=post_data,
+                headers=req_headers if req_headers else None,
                 auth=(self.account_sid, self.auth_token),
                 timeout=self.timeout,
             )
@@ -384,25 +403,39 @@ class TwilioNotificationProvider(BaseNotificationProvider):
 class SimulatedNotificationProvider(BaseNotificationProvider):
     """Development/Test simulated provider. Strictly avoids logging plaintext PINs."""
 
+    _shared_dispatched_idempotency_keys: Dict[str, NotificationDispatchResult] = {}
+
+    def __init__(self):
+        self._dispatched_idempotency_keys: Dict[str, NotificationDispatchResult] = self._shared_dispatched_idempotency_keys
+
     def send_delivery_pin(
         self,
         recipient_phone: str,
         recipient_name: str,
         delivery_id: str,
         pin: str,
+        idempotency_key: Optional[str] = None,
     ) -> NotificationDispatchResult:
+        if idempotency_key and idempotency_key in self._dispatched_idempotency_keys:
+            logger.info(f"[Simulated Gateway] Idempotency match for key '{idempotency_key}'. Returning cached result.")
+            return self._dispatched_idempotency_keys[idempotency_key]
+
         masked = mask_phone(recipient_phone)
         logger.info(
             f"[Simulated Gateway] Out-of-band notification simulated for recipient {masked} on Order {delivery_id}. (Development mode)"
         )
-        return NotificationDispatchResult(
+        res = NotificationDispatchResult(
             status=NotificationDeliveryStatus.SIMULATED,
             channel="Simulated SMS Gateway (Local Sandbox)",
             recipient_masked=masked,
             provider="simulated",
             message_preview="Notification simulated in local environment. In production, PIN is sent via Termii/Twilio SMS.",
             message_id=f"sim_{secrets.token_hex(8)}",
+            idempotency_key=idempotency_key,
         )
+        if idempotency_key:
+            self._dispatched_idempotency_keys[idempotency_key] = res
+        return res
 
     def send_status_alert(
         self,
@@ -410,18 +443,27 @@ class SimulatedNotificationProvider(BaseNotificationProvider):
         recipient_name: str,
         delivery_id: str,
         status_message: str,
+        idempotency_key: Optional[str] = None,
     ) -> NotificationDispatchResult:
+        if idempotency_key and idempotency_key in self._dispatched_idempotency_keys:
+            return self._dispatched_idempotency_keys[idempotency_key]
+
         masked = mask_phone(recipient_phone)
         logger.info(
             f"[Simulated Gateway] Status alert simulated for recipient {masked} on Order {delivery_id}: {status_message}"
         )
-        return NotificationDispatchResult(
+        res = NotificationDispatchResult(
             status=NotificationDeliveryStatus.SIMULATED,
             channel="Simulated SMS Gateway (Local Sandbox)",
             recipient_masked=masked,
             provider="simulated",
-            message_preview=f"Simulated alert: {status_message}",
+            message_preview="Status alert simulated.",
+            message_id=f"sim_{secrets.token_hex(8)}",
+            idempotency_key=idempotency_key,
         )
+        if idempotency_key:
+            self._dispatched_idempotency_keys[idempotency_key] = res
+        return res
 
 
 def get_notification_provider(provider_type: Optional[str] = None) -> BaseNotificationProvider:

@@ -37,7 +37,12 @@ class PostcodeLookupResponse(BaseModel):
     matches: List[PostcodeRecordSchema]
     is_live_nipost: bool = False
     dataset_version: str = "2024.2"
-    provenance: str = "NIPOST National Pilot Directory Edition 2024.2"
+    provenance: str = "PostcodeLink Local Reference Dataset"
+    verification_source: str = "local_nipost_reference_dataset"
+    verification_status: str = "local_reference"
+    fallback_reason: Optional[str] = None
+    upstream_status: Optional[str] = None
+    upstream_error: Optional[str] = None
 
 
 class CleanseAddressRequest(BaseModel):
