@@ -219,12 +219,29 @@ def test_reconciliation_endpoints_rbac_and_privacy_masking():
 
     db = SessionLocal()
     try:
-        # Seed an item in RECONCILIATION_REQUIRED
-        item = NotificationOutbox(
-            delivery_id="PL-RECON-RBAC-01",
-            notification_type="otp_delivery_pin",
+        # Seed parent Delivery record to satisfy PostgreSQL foreign key constraint
+        delivery = Delivery(
+            id="PL-RECON-RBAC-01",
             recipient_phone="+2348039876543",
             recipient_name="Privacy Recipient",
+            destination_state="Lagos",
+            destination_area="Ikeja",
+            destination_address="10 Test St",
+            package_description="Privacy Test Package",
+            postcode_input="100271",
+            status=DeliveryStatus.OUT_FOR_DELIVERY,
+            otp_hash=hash_otp("123456"),
+            tracking_token="token_privacy_rbac_12345678901234567890",
+        )
+        db.add(delivery)
+        db.commit()
+
+        # Seed an item in RECONCILIATION_REQUIRED
+        item = NotificationOutbox(
+            delivery_id=delivery.id,
+            notification_type="otp_delivery_pin",
+            recipient_phone=delivery.recipient_phone,
+            recipient_name=delivery.recipient_name,
             status=NotificationDeliveryStatus.RECONCILIATION_REQUIRED,
             idempotency_key="recon_key_rbac_01",
             retry_count=2,
@@ -258,6 +275,7 @@ def test_reconciliation_endpoints_rbac_and_privacy_masking():
         assert "***" in target["recipient_phone_masked"]
     finally:
         db.query(NotificationOutbox).filter(NotificationOutbox.delivery_id == "PL-RECON-RBAC-01").delete()
+        db.query(Delivery).filter(Delivery.id == "PL-RECON-RBAC-01").delete()
         db.commit()
         db.close()
 
