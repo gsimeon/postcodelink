@@ -1,12 +1,12 @@
 """Postcode directory service and Nigerian address cleanser.
 
-NIPOST Reference Provenance:
-- Source: NIPOST (Nigerian Postal Service) Official Digital Postcode Directory
-- Edition: National Pilot Directory Edition
+PostcodeLink Local Reference Provenance:
+- Source: PostcodeLink Demonstration Reference Dataset (independent local reference)
+- Edition: Demonstration & Reference Edition
 - Version: 2024.2
-- Publication Date: 2024-06-01
 - States Covered (11): Lagos, Abuja FCT, Rivers, Oyo, Ogun, Kano, Kaduna, Enugu, Delta, Edo, Anambra
-- Standard: Official 6-digit postal codes (1st digit: Zone, 2nd-3rd digits: Dispatch district, 4th-6th digits: Delivery office)
+- Note: Live official national postcode validation and autofill are provided via the NIPOST API client.
+  Local records are strictly categorized as local_reference and never represented as official government verification.
 """
 import re
 from typing import Optional, List, Dict, Any
@@ -16,14 +16,14 @@ from backend.app.schemas.postcode import CleanseAddressResponse, PostcodeRecordS
 
 DATASET_METADATA = {
     "version": "2024.2",
-    "edition": "National Pilot Directory Edition",
-    "source": "NIPOST (Nigerian Postal Service) Official Digital Postcode Directory",
+    "edition": "Local Demonstration & Reference Edition",
+    "source": "PostcodeLink Local Reference & Demonstration Dataset",
     "publication_date": "2024-06-01",
     "states_covered": [
         "Lagos", "Abuja FCT", "Rivers", "Oyo", "Ogun",
         "Kano", "Kaduna", "Enugu", "Delta", "Edo", "Anambra"
     ],
-    "status": "verified_pilot_dataset",
+    "status": "local_reference",
 }
 
 # Legacy postal references and demonstration fixtures (multi-state pilot & format demonstration)

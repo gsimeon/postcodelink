@@ -70,6 +70,17 @@ class BaseNotificationProvider(ABC):
         """Dispatch delivery status notification out-of-band to recipient."""
         pass
 
+    def check_message_status(
+        self,
+        idempotency_key: str,
+        provider_message_id: Optional[str] = None,
+    ) -> Optional[NotificationDispatchResult]:
+        """Check status of a prior dispatch with the provider for crash recovery and reconciliation.
+        
+        Returns NotificationDispatchResult if status is known, or None if status cannot be determined.
+        """
+        return None
+
 
 def mask_phone(phone: str) -> str:
     """Mask phone for privacy in logs (e.g. 080****5678)."""
@@ -261,6 +272,33 @@ class TermiiNotificationProvider(BaseNotificationProvider):
                 error_details=str(exc),
             )
 
+    def check_message_status(
+        self,
+        idempotency_key: str,
+        provider_message_id: Optional[str] = None,
+    ) -> Optional[NotificationDispatchResult]:
+        """Check status of a message on Termii gateway for crash recovery and status reconciliation."""
+        if not provider_message_id:
+            return None
+        try:
+            url = f"https://api.ng.termii.com/api/sms/inbox"
+            params = {"api_key": self.api_key, "message_id": provider_message_id}
+            resp = httpx.get(url, params=params, timeout=self.timeout)
+            if resp.status_code == 200:
+                data = resp.json() if callable(getattr(resp, "json", None)) else {}
+                if isinstance(data, dict) and data.get("message_id") == provider_message_id:
+                    return NotificationDispatchResult(
+                        status=NotificationDeliveryStatus.SENT,
+                        channel="Termii SMS Gateway",
+                        recipient_masked="***",
+                        provider="termii",
+                        message_preview="Message delivery verified with Termii.",
+                        message_id=provider_message_id,
+                    )
+        except Exception as exc:
+            logger.warning(f"[Termii Gateway] Status check exception for {provider_message_id}: {exc}")
+        return None
+
 
 class TwilioNotificationProvider(BaseNotificationProvider):
     """Twilio Provider for international and WhatsApp dispatch."""
@@ -399,6 +437,43 @@ class TwilioNotificationProvider(BaseNotificationProvider):
                 error_details=str(exc),
             )
 
+    def check_message_status(
+        self,
+        idempotency_key: str,
+        provider_message_id: Optional[str] = None,
+    ) -> Optional[NotificationDispatchResult]:
+        """Check status of a message on Twilio gateway for crash recovery and status reconciliation."""
+        if not provider_message_id:
+            return None
+        try:
+            url = f"https://api.twilio.com/2010-04-01/Accounts/{self.account_sid}/Messages/{provider_message_id}.json"
+            resp = httpx.get(url, auth=(self.account_sid, self.auth_token), timeout=self.timeout)
+            if resp.status_code == 200:
+                data = resp.json() if callable(getattr(resp, "json", None)) else {}
+                tw_status = data.get("status", "").lower()
+                if tw_status in ["queued", "sending", "sent", "delivered"]:
+                    return NotificationDispatchResult(
+                        status=NotificationDeliveryStatus.SENT,
+                        channel="Twilio SMS Gateway",
+                        recipient_masked=mask_phone(data.get("to", "***")),
+                        provider="twilio",
+                        message_preview="Message confirmed sent by Twilio.",
+                        message_id=provider_message_id,
+                    )
+                elif tw_status in ["failed", "undelivered"]:
+                    return NotificationDispatchResult(
+                        status=NotificationDeliveryStatus.FAILED,
+                        channel="Twilio SMS Gateway",
+                        recipient_masked=mask_phone(data.get("to", "***")),
+                        provider="twilio",
+                        message_preview="Message delivery failed on Twilio.",
+                        error_details=data.get("error_message") or f"Twilio status: {tw_status}",
+                        message_id=provider_message_id,
+                    )
+        except Exception as exc:
+            logger.warning(f"[Twilio Gateway] Status check exception for {provider_message_id}: {exc}")
+        return None
+
 
 class SimulatedNotificationProvider(BaseNotificationProvider):
     """Development/Test simulated provider. Strictly avoids logging plaintext PINs."""
@@ -437,6 +512,20 @@ class SimulatedNotificationProvider(BaseNotificationProvider):
             self._dispatched_idempotency_keys[idempotency_key] = res
         return res
 
+    def check_message_status(
+        self,
+        idempotency_key: str,
+        provider_message_id: Optional[str] = None,
+    ) -> Optional[NotificationDispatchResult]:
+        """Check status of simulated notification by idempotency key or provider message ID."""
+        if idempotency_key in self._dispatched_idempotency_keys:
+            return self._dispatched_idempotency_keys[idempotency_key]
+        if provider_message_id:
+            for item in self._dispatched_idempotency_keys.values():
+                if item.message_id == provider_message_id:
+                    return item
+        return None
+
     def send_status_alert(
         self,
         recipient_phone: str,
@@ -464,6 +553,20 @@ class SimulatedNotificationProvider(BaseNotificationProvider):
         if idempotency_key:
             self._dispatched_idempotency_keys[idempotency_key] = res
         return res
+
+    def check_message_status(
+        self,
+        idempotency_key: str,
+        provider_message_id: Optional[str] = None,
+    ) -> Optional[NotificationDispatchResult]:
+        """Check status of simulated notification by idempotency key or provider message ID."""
+        if idempotency_key in self._dispatched_idempotency_keys:
+            return self._dispatched_idempotency_keys[idempotency_key]
+        if provider_message_id:
+            for item in self._dispatched_idempotency_keys.values():
+                if item.message_id == provider_message_id:
+                    return item
+        return None
 
 
 def get_notification_provider(provider_type: Optional[str] = None) -> BaseNotificationProvider:

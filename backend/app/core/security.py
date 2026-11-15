@@ -2,12 +2,15 @@
 import hmac
 import hashlib
 import secrets
+import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, Tuple
 import bcrypt
 import jwt
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from backend.app.config import settings
+
+logger = logging.getLogger("security")
 
 
 def hash_password(password: str) -> str:
@@ -109,17 +112,26 @@ def decrypt_authenticated_pin(
     delivery_id: Optional[str] = None,
     aad: Optional[bytes] = None,
     allow_legacy: bool = False,
+    allow_unbound: bool = False,
 ) -> Optional[str]:
     """Decrypt and verify authenticated delivery PIN envelope using AES-256-GCM with key rotation.
     
     Supports:
     - Primary format v2: AES-256-GCM with strict context-bound AAD and key rotation (OUTBOX_PREVIOUS_ENCRYPTION_KEYS).
+    - Context enforcement: Active delivery decryption requires delivery context (delivery_id or aad).
+      Empty-AAD envelopes are strictly rejected unless allow_unbound=True is explicitly set for recovery.
     - Optional legacy migration: v1 HMAC-SHA256 and unversioned hex stream cipher ONLY when allow_legacy=True.
     
     Returns the plaintext PIN if valid and authentic.
     Returns None if the payload has been tampered with or fails strict AAD verification.
     """
     if not payload or not isinstance(payload, str):
+        return None
+
+    # Normal delivery PIN decryption strictly requires context
+    expected_aad = aad if aad is not None else (f"delivery:{delivery_id}".encode("utf-8") if delivery_id else None)
+    if not allow_unbound and expected_aad is None and not allow_legacy:
+        logger.warning("Decryption rejected: delivery context is required for active PIN decryption")
         return None
 
     primary_key = master_key or settings.OUTBOX_ENCRYPTION_KEY or settings.SECRET_KEY
@@ -160,10 +172,14 @@ def decrypt_authenticated_pin(
         else:
             return None
 
+        # Context enforcement: Empty-AAD envelopes are strictly rejected in delivery workflows
+        if not allow_unbound and payload_aad == b"":
+            logger.warning("Decryption rejected: payload envelope has empty AAD; unbound envelopes are rejected in delivery workflows")
+            return None
+
         # Strict bidirectional AAD binding:
-        # 1. If payload was encrypted with AAD (e.g. bound to a delivery), caller MUST supply the matching delivery context.
-        # 2. If caller expects a delivery ID / AAD, payload AAD MUST match exactly (empty AAD is strictly rejected).
-        expected_aad = aad if aad is not None else (f"delivery:{delivery_id}".encode("utf-8") if delivery_id else None)
+        # 1. If payload was encrypted with AAD, caller MUST supply the matching delivery context.
+        # 2. If caller expects a delivery ID / AAD, payload AAD MUST match exactly.
         if payload_aad != b"" and (expected_aad is None or payload_aad != expected_aad):
             return None
         if expected_aad is not None and (payload_aad == b"" or payload_aad != expected_aad):
@@ -243,6 +259,7 @@ def migrate_legacy_transit_pin(
         master_key=master_key,
         delivery_id=delivery_id,
         allow_legacy=True,
+        allow_unbound=True,
     )
     if not plain:
         return None, None

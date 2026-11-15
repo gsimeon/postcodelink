@@ -6,12 +6,14 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Header
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
+from sqlalchemy import update, case, and_, or_
 
 from backend.app.database import get_db
 from backend.app.models.api_key import ApiKey
 from backend.app.models.profile import Profile
 from backend.app.models.enums import AppRole
 from backend.app.core.auth_deps import require_roles
+from backend.app.core.rate_limiter import check_api_key_rate_limit
 
 router = APIRouter(prefix="/api-keys", tags=["api-keys"])
 
@@ -79,38 +81,45 @@ def get_api_key_merchant(
                 headers={"WWW-Authenticate": "ApiKey"},
             )
 
-    # Monthly period rollover: if moving into a new calendar month (YYYY-MM), reset period count
+    # 1. Enforce per-minute sliding window rate limiting
+    check_api_key_rate_limit(key_record.id, getattr(key_record, "rate_limit_per_minute", 60))
+
+    # 2. Concurrency-safe single atomic database operation:
+    # Handles both calendar-month period rollover and quota-conditioned usage increment together
     now_period = now.strftime("%Y-%m")
-    if getattr(key_record, "current_period", None) != now_period:
-        key_record.current_period = now_period
-        key_record.period_usage_count = 0
-        db.commit()
-
-    # Pre-check quota to return informative error message
-    current_period_count = getattr(key_record, "period_usage_count", 0)
-    if current_period_count >= key_record.monthly_quota:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Monthly API key quota of {key_record.monthly_quota} requests exceeded for period {now_period}.",
+    stmt = (
+        update(ApiKey)
+        .where(
+            ApiKey.id == key_record.id,
+            ApiKey.is_active == True,
+            ApiKey.is_revoked == False,
+            or_(
+                # Scenario A: Same billing period with quota capacity remaining
+                and_(
+                    ApiKey.current_period == now_period,
+                    ApiKey.period_usage_count < ApiKey.monthly_quota,
+                ),
+                # Scenario B: Rollover into new calendar period with non-zero quota
+                and_(
+                    ApiKey.current_period != now_period,
+                    ApiKey.monthly_quota >= 1,
+                ),
+            ),
         )
-
-    # Concurrency-safe atomic database-level increment conditioned on quota
-    updated_rows = db.query(ApiKey).filter(
-        ApiKey.id == key_record.id,
-        ApiKey.is_active == True,
-        ApiKey.is_revoked == False,
-        ApiKey.period_usage_count < ApiKey.monthly_quota,
-    ).update(
-        {
-            ApiKey.period_usage_count: ApiKey.period_usage_count + 1,
-            ApiKey.usage_count: ApiKey.usage_count + 1,
-            ApiKey.last_used_at: now,
-        },
-        synchronize_session=False,
+        .values(
+            period_usage_count=case(
+                (ApiKey.current_period == now_period, ApiKey.period_usage_count + 1),
+                else_=1,
+            ),
+            current_period=now_period,
+            usage_count=ApiKey.usage_count + 1,
+            last_used_at=now,
+        )
     )
+    result = db.execute(stmt)
     db.commit()
 
-    if updated_rows == 0:
+    if result.rowcount == 0:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Monthly API key quota of {key_record.monthly_quota} requests exceeded for period {now_period}.",
@@ -139,7 +148,7 @@ def api_create_api_key(
         name=req.name.strip(),
         key_prefix=prefix,
         hashed_key=hashed,
-        monthly_quota=max(100, req.monthly_quota),
+        monthly_quota=max(1, req.monthly_quota),
         current_period=now.strftime("%Y-%m"),
         period_usage_count=0,
         usage_count=0,
@@ -200,15 +209,26 @@ def api_rotate_api_key(
     hashed = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
     now = datetime.now(timezone.utc)
+    now_period = now.strftime("%Y-%m")
+
+    # Quota inheritance: new credential inherits current billing period usage count from rotated key
+    # This prevents merchants from resetting their monthly allowance via credential rotation
+    inherited_period_usage = old_key.period_usage_count if getattr(old_key, "current_period", None) == now_period else 0
+    inherited_usage = getattr(old_key, "usage_count", 0)
+
+    # Invalidate and revoke the old credential immediately
+    old_key.is_active = False
+    old_key.is_revoked = True
+
     new_key = ApiKey(
         merchant_id=current_user.id,
         name=f"{old_key.name} (Rotated)",
         key_prefix=prefix,
         hashed_key=hashed,
         monthly_quota=old_key.monthly_quota,
-        current_period=now.strftime("%Y-%m"),
-        period_usage_count=0,
-        usage_count=0,
+        current_period=now_period,
+        period_usage_count=inherited_period_usage,
+        usage_count=inherited_usage,
         rate_limit_per_minute=old_key.rate_limit_per_minute,
         is_active=True,
         is_revoked=False,

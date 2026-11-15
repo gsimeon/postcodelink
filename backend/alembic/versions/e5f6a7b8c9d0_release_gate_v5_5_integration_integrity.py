@@ -34,20 +34,26 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column('is_revoked', sa.Boolean(), nullable=False, server_default=sa.false()))
 
     # 3. Postcode provenance audit: Reclassify local demonstration postcodes to local_reference
+    # Strictly target demonstration fixtures and local reference records, preserving legitimate NIPOST records
     op.execute(
         sa.text(
             "UPDATE postcodes "
             "SET verification_status = 'local_reference', "
             "    provenance = 'PostcodeLink National Postcode Format Demonstration Reference' "
-            "WHERE code IN ('FC-02-A09-DB-09', 'LA-01-A04-IK-02')"
+            "WHERE code IN ('FC-02-A09-DB-09', 'LA-01-A04-IK-02') "
+            "   OR provenance LIKE '%Demonstration%' "
+            "   OR provenance LIKE '%Local Reference%' "
+            "   OR provenance LIKE '%Pilot%' "
+            "   OR (verification_status = 'official_verified' AND provenance NOT LIKE '%NIPOST Official%')"
         )
     )
-    # Ensure all local pilot records have verification_status = 'local_reference'
+    # Ensure any legitimate NIPOST verified record retains official_verified status
     op.execute(
         sa.text(
             "UPDATE postcodes "
-            "SET verification_status = 'local_reference' "
-            "WHERE verification_status = 'official_verified'"
+            "SET verification_status = 'official_verified' "
+            "WHERE provenance LIKE '%NIPOST Official%' "
+            "  AND (verification_status IS NULL OR verification_status = 'local_reference')"
         )
     )
 

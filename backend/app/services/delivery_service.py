@@ -45,6 +45,8 @@ from backend.app.services.notification_service import (
 
 logger = logging.getLogger("delivery_service")
 
+WORKER_LAST_HEARTBEAT: Optional[datetime] = None
+
 ACTIVE_WORKLOAD_STATUSES = {
     DeliveryStatus.ASSIGNED,
     DeliveryStatus.PICKED_UP,
@@ -74,23 +76,29 @@ def decrypt_transit_pin(
     secret_key: Optional[str] = None,
     delivery_id: Optional[str] = None,
     allow_legacy: bool = False,
+    allow_unbound: bool = False,
 ) -> Optional[str]:
     """Decrypts and verifies authenticated transit PIN envelope using AES-256-GCM and key rotation.
     
-    Strictly enforces context-bound delivery AAD when delivery_id is supplied.
+    Strictly requires context-bound delivery AAD (delivery_id) for active delivery decryption.
     Legacy v1 and unversioned envelopes are strictly rejected unless allow_legacy=True.
+    Unbound envelopes are strictly rejected unless allow_unbound=True.
     """
+    if not delivery_id and not allow_unbound:
+        logger.warning("Decryption rejected: delivery_id context required for transit PIN decryption")
+        return None
+
     if secret_key:
-        res = decrypt_authenticated_pin(token, master_key=secret_key, delivery_id=delivery_id, allow_legacy=allow_legacy)
+        res = decrypt_authenticated_pin(token, master_key=secret_key, delivery_id=delivery_id, allow_legacy=allow_legacy, allow_unbound=allow_unbound)
         if res is not None:
             return res
     outbox_key = getattr(settings, "OUTBOX_ENCRYPTION_KEY", None)
     if outbox_key and outbox_key != secret_key:
-        res = decrypt_authenticated_pin(token, master_key=outbox_key, delivery_id=delivery_id, allow_legacy=allow_legacy)
+        res = decrypt_authenticated_pin(token, master_key=outbox_key, delivery_id=delivery_id, allow_legacy=allow_legacy, allow_unbound=allow_unbound)
         if res is not None:
             return res
     if settings.SECRET_KEY != secret_key and settings.SECRET_KEY != outbox_key:
-        res = decrypt_authenticated_pin(token, master_key=settings.SECRET_KEY, delivery_id=delivery_id, allow_legacy=allow_legacy)
+        res = decrypt_authenticated_pin(token, master_key=settings.SECRET_KEY, delivery_id=delivery_id, allow_legacy=allow_legacy, allow_unbound=allow_unbound)
         if res is not None:
             return res
     return None
@@ -758,7 +766,9 @@ def resend_delivery_pin(db: Session, delivery_id: str, current_user: Profile) ->
 
 def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Optional[str] = None) -> int:
     """Process pending/queued outbox notification items with row-level leasing, backoff, and error classification."""
+    global WORKER_LAST_HEARTBEAT
     now = datetime.now(timezone.utc)
+    WORKER_LAST_HEARTBEAT = now
     assigned_worker = worker_id or f"worker-{secrets.token_hex(4)}"
 
     # Determine dialect for SKIP LOCKED support
@@ -830,26 +840,46 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
         if item.status == NotificationDeliveryStatus.DISPATCHING and item.retry_count > 1:
             logger.warning(
                 f"[Outbox Worker] Item {item.id} found in DISPATCHING state from prior worker crash. "
-                "Checking provider idempotency or flagging for reconciliation."
+                "Checking provider status for crash recovery."
             )
-            # If simulated provider or provider has recorded this idempotency key
-            if active_provider and hasattr(active_provider, "_dispatched_idempotency_keys"):
-                cached = active_provider._dispatched_idempotency_keys.get(item.idempotency_key)
-                if cached and cached.status in [NotificationDeliveryStatus.SENT, NotificationDeliveryStatus.SIMULATED]:
-                    item.status = cached.status
-                    item.provider_message_id = cached.message_id
-                    item.status_reconciled_at = now
-                    item.sent_at = item.sent_at or now
-                    item.locked_at = None
-                    item.locked_by = None
-                    db.commit()
-                    processed += 1
-                    continue
+            # 1. Attempt automated provider reconciliation
+            reconciled_res = None
+            if active_provider and hasattr(active_provider, "check_message_status"):
+                try:
+                    reconciled_res = active_provider.check_message_status(
+                        idempotency_key=item.idempotency_key,
+                        provider_message_id=getattr(item, "provider_message_id", None),
+                    )
+                except Exception as exc:
+                    logger.warning(f"[Outbox Worker] Provider status check failed for item {item.id}: {exc}")
 
-            # If unconfirmed whether provider sent the SMS, route to RECONCILIATION_REQUIRED to prevent duplicate SMS
+            if reconciled_res and reconciled_res.status in [NotificationDeliveryStatus.SENT, NotificationDeliveryStatus.SIMULATED]:
+                logger.info(f"[Outbox Worker] Item {item.id} confirmed accepted/sent by provider during crash recovery.")
+                item.status = reconciled_res.status
+                item.provider_message_id = reconciled_res.message_id or item.provider_message_id
+                item.status_reconciled_at = now
+                item.sent_at = item.sent_at or now
+                item.locked_at = None
+                item.locked_by = None
+                db.commit()
+                processed += 1
+                continue
+            elif reconciled_res and reconciled_res.status == NotificationDeliveryStatus.FAILED:
+                logger.info(f"[Outbox Worker] Item {item.id} confirmed rejected/failed by provider during crash recovery.")
+                item.status = NotificationDeliveryStatus.FAILED
+                item.failure_classification = "provider_rejection"
+                item.error_details = reconciled_res.error_details or "Provider rejected message."
+                item.locked_at = None
+                item.locked_by = None
+                db.commit()
+                processed += 1
+                continue
+
+            # 2. If unconfirmed whether provider accepted or sent the SMS, route to RECONCILIATION_REQUIRED
+            # to prevent duplicate SMS (at-least-once dispatch with duplicate prevention)
             item.status = NotificationDeliveryStatus.RECONCILIATION_REQUIRED
             item.failure_classification = "unconfirmed_crash_window"
-            item.error_details = "Worker crashed during HTTP dispatch; flagged for reconciliation to prevent duplicate SMS."
+            item.error_details = "Worker crashed during HTTP dispatch; provider status could not be verified automatically. Flagged for operator reconciliation."
             item.locked_at = None
             item.locked_by = None
             db.commit()

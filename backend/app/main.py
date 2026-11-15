@@ -2,7 +2,8 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, status
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -132,7 +133,11 @@ def health_live():
 
 @app.get("/health/ready", tags=["system"])
 def health_ready(db: Session = Depends(get_db)):
-    """Readiness probe: verifies database connectivity and core tables."""
+    """Readiness probe: verifies database connectivity and core tables.
+    
+    Returns HTTP 200 when database connectivity succeeds.
+    Returns HTTP 503 Service Unavailable when database check fails, omitting internal stack traces.
+    """
     try:
         db.execute(text("SELECT 1"))
         return {
@@ -142,19 +147,24 @@ def health_ready(db: Session = Depends(get_db)):
         }
     except Exception as e:
         logger.error(f"Readiness check failed: {e}")
-        return {
-            "status": "unhealthy",
-            "database": "disconnected",
-            "error": str(e),
-        }
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "status": "unready",
+                "database": "disconnected",
+                "error": "Database service is unavailable.",
+            },
+        )
 
 
 @app.get("/health/worker", tags=["system"])
 def health_worker(db: Session = Depends(get_db)):
-    """Worker monitoring: checks outbox queue depth and processing status."""
+    """Worker monitoring: checks outbox queue depth, active leases, heartbeat, and reconciliation items."""
     from backend.app.models.notification_outbox import NotificationOutbox
     from backend.app.services.notification_service import NotificationDeliveryStatus
+    from backend.app.services.delivery_service import WORKER_LAST_HEARTBEAT
     from sqlalchemy import func
+    from datetime import datetime, timezone
 
     pending_count = db.query(func.count(NotificationOutbox.id)).filter(
         NotificationOutbox.status.in_([
@@ -168,20 +178,32 @@ def health_worker(db: Session = Depends(get_db)):
         NotificationOutbox.status == NotificationDeliveryStatus.RECONCILIATION_REQUIRED
     ).scalar() or 0
 
+    now = datetime.now(timezone.utc)
+    worker_status = "operational"
+    heartbeat_str = None
+    if WORKER_LAST_HEARTBEAT:
+        heartbeat_str = WORKER_LAST_HEARTBEAT.isoformat()
+        if (now - WORKER_LAST_HEARTBEAT).total_seconds() > 600 and settings.OUTBOX_WORKER_ENABLED:
+            worker_status = "degraded"
+    elif settings.OUTBOX_WORKER_ENABLED and settings.PROCESS_ROLE in ["worker", "all_in_one"]:
+        worker_status = "idle"
+
     return {
-        "status": "operational",
+        "status": worker_status,
         "process_role": settings.PROCESS_ROLE,
         "worker_enabled": settings.OUTBOX_WORKER_ENABLED,
+        "last_heartbeat": heartbeat_str,
         "poll_interval_seconds": settings.OUTBOX_WORKER_INTERVAL_SECONDS,
         "lease_timeout_minutes": settings.OUTBOX_LEASE_TIMEOUT_MINUTES,
         "outbox_pending_count": pending_count,
         "outbox_reconciliation_required_count": reconciliation_count,
+        "reconciliation_alert": reconciliation_count > 0,
     }
 
 
 @app.get("/health/integrations", tags=["system"])
 def health_integrations():
-    """Integration health: returns NIPOST and SMS provider configuration status (sensitive credentials omitted)."""
+    """Integration health: returns NIPOST and SMS provider configuration and reachability status."""
     nipost_configured = bool(settings.NIPOST_API_KEY and (settings.NIPOST_API_URL or settings.NIPOST_API_BASE_URL))
     sms_configured = False
     if settings.SMS_PROVIDER == "termii":
@@ -191,8 +213,22 @@ def health_integrations():
     elif settings.SMS_PROVIDER == "simulated":
         sms_configured = True
 
+    overall_status = "operational"
+    if settings.ENVIRONMENT == "production":
+        if not sms_configured or settings.SMS_PROVIDER == "simulated":
+            overall_status = "degraded"
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "status": overall_status,
+                    "error": "Production SMS provider is not configured or set to simulated.",
+                    "nipost": {"configured": nipost_configured},
+                    "sms_gateway": {"provider": settings.SMS_PROVIDER, "configured": sms_configured},
+                },
+            )
+
     return {
-        "status": "operational",
+        "status": overall_status,
         "nipost": {
             "configured": nipost_configured,
             "base_url": settings.NIPOST_API_URL or settings.NIPOST_API_BASE_URL or "not_configured",

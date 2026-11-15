@@ -6,47 +6,45 @@ PostcodeLink bridges the gap between customer addresses (often described with in
 
 ---
 
-## Architecture & Security Hardening (Release Gate v5.5 Production Standard)
+## Architecture & Security Hardening (Release Gate v5.6 Production Standard)
 
-Following an in-depth security and architectural audit of the FastAPI backend and Next.js frontend, the platform has completed enterprise-grade hardening covering all Release Gate v5.5 requirements:
+Following an in-depth security and architectural audit of the FastAPI backend and Next.js frontend, the platform has completed enterprise-grade hardening covering all Release Gate v5.6 requirements:
 
-### 1. P1 — Strict Authenticated Cryptography (AES-256-GCM) & Delivery AAD Binding
-- **Strict AAD Enforcement**: Decryption of transit OTPs stored in `notification_outbox` requires an exact match between payload Authenticated Additional Data and the expected delivery context (`f"delivery:{delivery_id}".encode()`). Any envelope with empty AAD (`b""`) or mismatched delivery association is rejected immediately with verification failure.
+### 1. P1 — Strict Authenticated Cryptography (AES-256-GCM) & Delivery AAD Context
+- **Strict AAD Enforcement**: Decryption of transit OTPs stored in `notification_outbox` requires an exact match between payload Authenticated Additional Data and the expected delivery context (`f"delivery:{delivery_id}".encode()`). Any envelope with empty AAD (`b""`) or mismatched delivery association is rejected immediately with verification failure. Unbound decryption is strictly barred from active delivery workflows.
 - **Controlled Legacy Migration**: Legacy `v1:` HMAC and unversioned stream cipher decryption are strictly segregated into an explicit migration routine (`migrate_legacy_transit_pin`), upgrading legacy envelopes to versioned `v2:` envelopes on first processing while barring unauthenticated legacy payloads from active verification routines.
 - **Envelope Standard**: Versioned ciphertext envelopes format: `v2:<nonce_hex>:<aad_hex>:<ciphertext_and_tag_hex>`.
 
-### 2. P1 — Complete API Key Lifecycle & Atomic Monthly Quotas
-- **Key Issuance & Rotation**: 
-  - `POST /api/v1/api-keys/` — Issue new merchant API keys with custom monthly quotas and prefix `pkl_live_...`.
-  - `POST /api/v1/api-keys/{id}/rotate` — Atomically rotate keys, issuing a fresh key while revoking the previous key.
+### 2. P1 — API Key Lifecycle, Atomic Monthly Quota Rollover & Per-Minute Throttling
+- **Key Issuance & Rotation with Quota Inheritance**: 
+  - `POST /api/v1/api-keys/` — Issue new merchant API keys with custom monthly quotas and prefix `pl_live_...`.
+  - `POST /api/v1/api-keys/{id}/rotate` — Atomically rotate keys, issuing a fresh key while revoking the previous key. The new credential inherits the current billing period usage count, preventing quota reset bypasses via rotation.
   - `DELETE /api/v1/api-keys/{id}` — Immediate key revocation (`is_revoked = True`).
-- **Period-Based Quota Accounting**: Usage is tracked by billing month (`current_period = 'YYYY-MM'`), rolling over usage automatically at period boundaries.
-- **Atomic Database-Level Enforcement**: Quota decrements are executed via atomic SQL conditional updates (`UPDATE api_keys SET period_usage_count = period_usage_count + 1 WHERE id = :id AND period_usage_count < monthly_quota`), preventing concurrency races and returning HTTP 429 when quota is exhausted.
-- **Active Business API Enforcement**: Integration routes accept merchant API keys via `x-api-key` header with strict tenant isolation:
-  - Deliveries: `POST /api/v1/deliveries/`, `GET /api/v1/deliveries/`, `GET /api/v1/deliveries/{id}`, `POST /api/v1/deliveries/bulk`
-  - Address Intelligence: `GET /api/v1/postcodes/lookup`, `POST /api/v1/postcodes/cleanse`
-  - Directory: `GET /api/v1/customers/`, `POST /api/v1/customers/`, `GET /api/v1/customers/{id}`
-  - Operations & Telemetry: `GET /api/v1/operators/`, `GET /api/v1/operators/{id}`, `GET /api/v1/analytics/overview`
+- **Atomic Single-Operation Month Rollover**: Period transition and quota-conditioned usage increments occur within a single atomic SQL statement (`case` expression), eliminating concurrent race windows and lost increments during calendar-month boundaries.
+- **Per-Minute Rate Limiting**: In addition to monthly allowances, keys enforce sliding-window request limits (`rate_limit_per_minute`, default 60), returning HTTP 429 with `Retry-After` headers.
+- **Active Business API Enforcement**: Integration routes accept merchant API keys via `x-api-key` header with strict tenant isolation across deliveries, customers, postcodes, operators, and analytics.
 
-### 3. P1 — Outbox Reliability & Crash-Window Reconciliation
+### 3. P1 — Outbox Reliability, Real-Provider Status Reconciliation & Operator Workflows
 - **Delivery Guarantee**: At-least-once delivery with idempotent deduplication and crash-window reconciliation.
 - **Crash-Window Elimination**: Worker records `DISPATCHING` intent and provider-supported `idempotency_key` (`outbox_{item_id}_{delivery_version}_{retry_count}`) in the database prior to network dispatch. When provider acknowledgment is received, `provider_message_id` is immediately persisted.
-- **Failure Recovery & State Machine**: On process crash recovery, unacknowledged dispatch attempts undergo automated status reconciliation using the idempotency key without duplicate SMS dispatch. When network uncertainty persists, items transition to explicit `RECONCILIATION_REQUIRED` state.
+- **Real-Provider Status Inquiries**: On crash recovery, the worker queries provider status (`check_message_status`) via message ID / reference before resending.
+- **Ambiguity Routing & Manual Operator Reconciliation**: When network uncertainty persists, items transition to `RECONCILIATION_REQUIRED` to eliminate duplicate SMS risk. Operators and administrators can inspect and resolve ambiguous items via `GET /api/v1/deliveries/outbox/reconciliation` and `POST /api/v1/deliveries/outbox/{id}/reconcile` (`mark_sent`, `requeue`, `mark_failed`).
 
-### 4. P1 — National Postcode Provenance & NIPOST Status Transparency
-- **Strict Provenance Separation**: Demonstration fixtures (`FC-02-A09-DB-09`, `LA-01-A04-IK-02`) and local pilot records are classified as `verification_status="local_reference"` with `source_owner="PostcodeLink"` and `provenance="PostcodeLink National Postcode Format Demonstration Reference"`.
-- **Exclusive Official Designation**: `verification_status="official_verified"` and `postcode_category="official_digital_postcode"` are strictly reserved for verified live NIPOST API responses. Syntactic format recognition never proves official existence.
-- **Authoritative Status Transparency**: Upstream `UNAVAILABLE`, `UNAUTHORIZED`, or `INVALID_RESPONSE` codes explicitly populate `upstream_status`, `upstream_error`, and `fallback_reason` rather than returning unflagged local matches.
+### 4. P1 — National Postcode Provenance & Strict Verification Safeguards
+- **Strict Provenance Separation**: Demonstration fixtures (`FC-02-A09-DB-09`, `LA-01-A04-IK-02`) and local reference records are classified as `verification_status="local_reference"` with `source_owner="PostcodeLink"` and `provenance="PostcodeLink National Postcode Format Demonstration Reference"`. Database migrations strictly preserve legitimate official NIPOST records.
+- **Exclusive Official Designation**: `verification_status="official_verified"` and `postcode_category="official_digital_postcode"` are strictly reserved for verified live NIPOST API responses.
+- **Strict Verification Mode (`strict=true`)**: When enabled (`GET /api/v1/postcodes/lookup?strict=true`), the API fails closed (HTTP 502/503) if live NIPOST verification is unauthorized or unavailable, guaranteeing local fallback fixtures are never mistaken for government-verified postcodes.
+- **Fallback Transparency**: Responses clearly delineate `lookup_status`, `verification_status`, `verification_source`, `fallback_used`, and `fallback_reason`.
 
 ### 5. P2 — Configurable Operator Capacity & Service Area Routing
 - **Configurable Fleet Limits**: Respects each logistics operator's configured `max_active_deliveries` limit across operator directories, dispatch assignments, and capacity indicators (`has_capacity = active_deliveries_count < max_active_deliveries`).
 - **Service Area Filtering**: Merchants can filter available couriers by coverage zones (`GET /api/v1/operators/?service_area=Ikeja`).
 
 ### 6. P2 — Production Health & Observability Probes
-- `/health/live`: Application process liveness probe.
-- `/health/ready`: Database connectivity readiness check.
-- `/health/worker`: Outbox queue depth, lease timing, and reconciliation metrics.
-- `/health/integrations`: SMS gateway and NIPOST upstream configuration telemetry (credentials omitted).
+- `/health/live`: Application process liveness probe (HTTP 200).
+- `/health/ready`: Database connectivity readiness check; returns HTTP 503 Service Unavailable without leaking internal exception traces if disconnected.
+- `/health/worker`: Outbox queue depth, lease timing, worker heartbeat, and reconciliation alert telemetry.
+- `/health/integrations`: SMS gateway and NIPOST upstream configuration and production readiness checks.
 
 ### 7. P2 — Anti-DoS Scoped Login Rate Limiting
 - **Composite Brute-Force Bucket**: Scoped failed attempt counters by `(client_ip, email)`.
