@@ -30,7 +30,12 @@ from backend.app.services.delivery_service import (
     regenerate_tracking_token,
     resend_delivery_pin,
 )
-from backend.app.core.auth_deps import get_current_user, require_roles
+from backend.app.core.auth_deps import (
+    get_current_user,
+    require_roles,
+    get_current_actor,
+    get_authenticated_merchant_or_api_key,
+)
 
 router = APIRouter(prefix="/deliveries", tags=["deliveries"])
 
@@ -38,10 +43,10 @@ router = APIRouter(prefix="/deliveries", tags=["deliveries"])
 @router.post("/", response_model=DeliveryCreateResponse, status_code=status.HTTP_201_CREATED)
 def api_create_delivery(
     request: DeliveryCreateRequest,
-    current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
+    current_user: Profile = Depends(get_authenticated_merchant_or_api_key),
     db: Session = Depends(get_db),
 ):
-    """Create a new delivery record scoped strictly to the authenticated merchant."""
+    """Create a new delivery record scoped strictly to the authenticated merchant (Bearer JWT or x-api-key)."""
     return create_delivery(db, request, current_user)
 
 
@@ -49,7 +54,7 @@ def api_create_delivery(
 def api_bulk_create_deliveries(
     items: List[DeliveryCreateRequest],
     batch_id: Optional[str] = Query(None),
-    current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
+    current_user: Profile = Depends(get_authenticated_merchant_or_api_key),
     db: Session = Depends(get_db),
 ):
     """Batch import delivery orders into the authenticated merchant's account with atomic per-item reporting."""
@@ -109,10 +114,10 @@ def api_list_deliveries(
     search: Optional[str] = Query(None),
     limit: int = Query(50, le=100),
     offset: int = Query(0, ge=0),
-    current_user: Profile = Depends(get_current_user),
+    current_user: Profile = Depends(get_current_actor),
     db: Session = Depends(get_db),
 ):
-    """List deliveries scoped by tenant role (Merchants see their orders; Operators see assigned trips)."""
+    """List deliveries scoped by tenant role (Merchants see their orders; Operators see assigned trips; supports x-api-key)."""
     query = db.query(Delivery)
 
     # Tenant isolation
@@ -145,7 +150,7 @@ def api_list_deliveries(
 @router.get("/{delivery_id}", response_model=DeliveryResponse)
 def api_get_delivery(
     delivery_id: str,
-    current_user: Profile = Depends(get_current_user),
+    current_user: Profile = Depends(get_current_actor),
     db: Session = Depends(get_db),
 ):
     """Get full details of a delivery (enforcing tenant access permissions)."""
