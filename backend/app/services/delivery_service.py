@@ -16,6 +16,7 @@ from backend.app.models.delivery_event import DeliveryEvent
 from backend.app.models.operator import Operator
 from backend.app.models.profile import Profile
 from backend.app.models.notification_outbox import NotificationOutbox
+from backend.app.models.worker_heartbeat import WorkerHeartbeat
 from backend.app.models.enums import DeliveryStatus, PostcodeStatus, AppRole
 from backend.app.schemas.delivery import (
     DeliveryCreateRequest,
@@ -764,12 +765,53 @@ def resend_delivery_pin(db: Session, delivery_id: str, current_user: Profile) ->
     )
 
 
+def record_worker_heartbeat(
+    db: Session,
+    worker_id: str,
+    status: str = "active",
+    processed_count: int = 0,
+    worker_role: str = "outbox_worker",
+) -> None:
+    """Record or update persistent worker heartbeat in the database for cross-process health monitoring."""
+    import os
+    import socket
+    now = datetime.now(timezone.utc)
+    try:
+        hb = db.query(WorkerHeartbeat).filter(WorkerHeartbeat.worker_id == worker_id).first()
+        if not hb:
+            hb = WorkerHeartbeat(
+                worker_id=worker_id,
+                process_id=os.getpid(),
+                worker_role=worker_role,
+                hostname=socket.gethostname(),
+                last_heartbeat_at=now,
+                status=status,
+                active_jobs_count=0,
+                processed_count=processed_count,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(hb)
+        else:
+            hb.process_id = os.getpid()
+            hb.last_heartbeat_at = now
+            hb.status = status
+            hb.hostname = socket.gethostname()
+            hb.processed_count += processed_count
+            hb.updated_at = now
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.warning(f"Failed to record worker heartbeat: {exc}")
+
+
 def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Optional[str] = None) -> int:
     """Process pending/queued outbox notification items with row-level leasing, backoff, and error classification."""
     global WORKER_LAST_HEARTBEAT
     now = datetime.now(timezone.utc)
     WORKER_LAST_HEARTBEAT = now
     assigned_worker = worker_id or f"worker-{secrets.token_hex(4)}"
+    record_worker_heartbeat(db, assigned_worker, status="active", processed_count=0)
 
     # Determine dialect for SKIP LOCKED support
     bind = db.get_bind()
@@ -849,6 +891,7 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
                     reconciled_res = active_provider.check_message_status(
                         idempotency_key=item.idempotency_key,
                         provider_message_id=getattr(item, "provider_message_id", None),
+                        recipient_phone=getattr(item, "recipient_phone", None),
                     )
                 except Exception as exc:
                     logger.warning(f"[Outbox Worker] Provider status check failed for item {item.id}: {exc}")
@@ -1020,4 +1063,5 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
         item.locked_by = None
         db.commit()
         processed += 1
+    record_worker_heartbeat(db, assigned_worker, status="idle" if processed == 0 else "active", processed_count=processed)
     return processed

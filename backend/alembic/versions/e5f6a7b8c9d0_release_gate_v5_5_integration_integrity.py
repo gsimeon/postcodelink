@@ -33,27 +33,16 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column('rate_limit_per_minute', sa.Integer(), nullable=False, server_default='60'))
         batch_op.add_column(sa.Column('is_revoked', sa.Boolean(), nullable=False, server_default=sa.false()))
 
-    # 3. Postcode provenance audit: Reclassify local demonstration postcodes to local_reference
-    # Strictly target demonstration fixtures and local reference records, preserving legitimate NIPOST records
+    # 3. Targeted Demonstration Fixture Reclassification:
+    # Strictly reclassify only known PostcodeLink demonstration fixtures to local_reference.
+    # Never use broad text matching (e.g. LIKE '%Pilot%' or LIKE '%Demonstration%')
+    # or blanket overrides that could inadvertently downgrade legitimate verified records.
     op.execute(
         sa.text(
             "UPDATE postcodes "
             "SET verification_status = 'local_reference', "
             "    provenance = 'PostcodeLink National Postcode Format Demonstration Reference' "
-            "WHERE code IN ('FC-02-A09-DB-09', 'LA-01-A04-IK-02') "
-            "   OR provenance LIKE '%Demonstration%' "
-            "   OR provenance LIKE '%Local Reference%' "
-            "   OR provenance LIKE '%Pilot%' "
-            "   OR (verification_status = 'official_verified' AND provenance NOT LIKE '%NIPOST Official%')"
-        )
-    )
-    # Ensure any legitimate NIPOST verified record retains official_verified status
-    op.execute(
-        sa.text(
-            "UPDATE postcodes "
-            "SET verification_status = 'official_verified' "
-            "WHERE provenance LIKE '%NIPOST Official%' "
-            "  AND (verification_status IS NULL OR verification_status = 'local_reference')"
+            "WHERE code IN ('FC-02-A09-DB-09', 'LA-01-A04-IK-02')"
         )
     )
 
@@ -64,3 +53,12 @@ def downgrade() -> None:
         batch_op.drop_column('rate_limit_per_minute')
         batch_op.drop_column('period_usage_count')
         batch_op.drop_column('current_period')
+
+    # Reversibility: Demonstration fixtures are reverted to unverified status on downgrade
+    op.execute(
+        sa.text(
+            "UPDATE postcodes "
+            "SET verification_status = 'unverified' "
+            "WHERE code IN ('FC-02-A09-DB-09', 'LA-01-A04-IK-02')"
+        )
+    )

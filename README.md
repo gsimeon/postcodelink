@@ -6,35 +6,53 @@ PostcodeLink bridges the gap between customer addresses (often described with in
 
 ---
 
-## Architecture & Security Hardening (Release Gate v5.6 Production Standard)
+## Architecture & Security Hardening (Release Gate v5.7 Production Standard)
 
-Following an in-depth security and architectural audit of the FastAPI backend and Next.js frontend, the platform has completed enterprise-grade hardening covering all Release Gate v5.6 requirements:
+Following an in-depth security, operational, and distributed systems audit of the FastAPI backend and Next.js frontend, the platform has completed enterprise-grade hardening covering all Release Gate v5.7 requirements:
 
-### 1. P1 — Strict Authenticated Cryptography (AES-256-GCM) & Delivery AAD Context
-- **Strict AAD Enforcement**: Decryption of transit OTPs stored in `notification_outbox` requires an exact match between payload Authenticated Additional Data and the expected delivery context (`f"delivery:{delivery_id}".encode()`). Any envelope with empty AAD (`b""`) or mismatched delivery association is rejected immediately with verification failure. Unbound decryption is strictly barred from active delivery workflows.
-- **Controlled Legacy Migration**: Legacy `v1:` HMAC and unversioned stream cipher decryption are strictly segregated into an explicit migration routine (`migrate_legacy_transit_pin`), upgrading legacy envelopes to versioned `v2:` envelopes on first processing while barring unauthenticated legacy payloads from active verification routines.
-- **Envelope Standard**: Versioned ciphertext envelopes format: `v2:<nonce_hex>:<aad_hex>:<ciphertext_and_tag_hex>`.
+### 1. P1 — Targeted Postcode Migration (Exact Demonstration Fixture Isolation)
+- **Narrow Migration Matching**: Alembic migration `e5f6a7b8c9d0` strictly targets known demonstration fixtures by exact code (`WHERE code IN ('FC-02-A09-DB-09', 'LA-01-A04-IK-02')`). All broad text-based heuristics (`LIKE '%Demonstration%'`, `LIKE '%Pilot%'`, `LIKE '%Local Reference%'`) have been eliminated.
+- **Strict Verification Preservation**: Legitimate government-verified records with NIPOST provenance are preserved without exception as `verification_status="official_verified"`.
+- **Reversibility**: Downgrade routines are documented and tested, restoring demonstration fixtures cleanly. Real Alembic migration execution tests run on every CI build.
 
-### 2. P1 — API Key Lifecycle, Atomic Monthly Quota Rollover & Per-Minute Throttling
-- **Key Issuance & Rotation with Quota Inheritance**: 
-  - `POST /api/v1/api-keys/` — Issue new merchant API keys with custom monthly quotas and prefix `pl_live_...`.
-  - `POST /api/v1/api-keys/{id}/rotate` — Atomically rotate keys, issuing a fresh key while revoking the previous key. The new credential inherits the current billing period usage count, preventing quota reset bypasses via rotation.
-  - `DELETE /api/v1/api-keys/{id}` — Immediate key revocation (`is_revoked = True`).
-- **Atomic Single-Operation Month Rollover**: Period transition and quota-conditioned usage increments occur within a single atomic SQL statement (`case` expression), eliminating concurrent race windows and lost increments during calendar-month boundaries.
-- **Per-Minute Rate Limiting**: In addition to monthly allowances, keys enforce sliding-window request limits (`rate_limit_per_minute`, default 60), returning HTTP 429 with `Retry-After` headers.
-- **Active Business API Enforcement**: Integration routes accept merchant API keys via `x-api-key` header with strict tenant isolation across deliveries, customers, postcodes, operators, and analytics.
+### 2. P1 — Resilient SMS Crash Recovery & Outbound Status Reconciliation
+- **Crash Recovery Without Saved Message ID**: When a background worker crashes between provider HTTP acceptance and database commit, `provider_message_id` is lost. Upon recovery, the worker queries the provider by `recipient_phone` and `idempotency_key`. If the provider cannot conclusively confirm delivery, the item transitions to `RECONCILIATION_REQUIRED` and is **never blindly re-dispatched**, eliminating duplicate customer SMS risks.
+- **Provider Gateway Status Inquiries**: `check_message_status` implemented across `SimulatedNotificationProvider`, `TwilioNotificationProvider` (querying recent outbound messages to recipient by E.164), and `TermiiNotificationProvider`.
 
-### 3. P1 — Outbox Reliability, Real-Provider Status Reconciliation & Operator Workflows
-- **Delivery Guarantee**: At-least-once delivery with idempotent deduplication and crash-window reconciliation.
-- **Crash-Window Elimination**: Worker records `DISPATCHING` intent and provider-supported `idempotency_key` (`outbox_{item_id}_{delivery_version}_{retry_count}`) in the database prior to network dispatch. When provider acknowledgment is received, `provider_message_id` is immediately persisted.
-- **Real-Provider Status Inquiries**: On crash recovery, the worker queries provider status (`check_message_status`) via message ID / reference before resending.
-- **Ambiguity Routing & Manual Operator Reconciliation**: When network uncertainty persists, items transition to `RECONCILIATION_REQUIRED` to eliminate duplicate SMS risk. Operators and administrators can inspect and resolve ambiguous items via `GET /api/v1/deliveries/outbox/reconciliation` and `POST /api/v1/deliveries/outbox/{id}/reconcile` (`mark_sent`, `requeue`, `mark_failed`).
+### 3. P1 — Privacy-Hardened, Admin-Only Manual Reconciliation Workflows
+- **Strict RBAC Enforcement**: `GET /api/v1/deliveries/outbox/reconciliation` and `POST /api/v1/deliveries/outbox/{id}/reconcile` are restricted exclusively to `AppRole.ADMIN`. Courier operators receive HTTP 403 Forbidden.
+- **Customer Privacy Protection**: Full recipient phone numbers are masked in reconciliation listings (`recipient_phone_masked: "+234803***789"`), preventing unauthorized inspection of merchant customer records.
+- **Mandatory Audit Reason & Evidence**: Manual resolutions (`mark_sent`, `requeue`, `mark_failed`) require an explicit reason (`reason` >= 10 characters). Marking an item as sent strictly requires carrier evidence (`provider_message_id` or `evidence_reference`). Every resolution appends an immutable `DeliveryEvent` audit entry recording actor email, role, action, and rationale.
 
-### 4. P1 — National Postcode Provenance & Strict Verification Safeguards
-- **Strict Provenance Separation**: Demonstration fixtures (`FC-02-A09-DB-09`, `LA-01-A04-IK-02`) and local reference records are classified as `verification_status="local_reference"` with `source_owner="PostcodeLink"` and `provenance="PostcodeLink National Postcode Format Demonstration Reference"`. Database migrations strictly preserve legitimate official NIPOST records.
-- **Exclusive Official Designation**: `verification_status="official_verified"` and `postcode_category="official_digital_postcode"` are strictly reserved for verified live NIPOST API responses.
-- **Strict Verification Mode (`strict=true`)**: When enabled (`GET /api/v1/postcodes/lookup?strict=true`), the API fails closed (HTTP 502/503) if live NIPOST verification is unauthorized or unavailable, guaranteeing local fallback fixtures are never mistaken for government-verified postcodes.
-- **Fallback Transparency**: Responses clearly delineate `lookup_status`, `verification_status`, `verification_source`, `fallback_used`, and `fallback_reason`.
+### 4. P1 — Strict NIPOST Verification with Input Validation
+- **Mandatory Postcode Parameter**: In strict verification mode (`GET /api/v1/postcodes/lookup?strict=true`), omitting the `code` parameter raises HTTP 422 Unprocessable Content. Area-only discovery is barred from strict verification.
+- **Zero Local Fallback in Strict Mode**: If upstream NIPOST is unavailable or returns an error, the API fails closed (HTTP 502/503) and never silently falls back to local reference fixtures.
+
+### 5. P2 — Distributed Redis-Backed Rate Limiting
+- **Pluggable Sliding-Window Store**: Per-minute API key rate limits use an atomic Redis sorted-set sliding window (`ZREMRANGEBYSCORE` / `ZCARD` / `ZADD` / `EXPIRE`) when `REDIS_URL` is configured, guaranteeing shared enforcement across distributed API instances and process restarts.
+- **Memory-Safe In-Memory Fallback**: When Redis is unconfigured, falls back to an in-memory thread-safe sliding window with periodic TTL eviction of stale keys (every 120s) to prevent memory leaks.
+- **Invalid Configuration Rejection**: Non-positive rate limits (`<= 0`) are rejected immediately with HTTP 400 Bad Request rather than treated as unlimited.
+
+### 6. P2 — Persistent Cross-Process Worker Heartbeat
+- **Database Heartbeat Persistence**: Worker instances record heartbeats in the `worker_heartbeats` table (migration `f6a7b8c9d0e1`), storing `worker_id`, `process_id`, `hostname`, `status`, `processed_count`, and `last_heartbeat_at`.
+- **Standalone Process Monitoring**: `/health/worker` queries persistent database heartbeats, reliably monitoring standalone worker daemon processes (`python -m backend.app.workers.outbox_worker`) across isolated OS processes and containers. Reports `status="operational"` or `status="degraded"` if heartbeats exceed the configurable threshold (`OUTBOX_WORKER_HEARTBEAT_THRESHOLD_SECONDS = 120`).
+
+### 7. P2 — Sanitized, Real Integration Health Probes
+- **Live Reachability & Authentication Probes**: `/health/integrations` tests external provider status using bounded network probes (1.5s timeout), separating `configured`, `reachable`, `authenticated`, `last_successful_check`, and `last_error_category`.
+- **Zero Information Leakage**: Internal infrastructure URLs (`base_url`, `url`), API keys, and credentials are completely omitted from the public health response.
+
+### 8. P2 — Concurrent API-Key Rotation Protection
+- **Atomic Conditional Updates**: `POST /api/v1/api-keys/{id}/rotate` executes an atomic conditional update (`is_active = False, is_revoked = True WHERE is_active = True AND is_revoked = False`). Simultaneous rotation requests race safely: exactly one generates a replacement credential, while competing requests receive HTTP 409 Conflict.
+- **Quota Inheritance**: Replacement credentials inherit billing period usage (`period_usage_count`) and lifetime usage from the rotated key, preventing quota reset bypasses.
+
+### 9. P0 — Dual PostgreSQL 16 & Redis 7 CI/CD Pipeline
+- **GitHub Actions Workflow (`.github/workflows/ci.yml`)**:
+  - Spin up `postgres:16` and `redis:7` service containers with health checks.
+  - Run Alembic migrations and database seeding against PostgreSQL 16.
+  - Run 95/95 Pytest security, cryptography, and API integration tests against PostgreSQL and Redis.
+  - Verify SQLite migration and local fallback test compatibility.
+  - Run 7/7 Node.js state-machine and 6-digit OTP security tests.
+  - Compile production Next.js 15 build with 0 errors.
 
 ### 5. P2 — Configurable Operator Capacity & Service Area Routing
 - **Configurable Fleet Limits**: Respects each logistics operator's configured `max_active_deliveries` limit across operator directories, dispatch assignments, and capacity indicators (`has_capacity = active_deliveries_count < max_active_deliveries`).

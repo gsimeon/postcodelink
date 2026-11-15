@@ -1,6 +1,6 @@
 """Deliveries router with authentication, tenant isolation, and RBAC."""
 import secrets
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Query, status, HTTPException
@@ -9,11 +9,12 @@ from sqlalchemy import or_
 
 from backend.app.database import get_db
 from backend.app.models.delivery import Delivery
+from backend.app.models.delivery_event import DeliveryEvent
 from backend.app.models.operator import Operator
 from backend.app.models.profile import Profile
 from backend.app.models.notification_outbox import NotificationOutbox
 from backend.app.models.enums import DeliveryStatus, AppRole
-from backend.app.services.notification_service import NotificationDeliveryStatus
+from backend.app.services.notification_service import NotificationDeliveryStatus, mask_phone
 from backend.app.schemas.delivery import (
     DeliveryCreateRequest,
     DeliveryCreateResponse,
@@ -256,20 +257,25 @@ def api_delete_delivery(
 
 
 # ==============================================================================
-# Outbox Manual Reconciliation Workflows (Operator & Admin)
+# ==============================================================================
+# Outbox Manual Reconciliation Workflows (Admin Only & Privacy-Hardened)
 # ==============================================================================
 class OutboxReconciliationRequest(BaseModel):
     resolution: Literal["mark_sent", "requeue", "mark_failed"]
-    provider_message_id: Optional[str] = None
-    note: Optional[str] = None
+    reason: str = Field(..., min_length=10, description="Mandatory operator audit reason and resolution evidence.")
+    provider_message_id: Optional[str] = Field(None, description="External provider message ID if confirmed delivered.")
+    evidence_reference: Optional[str] = Field(None, description="External ticket, telco reference, or customer contact note.")
 
 
 @router.get("/outbox/reconciliation", status_code=status.HTTP_200_OK)
 def api_list_outbox_reconciliations(
-    current_user: Profile = Depends(require_roles([AppRole.OPERATOR, AppRole.ADMIN])),
+    current_user: Profile = Depends(require_roles([AppRole.ADMIN])),
     db: Session = Depends(get_db),
 ):
-    """List all outbox notification items currently in RECONCILIATION_REQUIRED state."""
+    """List all outbox notification items currently in RECONCILIATION_REQUIRED state.
+    
+    Strictly restricted to Admin profiles. Recipient phone numbers are masked to protect customer privacy.
+    """
     items = (
         db.query(NotificationOutbox)
         .filter(NotificationOutbox.status == NotificationDeliveryStatus.RECONCILIATION_REQUIRED)
@@ -280,7 +286,7 @@ def api_list_outbox_reconciliations(
         {
             "id": it.id,
             "delivery_id": it.delivery_id,
-            "recipient_phone": it.recipient_phone,
+            "recipient_phone_masked": mask_phone(it.recipient_phone),
             "provider": it.provider,
             "idempotency_key": it.idempotency_key,
             "provider_message_id": it.provider_message_id,
@@ -298,36 +304,57 @@ def api_list_outbox_reconciliations(
 def api_reconcile_outbox_item(
     outbox_id: str,
     req: OutboxReconciliationRequest,
-    current_user: Profile = Depends(require_roles([AppRole.OPERATOR, AppRole.ADMIN])),
+    current_user: Profile = Depends(require_roles([AppRole.ADMIN])),
     db: Session = Depends(get_db),
 ):
-    """Manual reconciliation workflow: resolve an ambiguous outbox item after worker crash or network timeout."""
+    """Manual reconciliation workflow: resolve an ambiguous outbox item with mandatory audit reasoning."""
     item = db.query(NotificationOutbox).filter(NotificationOutbox.id == outbox_id).first()
     if not item:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Outbox notification record not found.")
 
+    if req.resolution == "mark_sent" and not (req.provider_message_id or req.evidence_reference):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Marking an outbox notification as 'mark_sent' requires explicit evidence: provide provider_message_id or evidence_reference.",
+        )
+
     now = datetime.now(timezone.utc)
+    resolution_audit_desc = f"Outbox manual reconciliation: action='{req.resolution}', reason='{req.reason}'"
+
     if req.resolution == "mark_sent":
         item.status = NotificationDeliveryStatus.SENT
         item.provider_message_id = req.provider_message_id or item.provider_message_id or f"MANUAL_RECONCILED_{current_user.id[:8]}"
         item.status_reconciled_at = now
         item.sent_at = item.sent_at or now
-        item.error_details = req.note or f"Manually verified sent by operator {current_user.email}."
+        item.error_details = f"Manually verified sent by admin {current_user.email}. Reason: {req.reason}. Evidence: {req.evidence_reference or req.provider_message_id}."
         item.locked_at = None
         item.locked_by = None
     elif req.resolution == "requeue":
         item.status = NotificationDeliveryStatus.QUEUED
         item.failure_classification = None
-        item.error_details = req.note or f"Requeued by operator {current_user.email} for dispatch."
+        item.error_details = f"Requeued by admin {current_user.email}. Reason: {req.reason}."
         item.next_attempt_at = now
         item.locked_at = None
         item.locked_by = None
     elif req.resolution == "mark_failed":
         item.status = NotificationDeliveryStatus.FAILED
         item.failure_classification = "manually_marked_failed"
-        item.error_details = req.note or f"Marked permanently failed by operator {current_user.email}."
+        item.error_details = f"Marked permanently failed by admin {current_user.email}. Reason: {req.reason}."
         item.locked_at = None
         item.locked_by = None
+
+    # Append immutable audit entry to delivery events
+    deliv = db.query(Delivery).filter(Delivery.id == item.delivery_id).first()
+    if deliv:
+        event = DeliveryEvent(
+            delivery_id=item.delivery_id,
+            status=deliv.status,
+            actor_name=current_user.full_name or current_user.email,
+            actor_role=current_user.role.value,
+            note=f"{resolution_audit_desc}, actor='{current_user.email}'.",
+            occurred_at=now,
+        )
+        db.add(event)
 
     db.commit()
     db.refresh(item)
@@ -339,4 +366,5 @@ def api_reconcile_outbox_item(
         "error_details": item.error_details,
         "reconciled_by": current_user.email,
         "reconciled_at": now.isoformat(),
+        "audit_reason": req.reason,
     }

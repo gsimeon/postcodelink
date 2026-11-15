@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     OUTBOX_WORKER_ENABLED: bool = False
     OUTBOX_WORKER_INTERVAL_SECONDS: int = 5
     OUTBOX_LEASE_TIMEOUT_MINUTES: int = 5
+    OUTBOX_WORKER_HEARTBEAT_THRESHOLD_SECONDS: int = 120
+
+    # Redis Cache & Distributed Rate Limiting
+    REDIS_URL: Optional[str] = os.getenv("REDIS_URL", None)
 
     @model_validator(mode="before")
     @classmethod

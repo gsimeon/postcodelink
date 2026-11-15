@@ -111,25 +111,13 @@ def test_postcode_migration_preserves_verified_nipost_records():
         db.add_all([demo_rec, nipost_rec, local_rec])
         db.commit()
 
-        # Execute migration logic
+        # Execute updated non-destructive migration logic (strictly targets demonstration fixtures)
         db.execute(
             text(
                 "UPDATE postcodes "
                 "SET verification_status = 'local_reference', "
                 "    provenance = 'PostcodeLink National Postcode Format Demonstration Reference' "
-                "WHERE code IN ('FC-02-A09-DB-09', 'LA-01-A04-IK-02') "
-                "   OR provenance LIKE '%Demonstration%' "
-                "   OR provenance LIKE '%Local Reference%' "
-                "   OR provenance LIKE '%Pilot%' "
-                "   OR (verification_status = 'official_verified' AND provenance NOT LIKE '%NIPOST Official%')"
-            )
-        )
-        db.execute(
-            text(
-                "UPDATE postcodes "
-                "SET verification_status = 'official_verified' "
-                "WHERE provenance LIKE '%NIPOST Official%' "
-                "  AND (verification_status IS NULL OR verification_status = 'local_reference')"
+                "WHERE code IN ('FC-02-A09-DB-09', 'LA-01-A04-IK-02')"
             )
         )
         db.commit()
@@ -137,10 +125,8 @@ def test_postcode_migration_preserves_verified_nipost_records():
         # Verify
         reloaded_demo = db.query(PostcodeDirectory).filter(PostcodeDirectory.code == demo_code).first()
         reloaded_nipost = db.query(PostcodeDirectory).filter(PostcodeDirectory.code == nipost_code).first()
-        reloaded_local = db.query(PostcodeDirectory).filter(PostcodeDirectory.code == local_code).first()
 
         assert reloaded_demo.verification_status == "local_reference", "Demo fixture must be local_reference"
-        assert reloaded_local.verification_status == "local_reference", "Local fixture must be local_reference"
         assert reloaded_nipost.verification_status == "official_verified", "Legitimate NIPOST record MUST retain official_verified"
     finally:
         db.query(PostcodeDirectory).filter(PostcodeDirectory.code.in_([nipost_code, local_code])).delete()
@@ -408,21 +394,34 @@ def test_outbox_real_provider_crash_recovery_and_status_reconciliation():
         assert outbox_item_b.status == NotificationDeliveryStatus.RECONCILIATION_REQUIRED
         assert outbox_item_b.failure_classification == "unconfirmed_crash_window"
 
-        # Scenario C: Operator Manual Reconciliation Endpoint
+        # Scenario C: Admin Manual Reconciliation Endpoint & Operator Denial
         op_token = get_token(AppRole.OPERATOR, "courier_op@test.ng")
         op_headers = {"Authorization": f"Bearer {op_token}"}
+        admin_token = get_token(AppRole.ADMIN, "admin_rec@test.ng")
+        admin_headers = {"Authorization": f"Bearer {admin_token}"}
 
-        # 1. List reconciliations
-        list_res = client.get("/api/v1/deliveries/outbox/reconciliation", headers=op_headers)
+        # 1. Operator is strictly forbidden (HTTP 403)
+        assert client.get("/api/v1/deliveries/outbox/reconciliation", headers=op_headers).status_code == 403
+
+        # 2. Admin lists reconciliations
+        list_res = client.get("/api/v1/deliveries/outbox/reconciliation", headers=admin_headers)
         assert list_res.status_code == 200
         rec_items = list_res.json()
         assert any(it["id"] == outbox_item_b.id for it in rec_items)
+        # Verify recipient phone is masked in reconciliation listing
+        matching_item = next(it for it in rec_items if it["id"] == outbox_item_b.id)
+        assert "recipient_phone_masked" in matching_item
+        assert "***" in matching_item["recipient_phone_masked"]
 
-        # 2. Operator resolves Item B: mark_sent
+        # 3. Admin resolves Item B with mandatory reason and evidence
         resolve_res = client.post(
             f"/api/v1/deliveries/outbox/{outbox_item_b.id}/reconcile",
-            json={"resolution": "mark_sent", "provider_message_id": "OP_CONFIRMED_MSG_99", "note": "Checked with Telco; SMS was delivered."},
-            headers=op_headers,
+            json={
+                "resolution": "mark_sent",
+                "provider_message_id": "OP_CONFIRMED_MSG_99",
+                "reason": "Checked with Telco carrier logs; SMS delivered successfully.",
+            },
+            headers=admin_headers,
         )
         assert resolve_res.status_code == 200
         db.refresh(outbox_item_b)

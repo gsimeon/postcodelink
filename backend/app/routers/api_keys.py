@@ -187,20 +187,33 @@ def api_rotate_api_key(
     db: Session = Depends(get_db),
 ):
     """Rotate an existing API key: revokes the old key and generates a fresh credential preserving quota configuration."""
-    old_key = (
-        db.query(ApiKey)
-        .filter(ApiKey.id == key_id, ApiKey.merchant_id == current_user.id)
-        .first()
+    now = datetime.now(timezone.utc)
+    now_period = now.strftime("%Y-%m")
+
+    # Concurrent rotation protection: conditional atomic update ensures exactly one rotation succeeds
+    stmt = (
+        update(ApiKey)
+        .where(
+            and_(
+                ApiKey.id == key_id,
+                ApiKey.merchant_id == current_user.id,
+                ApiKey.is_active.is_(True),
+                ApiKey.is_revoked.is_(False),
+            )
+        )
+        .values(is_active=False, is_revoked=True)
     )
-    if not old_key:
+    res = db.execute(stmt)
+    if res.rowcount == 0:
+        existing = db.query(ApiKey).filter(ApiKey.id == key_id, ApiKey.merchant_id == current_user.id).first()
+        if not existing:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API key not found.")
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="API key not found.",
+            status_code=status.HTTP_409_CONFLICT,
+            detail="API key has already been rotated or revoked.",
         )
 
-    # Revoke old key
-    old_key.is_active = False
-    old_key.is_revoked = True
+    old_key = db.query(ApiKey).filter(ApiKey.id == key_id).first()
 
     # Generate fresh key
     raw_token = secrets.token_urlsafe(32)
@@ -208,17 +221,10 @@ def api_rotate_api_key(
     prefix = raw_key[:12]
     hashed = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
-    now = datetime.now(timezone.utc)
-    now_period = now.strftime("%Y-%m")
-
     # Quota inheritance: new credential inherits current billing period usage count from rotated key
     # This prevents merchants from resetting their monthly allowance via credential rotation
     inherited_period_usage = old_key.period_usage_count if getattr(old_key, "current_period", None) == now_period else 0
     inherited_usage = getattr(old_key, "usage_count", 0)
-
-    # Invalidate and revoke the old credential immediately
-    old_key.is_active = False
-    old_key.is_revoked = True
 
     new_key = ApiKey(
         merchant_id=current_user.id,

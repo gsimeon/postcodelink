@@ -74,6 +74,7 @@ class BaseNotificationProvider(ABC):
         self,
         idempotency_key: str,
         provider_message_id: Optional[str] = None,
+        recipient_phone: Optional[str] = None,
     ) -> Optional[NotificationDispatchResult]:
         """Check status of a prior dispatch with the provider for crash recovery and reconciliation.
         
@@ -276,6 +277,7 @@ class TermiiNotificationProvider(BaseNotificationProvider):
         self,
         idempotency_key: str,
         provider_message_id: Optional[str] = None,
+        recipient_phone: Optional[str] = None,
     ) -> Optional[NotificationDispatchResult]:
         """Check status of a message on Termii gateway for crash recovery and status reconciliation."""
         if not provider_message_id:
@@ -290,7 +292,7 @@ class TermiiNotificationProvider(BaseNotificationProvider):
                     return NotificationDispatchResult(
                         status=NotificationDeliveryStatus.SENT,
                         channel="Termii SMS Gateway",
-                        recipient_masked="***",
+                        recipient_masked=mask_phone(recipient_phone or "***"),
                         provider="termii",
                         message_preview="Message delivery verified with Termii.",
                         message_id=provider_message_id,
@@ -441,35 +443,69 @@ class TwilioNotificationProvider(BaseNotificationProvider):
         self,
         idempotency_key: str,
         provider_message_id: Optional[str] = None,
+        recipient_phone: Optional[str] = None,
     ) -> Optional[NotificationDispatchResult]:
         """Check status of a message on Twilio gateway for crash recovery and status reconciliation."""
-        if not provider_message_id:
-            return None
         try:
-            url = f"https://api.twilio.com/2010-04-01/Accounts/{self.account_sid}/Messages/{provider_message_id}.json"
-            resp = httpx.get(url, auth=(self.account_sid, self.auth_token), timeout=self.timeout)
-            if resp.status_code == 200:
-                data = resp.json() if callable(getattr(resp, "json", None)) else {}
-                tw_status = data.get("status", "").lower()
-                if tw_status in ["queued", "sending", "sent", "delivered"]:
-                    return NotificationDispatchResult(
-                        status=NotificationDeliveryStatus.SENT,
-                        channel="Twilio SMS Gateway",
-                        recipient_masked=mask_phone(data.get("to", "***")),
-                        provider="twilio",
-                        message_preview="Message confirmed sent by Twilio.",
-                        message_id=provider_message_id,
-                    )
-                elif tw_status in ["failed", "undelivered"]:
-                    return NotificationDispatchResult(
-                        status=NotificationDeliveryStatus.FAILED,
-                        channel="Twilio SMS Gateway",
-                        recipient_masked=mask_phone(data.get("to", "***")),
-                        provider="twilio",
-                        message_preview="Message delivery failed on Twilio.",
-                        error_details=data.get("error_message") or f"Twilio status: {tw_status}",
-                        message_id=provider_message_id,
-                    )
+            if provider_message_id:
+                url = f"https://api.twilio.com/2010-04-01/Accounts/{self.account_sid}/Messages/{provider_message_id}.json"
+                resp = httpx.get(url, auth=(self.account_sid, self.auth_token), timeout=self.timeout)
+                if resp.status_code == 200:
+                    data = resp.json() if callable(getattr(resp, "json", None)) else {}
+                    tw_status = data.get("status", "").lower()
+                    if tw_status in ["queued", "sending", "sent", "delivered"]:
+                        return NotificationDispatchResult(
+                            status=NotificationDeliveryStatus.SENT,
+                            channel="Twilio SMS Gateway",
+                            recipient_masked=mask_phone(data.get("to", "***")),
+                            provider="twilio",
+                            message_preview="Message confirmed sent by Twilio.",
+                            message_id=provider_message_id,
+                        )
+                    elif tw_status in ["failed", "undelivered"]:
+                        return NotificationDispatchResult(
+                            status=NotificationDeliveryStatus.FAILED,
+                            channel="Twilio SMS Gateway",
+                            recipient_masked=mask_phone(data.get("to", "***")),
+                            provider="twilio",
+                            message_preview="Message delivery failed on Twilio.",
+                            error_details=data.get("error_message") or f"Twilio status: {tw_status}",
+                            message_id=provider_message_id,
+                        )
+            elif recipient_phone:
+                # Outbound message recovery: search messages sent to recipient when provider_message_id was lost in crash
+                e164_phone, _ = normalize_nigerian_phone(recipient_phone)
+                url = f"https://api.twilio.com/2010-04-01/Accounts/{self.account_sid}/Messages.json"
+                resp = httpx.get(
+                    url,
+                    params={"To": e164_phone, "PageSize": 5},
+                    auth=(self.account_sid, self.auth_token),
+                    timeout=self.timeout,
+                )
+                if resp.status_code == 200:
+                    data = resp.json() if callable(getattr(resp, "json", None)) else {}
+                    messages = data.get("messages", [])
+                    for msg in messages:
+                        tw_status = msg.get("status", "").lower()
+                        if tw_status in ["queued", "sending", "sent", "delivered"]:
+                            return NotificationDispatchResult(
+                                status=NotificationDeliveryStatus.SENT,
+                                channel="Twilio SMS Gateway",
+                                recipient_masked=mask_phone(msg.get("to", recipient_phone)),
+                                provider="twilio",
+                                message_preview="Message confirmed sent by Twilio via outbound query.",
+                                message_id=msg.get("sid"),
+                            )
+                        elif tw_status in ["failed", "undelivered"]:
+                            return NotificationDispatchResult(
+                                status=NotificationDeliveryStatus.FAILED,
+                                channel="Twilio SMS Gateway",
+                                recipient_masked=mask_phone(msg.get("to", recipient_phone)),
+                                provider="twilio",
+                                message_preview="Message delivery failed on Twilio.",
+                                error_details=msg.get("error_message") or f"Twilio status: {tw_status}",
+                                message_id=msg.get("sid"),
+                            )
         except Exception as exc:
             logger.warning(f"[Twilio Gateway] Status check exception for {provider_message_id}: {exc}")
         return None
@@ -516,13 +552,19 @@ class SimulatedNotificationProvider(BaseNotificationProvider):
         self,
         idempotency_key: str,
         provider_message_id: Optional[str] = None,
+        recipient_phone: Optional[str] = None,
     ) -> Optional[NotificationDispatchResult]:
-        """Check status of simulated notification by idempotency key or provider message ID."""
-        if idempotency_key in self._dispatched_idempotency_keys:
+        """Check status of simulated notification by idempotency key, provider message ID, or recipient."""
+        if idempotency_key and idempotency_key in self._dispatched_idempotency_keys:
             return self._dispatched_idempotency_keys[idempotency_key]
         if provider_message_id:
             for item in self._dispatched_idempotency_keys.values():
                 if item.message_id == provider_message_id:
+                    return item
+        if recipient_phone:
+            masked = mask_phone(recipient_phone)
+            for item in self._dispatched_idempotency_keys.values():
+                if item.recipient_masked == masked:
                     return item
         return None
 
@@ -558,13 +600,19 @@ class SimulatedNotificationProvider(BaseNotificationProvider):
         self,
         idempotency_key: str,
         provider_message_id: Optional[str] = None,
+        recipient_phone: Optional[str] = None,
     ) -> Optional[NotificationDispatchResult]:
-        """Check status of simulated notification by idempotency key or provider message ID."""
-        if idempotency_key in self._dispatched_idempotency_keys:
+        """Check status of simulated notification by idempotency key, provider message ID, or recipient."""
+        if idempotency_key and idempotency_key in self._dispatched_idempotency_keys:
             return self._dispatched_idempotency_keys[idempotency_key]
         if provider_message_id:
             for item in self._dispatched_idempotency_keys.values():
                 if item.message_id == provider_message_id:
+                    return item
+        if recipient_phone:
+            masked = mask_phone(recipient_phone)
+            for item in self._dispatched_idempotency_keys.values():
+                if item.recipient_masked == masked:
                     return item
         return None
 

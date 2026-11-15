@@ -45,11 +45,17 @@ def api_lookup_postcodes(
     upstream_error = None
     fallback_reason = None
 
-    if strict and not client.is_configured:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Official NIPOST API gateway is not configured or enabled. Strict verification requires live NIPOST connectivity.",
-        )
+    if strict:
+        if not code or not code.strip():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Strict verification mode requires an authoritative 'code' parameter. Area-only discovery cannot be strictly verified against NIPOST.",
+            )
+        if not client.is_configured:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Official NIPOST API gateway is not configured or enabled. Strict verification requires live NIPOST connectivity.",
+            )
 
     if client.is_configured and code:
         res = client.lookup_postcode(code)
@@ -120,6 +126,12 @@ def api_lookup_postcodes(
                     )
 
             fallback_reason = f"Upstream NIPOST {res.status.value}: {err_msg or 'Check authorization credentials or service availability.'}. Displaying local demonstration reference."
+
+    if strict:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authoritative NIPOST verification could not be completed. Local reference fallback is disabled in strict mode.",
+        )
 
     raw_matches = find_postcodes(db=db, state=state, area=area, code=code)
     # Ensure local matches NEVER return official_verified or official_digital_postcode
