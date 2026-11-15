@@ -31,7 +31,7 @@ def upgrade() -> None:
                 RAISE EXCEPTION 'delivery_events records are append-only immutable audit logs and cannot be updated';
             ELSIF (TG_OP = 'DELETE') THEN
                 -- Allow cascade deletion if parent delivery is deleted, but strictly prohibit direct deletion of audit records
-                IF (current_query() ~* '^\\s*DELETE\\s+FROM\\s+(ONLY\\s+)?(public\\.)?delivery_events\\b') THEN
+                IF (current_query() ~* 'delivery_events' AND current_query() !~* 'deliveries') OR EXISTS (SELECT 1 FROM deliveries WHERE id = OLD.delivery_id) THEN
                     RAISE EXCEPTION 'delivery_events records are append-only immutable audit logs and cannot be deleted';
                 END IF;
             END IF;
