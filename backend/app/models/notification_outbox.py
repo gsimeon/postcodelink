@@ -41,6 +41,7 @@ class NotificationOutbox(Base):
     evidence_type = Column(String(64), nullable=True)
     dispatch_attempt = Column(Integer, nullable=False, default=1)
     original_idempotency_key = Column(String(64), nullable=True)
+    last_failed_provider_message_id = Column(String(128), nullable=True)
 
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(

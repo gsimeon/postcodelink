@@ -302,70 +302,79 @@ class TermiiNotificationProvider(BaseNotificationProvider):
             params = {"api_key": self.api_key, "message_id": provider_message_id}
             resp = httpx.get(url, params=params, timeout=self.timeout)
             if resp.status_code != 200:
-                # Fallback to inbox query endpoint
-                url = f"https://api.ng.termii.com/api/sms/inbox"
-                resp = httpx.get(url, params=params, timeout=self.timeout)
-
-            if resp.status_code == 200:
-                data = resp.json() if callable(getattr(resp, "json", None)) else {}
-                if not isinstance(data, dict):
-                    return None
-
-                # 1. Verify message ID identity
-                ret_id = data.get("message_id") or data.get("id")
-                if ret_id != provider_message_id:
-                    logger.warning(f"[Termii Gateway] Message ID mismatch: expected {provider_message_id}, got {ret_id}")
-                    return None
-
-                # 2. Verify recipient phone if provided
-                if recipient_phone:
-                    try:
-                        expected_phone, _ = normalize_nigerian_phone(recipient_phone)
-                        raw_to = data.get("to") or data.get("phone_number") or data.get("receiver") or ""
-                        actual_phone, _ = normalize_nigerian_phone(raw_to)
-                        if actual_phone != expected_phone:
-                            logger.warning(f"[Termii Gateway] Recipient mismatch on {provider_message_id}: expected {expected_phone}, got {actual_phone}")
-                            return None
-                    except Exception as e:
-                        logger.warning(f"[Termii Gateway] Recipient normalization check failed: {e}")
-                        return None
-
-                # 3. Verify sender ID if configured
-                if self.sender_id:
-                    raw_sender = data.get("from") or data.get("sender") or ""
-                    if raw_sender and raw_sender.strip().lower() != self.sender_id.strip().lower():
-                        logger.warning(f"[Termii Gateway] Sender mismatch on {provider_message_id}: expected {self.sender_id}, got {raw_sender}")
-                        return None
-
-                # 4. Verify delivery fingerprint in message text if provided
-                if delivery_id:
-                    text_content = data.get("text") or data.get("message") or data.get("sms") or ""
-                    if delivery_id not in text_content and f"order {delivery_id}" not in text_content.lower():
-                        logger.warning(f"[Termii Gateway] Delivery fingerprint mismatch on {provider_message_id}: order {delivery_id} not in text.")
-                        return None
-
-                # 5. Verify authoritative outbound status
-                raw_status = (data.get("status") or data.get("code") or "").lower()
-                if raw_status in ["delivered", "sent", "successful", "ok"]:
-                    return NotificationDispatchResult(
-                        status=NotificationDeliveryStatus.SENT,
-                        channel="Termii SMS Gateway",
-                        recipient_masked=mask_phone(recipient_phone or "***"),
-                        provider="termii",
-                        message_preview="Message delivery verified with Termii.",
-                        message_id=provider_message_id,
-                    )
-                elif raw_status in ["failed", "rejected", "undelivered", "error"]:
-                    return NotificationDispatchResult(
-                        status=NotificationDeliveryStatus.FAILED,
-                        channel="Termii SMS Gateway",
-                        recipient_masked=mask_phone(recipient_phone or "***"),
-                        provider="termii",
-                        message_preview="Message delivery failed on Termii.",
-                        error_details=data.get("message") or f"Termii status: {raw_status}",
-                        message_id=provider_message_id,
-                    )
+                logger.warning(f"[Termii Gateway] Non-200 status ({resp.status_code}) on status check for {provider_message_id}")
                 return None
+
+            data = resp.json() if callable(getattr(resp, "json", None)) else {}
+            if not isinstance(data, dict):
+                return None
+
+            # 1. Verify message ID identity
+            ret_id = data.get("message_id") or data.get("id")
+            if not ret_id or ret_id != provider_message_id:
+                logger.warning(f"[Termii Gateway] Message ID mismatch or missing: expected {provider_message_id}, got {ret_id}")
+                return None
+
+            # 2. Verify recipient phone (fail-closed: recipient field MUST be present and match)
+            raw_to = data.get("to") or data.get("phone_number") or data.get("receiver")
+            if not raw_to:
+                logger.warning(f"[Termii Gateway] Missing recipient in provider response for {provider_message_id}")
+                return None
+            if recipient_phone:
+                try:
+                    expected_phone, _ = normalize_nigerian_phone(recipient_phone)
+                    actual_phone, _ = normalize_nigerian_phone(str(raw_to))
+                    if actual_phone != expected_phone:
+                        logger.warning(f"[Termii Gateway] Recipient mismatch on {provider_message_id}: expected {expected_phone}, got {actual_phone}")
+                        return None
+                except Exception as e:
+                    logger.warning(f"[Termii Gateway] Recipient normalization check failed: {e}")
+                    return None
+
+            # 3. Verify sender ID (fail-closed: sender field MUST be present and match)
+            raw_sender = data.get("from") or data.get("sender")
+            if not raw_sender:
+                logger.warning(f"[Termii Gateway] Missing sender in provider response for {provider_message_id}")
+                return None
+            if self.sender_id and str(raw_sender).strip().lower() != self.sender_id.strip().lower():
+                logger.warning(f"[Termii Gateway] Sender mismatch on {provider_message_id}: expected {self.sender_id}, got {raw_sender}")
+                return None
+
+            # 4. Verify delivery identifier in message text (fail-closed: text MUST be present and contain delivery_id)
+            text_content = data.get("text") or data.get("message") or data.get("sms")
+            if not text_content:
+                logger.warning(f"[Termii Gateway] Missing message text in provider response for {provider_message_id}")
+                return None
+            if delivery_id:
+                if delivery_id not in str(text_content) and f"order {delivery_id}" not in str(text_content).lower():
+                    logger.warning(f"[Termii Gateway] Delivery identifier mismatch on {provider_message_id}: order {delivery_id} not in text.")
+                    return None
+
+            # 5. Verify authoritative outbound status
+            raw_status = (data.get("status") or data.get("code") or "").lower()
+            if not raw_status:
+                logger.warning(f"[Termii Gateway] Missing delivery status for {provider_message_id}")
+                return None
+            if raw_status in ["delivered", "sent", "successful", "ok"]:
+                return NotificationDispatchResult(
+                    status=NotificationDeliveryStatus.SENT,
+                    channel="Termii SMS Gateway",
+                    recipient_masked=mask_phone(recipient_phone or str(raw_to)),
+                    provider="termii",
+                    message_preview="Message delivery verified with Termii.",
+                    message_id=provider_message_id,
+                )
+            elif raw_status in ["failed", "rejected", "undelivered", "error"]:
+                return NotificationDispatchResult(
+                    status=NotificationDeliveryStatus.FAILED,
+                    channel="Termii SMS Gateway",
+                    recipient_masked=mask_phone(recipient_phone or str(raw_to)),
+                    provider="termii",
+                    message_preview="Message delivery failed on Termii.",
+                    error_details=data.get("message") or f"Termii status: {raw_status}",
+                    message_id=provider_message_id,
+                )
+            return None
         except Exception as exc:
             logger.warning(f"[Termii Gateway] Status check exception for {provider_message_id}: {exc}")
         return None
@@ -526,16 +535,20 @@ class TwilioNotificationProvider(BaseNotificationProvider):
                         return None
 
                     # 1. Verify SID identity matches exactly
-                    if data.get("sid") != provider_message_id:
-                        logger.warning(f"[Twilio Gateway] SID mismatch: expected {provider_message_id}, got {data.get('sid')}")
+                    sid = data.get("sid")
+                    if not sid or sid != provider_message_id:
+                        logger.warning(f"[Twilio Gateway] SID mismatch or missing: expected {provider_message_id}, got {sid}")
                         return None
 
-                    # 2. Verify recipient phone number if provided
+                    # 2. Verify recipient phone number (fail-closed: 'to' field MUST be present and match)
+                    msg_to = data.get("to")
+                    if not msg_to:
+                        logger.warning(f"[Twilio Gateway] Missing recipient 'to' field in provider response for {provider_message_id}")
+                        return None
                     if recipient_phone:
                         try:
                             expected_e164, _ = normalize_nigerian_phone(recipient_phone)
-                            msg_to = data.get("to") or ""
-                            actual_e164, _ = normalize_nigerian_phone(msg_to)
+                            actual_e164, _ = normalize_nigerian_phone(str(msg_to))
                             if actual_e164 != expected_e164:
                                 logger.warning(f"[Twilio Gateway] Recipient mismatch on {provider_message_id}: expected {expected_e164}, got {actual_e164}")
                                 return None
@@ -543,27 +556,35 @@ class TwilioNotificationProvider(BaseNotificationProvider):
                             logger.warning(f"[Twilio Gateway] Recipient normalization comparison failed: {e}")
                             return None
 
-                    # 3. Verify sender if configured
-                    if self.from_number:
-                        msg_from = data.get("from") or ""
-                        if msg_from and msg_from.strip() != self.from_number.strip():
-                            logger.warning(f"[Twilio Gateway] Sender mismatch on {provider_message_id}: expected {self.from_number}, got {msg_from}")
-                            return None
+                    # 3. Verify sender (fail-closed: 'from' field MUST be present and match configured from_number)
+                    msg_from = data.get("from")
+                    if not msg_from:
+                        logger.warning(f"[Twilio Gateway] Missing sender 'from' field in provider response for {provider_message_id}")
+                        return None
+                    if self.from_number and str(msg_from).strip() != self.from_number.strip():
+                        logger.warning(f"[Twilio Gateway] Sender mismatch on {provider_message_id}: expected {self.from_number}, got {msg_from}")
+                        return None
 
-                    # 4. Verify delivery fingerprint in message body if provided
+                    # 4. Verify delivery identifier in message body (fail-closed: body MUST be present and contain delivery_id)
+                    body = data.get("body")
+                    if not body:
+                        logger.warning(f"[Twilio Gateway] Missing message body in provider response for {provider_message_id}")
+                        return None
                     if delivery_id:
-                        body = data.get("body") or ""
-                        if delivery_id not in body and f"order {delivery_id}" not in body.lower():
-                            logger.warning(f"[Twilio Gateway] Delivery fingerprint mismatch on {provider_message_id}: order {delivery_id} not in body.")
+                        if delivery_id not in str(body) and f"order {delivery_id}" not in str(body).lower():
+                            logger.warning(f"[Twilio Gateway] Delivery identifier mismatch on {provider_message_id}: order {delivery_id} not in body.")
                             return None
 
                     # 5. Verify authoritative status
-                    tw_status = data.get("status", "").lower()
+                    tw_status = (data.get("status") or "").lower()
+                    if not tw_status:
+                        logger.warning(f"[Twilio Gateway] Missing status in provider response for {provider_message_id}")
+                        return None
                     if tw_status in ["queued", "sending", "sent", "delivered"]:
                         return NotificationDispatchResult(
                             status=NotificationDeliveryStatus.SENT,
                             channel="Twilio SMS Gateway",
-                            recipient_masked=mask_phone(data.get("to", recipient_phone or "***")),
+                            recipient_masked=mask_phone(recipient_phone or str(msg_to)),
                             provider="twilio",
                             message_preview="Message confirmed sent by Twilio.",
                             message_id=provider_message_id,
@@ -572,7 +593,7 @@ class TwilioNotificationProvider(BaseNotificationProvider):
                         return NotificationDispatchResult(
                             status=NotificationDeliveryStatus.FAILED,
                             channel="Twilio SMS Gateway",
-                            recipient_masked=mask_phone(data.get("to", recipient_phone or "***")),
+                            recipient_masked=mask_phone(recipient_phone or str(msg_to)),
                             provider="twilio",
                             message_preview="Message delivery failed on Twilio.",
                             error_details=data.get("error_message") or f"Twilio status: {tw_status}",

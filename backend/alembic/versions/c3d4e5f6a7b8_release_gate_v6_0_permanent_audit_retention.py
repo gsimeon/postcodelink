@@ -34,10 +34,11 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column("deleted_at", sa.DateTime(), nullable=True))
         batch_op.create_index("ix_deliveries_is_deleted", ["is_deleted"])
 
-    # 2. Add dispatch attempt & original idempotency tracking to notification_outbox
+    # 2. Add dispatch attempt, original idempotency, and previous provider message ID tracking to notification_outbox
     with op.batch_alter_table("notification_outbox") as batch_op:
         batch_op.add_column(sa.Column("dispatch_attempt", sa.Integer(), nullable=False, server_default="1"))
         batch_op.add_column(sa.Column("original_idempotency_key", sa.String(length=64), nullable=True))
+        batch_op.add_column(sa.Column("last_failed_provider_message_id", sa.String(length=128), nullable=True))
 
     # 3. Unconditional Database Triggers for permanent audit immutability
     if dialect_name == "postgresql":
@@ -64,15 +65,12 @@ def upgrade() -> None:
         FOR EACH ROW EXECUTE FUNCTION prevent_delivery_events_tampering();
         """)
 
-        # Restrict parent deletion if audit records exist
-        try:
-            op.execute("""
-            ALTER TABLE delivery_events DROP CONSTRAINT IF EXISTS delivery_events_delivery_id_fkey;
-            ALTER TABLE delivery_events ADD CONSTRAINT delivery_events_delivery_id_fkey
-                FOREIGN KEY (delivery_id) REFERENCES deliveries(id) ON DELETE RESTRICT;
-            """)
-        except Exception:
-            pass
+        # Restrict parent deletion if audit records exist (fail-closed without silent suppression)
+        op.execute("""
+        ALTER TABLE delivery_events DROP CONSTRAINT IF EXISTS delivery_events_delivery_id_fkey;
+        ALTER TABLE delivery_events ADD CONSTRAINT delivery_events_delivery_id_fkey
+            FOREIGN KEY (delivery_id) REFERENCES deliveries(id) ON DELETE RESTRICT;
+        """)
     elif dialect_name == "sqlite":
         # SQLite unconditional triggers
         op.execute("DROP TRIGGER IF EXISTS trg_delivery_events_no_update;")
@@ -114,15 +112,74 @@ def downgrade() -> None:
         op.execute("DROP TRIGGER IF EXISTS trg_deliveries_no_delete_with_audit_events;")
         op.execute("DROP TRIGGER IF EXISTS trg_delivery_events_no_update;")
         op.execute("DROP TRIGGER IF EXISTS trg_delivery_events_no_delete;")
-    elif dialect_name == "postgresql":
-        op.execute("DROP TRIGGER IF EXISTS trg_delivery_events_immutable ON delivery_events;")
-        op.execute("DROP FUNCTION IF EXISTS prevent_delivery_events_tampering();")
+        op.execute("DROP TABLE IF EXISTS _alembic_tmp_deliveries;")
+        op.execute("DROP TABLE IF EXISTS _alembic_tmp_notification_outbox;")
+
+    inspector = sa.inspect(bind)
+    outbox_cols = [c["name"] for c in inspector.get_columns("notification_outbox")]
+    delivery_cols = [c["name"] for c in inspector.get_columns("deliveries")]
 
     with op.batch_alter_table("notification_outbox") as batch_op:
-        batch_op.drop_column("original_idempotency_key")
-        batch_op.drop_column("dispatch_attempt")
+        if "last_failed_provider_message_id" in outbox_cols:
+            batch_op.drop_column("last_failed_provider_message_id")
+        if "original_idempotency_key" in outbox_cols:
+            batch_op.drop_column("original_idempotency_key")
+        if "dispatch_attempt" in outbox_cols:
+            batch_op.drop_column("dispatch_attempt")
 
     with op.batch_alter_table("deliveries") as batch_op:
-        batch_op.drop_index("ix_deliveries_is_deleted")
-        batch_op.drop_column("deleted_at")
-        batch_op.drop_column("is_deleted")
+        if "ix_deliveries_is_deleted" in [ix["name"] for ix in inspector.get_indexes("deliveries")]:
+            batch_op.drop_index("ix_deliveries_is_deleted")
+        if "deleted_at" in delivery_cols:
+            batch_op.drop_column("deleted_at")
+        if "is_deleted" in delivery_cols:
+            batch_op.drop_column("is_deleted")
+
+    if dialect_name == "sqlite":
+        # Fully restore original Release Gate v5.9 SQLite triggers AFTER batch alterations
+        op.execute("""
+        CREATE TRIGGER IF NOT EXISTS trg_delivery_events_no_update
+        BEFORE UPDATE ON delivery_events
+        BEGIN
+            SELECT RAISE(ABORT, 'delivery_events records are append-only immutable audit logs and cannot be updated');
+        END;
+        """)
+
+        op.execute("""
+        CREATE TRIGGER IF NOT EXISTS trg_delivery_events_no_delete
+        BEFORE DELETE ON delivery_events
+        WHEN EXISTS (SELECT 1 FROM deliveries WHERE id = OLD.delivery_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'delivery_events records are append-only immutable audit logs and cannot be deleted');
+        END;
+        """)
+    elif dialect_name == "postgresql":
+        # Fully restore original Release Gate v5.9 PostgreSQL trigger and function
+        op.execute("""
+        CREATE OR REPLACE FUNCTION prevent_delivery_events_tampering()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            IF (TG_OP = 'UPDATE') THEN
+                RAISE EXCEPTION 'delivery_events records are append-only immutable audit logs and cannot be updated';
+            ELSIF (TG_OP = 'DELETE') THEN
+                IF (current_query() ~* 'delivery_events' AND current_query() !~* 'deliveries') OR EXISTS (SELECT 1 FROM deliveries WHERE id = OLD.delivery_id) THEN
+                    RAISE EXCEPTION 'delivery_events records are append-only immutable audit logs and cannot be deleted';
+                END IF;
+            END IF;
+            RETURN OLD;
+        END;
+        $$ LANGUAGE plpgsql;
+        """)
+
+        op.execute("DROP TRIGGER IF EXISTS trg_delivery_events_immutable ON delivery_events;")
+        op.execute("""
+        CREATE TRIGGER trg_delivery_events_immutable
+        BEFORE UPDATE OR DELETE ON delivery_events
+        FOR EACH ROW EXECUTE FUNCTION prevent_delivery_events_tampering();
+        """)
+
+        op.execute("""
+        ALTER TABLE delivery_events DROP CONSTRAINT IF EXISTS delivery_events_delivery_id_fkey;
+        ALTER TABLE delivery_events ADD CONSTRAINT delivery_events_delivery_id_fkey
+            FOREIGN KEY (delivery_id) REFERENCES deliveries(id) ON DELETE CASCADE;
+        """)

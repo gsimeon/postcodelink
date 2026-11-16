@@ -194,6 +194,69 @@ def check_api_key_rate_limit(key_id: str, limit_per_minute: int = 60) -> None:
         _KEY_REQUEST_WINDOWS[key_id] = active_entries
 
 
+def check_client_ip_rate_limit(client_ip: str, limit_per_minute: int = 15) -> None:
+    """Enforce per-minute sliding-window rate limit for unauthenticated public demonstration requests by IP.
+    
+    If the IP exceeds limit_per_minute within the last 60 seconds, raises HTTP 429
+    with a compliant 'Retry-After' header and message prompting to provide an x-api-key.
+    """
+    if limit_per_minute <= 0:
+        return
+
+    now = time.time()
+    window_seconds = 60.0
+    r_client = _get_redis_client()
+
+    if r_client is not None:
+        try:
+            r_key = f"ratelimit:public_ip:{client_ip}"
+            suffix = secrets.token_hex(4)
+            res = r_client.eval(
+                LUA_SLIDING_WINDOW_SCRIPT,
+                1,
+                r_key,
+                str(now),
+                str(window_seconds),
+                str(limit_per_minute),
+                suffix,
+            )
+            allowed = int(res[0])
+            retry_after = int(res[2])
+
+            if allowed == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Public demo rate limit exceeded. Maximum {limit_per_minute} requests per minute for unauthenticated callers. Pass a valid 'x-api-key' header for commercial quota.",
+                    headers={"Retry-After": str(retry_after)},
+                )
+            return
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning(f"[RateLimiter ALERT] Redis Lua IP rate limit operation failed: {exc}")
+            _handle_redis_failure()
+
+    # In-memory sliding window fallback
+    global _LAST_CLEANUP_TIME
+    with _LOCK:
+        ip_key = f"ip_{client_ip}"
+        history = _KEY_REQUEST_WINDOWS.get(ip_key, [])
+        active_entries = [t for t in history if now - t < window_seconds]
+
+        if len(active_entries) >= limit_per_minute:
+            oldest = active_entries[0]
+            retry_after = max(1, int(window_seconds - (now - oldest)))
+            _KEY_REQUEST_WINDOWS[ip_key] = active_entries
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Public demo rate limit exceeded. Maximum {limit_per_minute} requests per minute for unauthenticated callers. Pass a valid 'x-api-key' header for commercial quota.",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        active_entries.append(now)
+        _KEY_REQUEST_WINDOWS[ip_key] = active_entries
+
+
 def get_rate_limiter_status() -> Dict[str, Any]:
     """Inspect current rate limiter backend, operational connection state, and alerts."""
     r_client = _get_redis_client()

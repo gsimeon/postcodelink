@@ -113,7 +113,7 @@ def test_provider_verified_reconciliation_validates_actual_provider():
             notification_type="otp_delivery_pin",
             recipient_phone=delivery.recipient_phone,
             recipient_name=delivery.recipient_name,
-            provider="simulated",
+            provider="termii",
             status=NotificationDeliveryStatus.RECONCILIATION_REQUIRED,
             idempotency_key=f"recon_key_v59_{secrets.token_hex(4)}",
             retry_count=2,
@@ -124,42 +124,41 @@ def test_provider_verified_reconciliation_validates_actual_provider():
         outbox_id = outbox_item.id
 
         # 1. Fabricated provider message ID must be REJECTED (HTTP 422)
-        fake_resp = client.post(
-            f"/api/v1/deliveries/outbox/{outbox_id}/reconcile",
-            json={
-                "resolution": "mark_sent",
-                "evidence_type": "provider_telemetry_verified",
-                "provider_message_id": "FABRICATED_MESSAGE_ID_9999",
-                "reason": "Operator claims carrier verified without real record",
-            },
-            headers=admin_headers,
-        )
+        with patch("httpx.get", return_value=MagicMock(status_code=404, json=lambda: {})):
+            fake_resp = client.post(
+                f"/api/v1/deliveries/outbox/{outbox_id}/reconcile",
+                json={
+                    "resolution": "mark_sent",
+                    "evidence_type": "provider_telemetry_verified",
+                    "provider_message_id": "FABRICATED_MESSAGE_ID_9999",
+                    "reason": "Operator claims carrier verified without real record",
+                },
+                headers=admin_headers,
+            )
         assert fake_resp.status_code == 422
         assert "could not be confirmed" in fake_resp.json()["detail"].lower()
 
-        # 2. Authentic provider message ID (recorded in provider cache) succeeds
-        real_msg_id = f"sim_real_{secrets.token_hex(6)}"
-        provider = get_notification_provider("simulated")
-        provider._dispatched_idempotency_keys[outbox_item.idempotency_key] = NotificationDispatchResult(
-            status=NotificationDeliveryStatus.SIMULATED,
-            channel="Simulated Gateway",
-            recipient_masked="+234****3344",
-            provider="simulated",
-            message_preview="Confirmed delivered.",
-            message_id=real_msg_id,
-            idempotency_key=outbox_item.idempotency_key,
-        )
-
-        ok_resp = client.post(
-            f"/api/v1/deliveries/outbox/{outbox_id}/reconcile",
-            json={
-                "resolution": "mark_sent",
-                "evidence_type": "provider_telemetry_verified",
-                "provider_message_id": real_msg_id,
-                "reason": "Confirmed against provider telemetry logs with verified status.",
-            },
-            headers=admin_headers,
-        )
+        # 2. Authentic provider message ID (confirmed via live carrier telemetry) succeeds
+        real_msg_id = f"termii_real_{secrets.token_hex(6)}"
+        mock_ok = MagicMock(status_code=200)
+        mock_ok.json.return_value = {
+            "message_id": real_msg_id,
+            "to": "2348011223344",
+            "from": settings.TERMII_SENDER_ID or "PostcodeLnk",
+            "text": f"Your PostcodeLink delivery confirmation PIN for order {delivery_id} is 123456.",
+            "status": "Delivered",
+        }
+        with patch("httpx.get", return_value=mock_ok):
+            ok_resp = client.post(
+                f"/api/v1/deliveries/outbox/{outbox_id}/reconcile",
+                json={
+                    "resolution": "mark_sent",
+                    "evidence_type": "provider_telemetry_verified",
+                    "provider_message_id": real_msg_id,
+                    "reason": "Confirmed against provider telemetry logs with verified status.",
+                },
+                headers=admin_headers,
+            )
         assert ok_resp.status_code == 200
         db.refresh(outbox_item)
         assert outbox_item.status == NotificationDeliveryStatus.SENT

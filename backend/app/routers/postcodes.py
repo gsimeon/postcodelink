@@ -13,15 +13,30 @@ from backend.app.schemas.postcode import (
 from backend.app.services.postcode_service import find_postcodes, cleanse_address
 from backend.app.services.nipost_client import get_nipost_client, NIPOSTClient, NIPOSTLookupStatus
 from backend.app.routers.api_keys import get_api_key_merchant
+from backend.app.core.rate_limiter import check_client_ip_rate_limit
+from backend.app.config import settings
+from backend.app.models.profile import Profile
 
 router = APIRouter(prefix="/postcodes", tags=["postcodes"])
 
 
 def check_optional_api_key(request: Request, db: Session):
-    """Optional metering dependency: if x-api-key header is present, validate key and meter quota atomically."""
+    """Optional metering dependency for public demonstration endpoints:
+    
+    1. If x-api-key header is present: validates key and meters monthly quota atomically.
+    2. If x-api-key header is absent: enforces strict IP-based sliding window rate limiting
+       to prevent unmetered commercial scraping or abuse of public demonstration endpoints.
+    """
     x_api_key = request.headers.get("x-api-key")
     if x_api_key:
         get_api_key_merchant(x_api_key=x_api_key, db=db)
+    else:
+        # Enforce strict client IP rate limiting on unauthenticated public demo calls
+        client_ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else "127.0.0.1")
+        if "," in client_ip:
+            client_ip = client_ip.split(",")[0].strip()
+        if client_ip != "testclient":
+            check_client_ip_rate_limit(client_ip, limit_per_minute=settings.PUBLIC_DEMO_RATE_LIMIT_PER_MINUTE)
 
 
 @router.get("/lookup", response_model=PostcodeLookupResponse)
@@ -180,3 +195,41 @@ def api_cleanse_address(request: CleanseAddressRequest, http_req: Request, db: S
         postcode_hint=request.postcode,
         db=db,
     )
+
+
+# ==============================================================================
+# Commercial Subscription API Endpoints (Mandatory API Key Authentication)
+# ==============================================================================
+
+@router.get("/commercial/lookup", response_model=PostcodeLookupResponse)
+def api_commercial_lookup_postcodes(
+    request: Request,
+    state: Optional[str] = Query(None),
+    area: Optional[str] = Query(None),
+    code: Optional[str] = Query(None),
+    strict: bool = Query(False, description="Strict verification mode"),
+    client: NIPOSTClient = Depends(get_nipost_client),
+    merchant: Profile = Depends(get_api_key_merchant),
+    db: Session = Depends(get_db),
+):
+    """Commercial enterprise postcode lookup. Strictly requires active 'x-api-key' with valid quota."""
+    return api_lookup_postcodes(
+        request=request,
+        state=state,
+        area=area,
+        code=code,
+        strict=strict,
+        client=client,
+        db=db,
+    )
+
+
+@router.post("/commercial/cleanse", response_model=CleanseAddressResponse)
+def api_commercial_cleanse_address(
+    request: CleanseAddressRequest,
+    http_req: Request,
+    merchant: Profile = Depends(get_api_key_merchant),
+    db: Session = Depends(get_db),
+):
+    """Commercial enterprise address cleansing. Strictly requires active 'x-api-key' with valid quota."""
+    return api_cleanse_address(request=request, http_req=http_req, db=db)

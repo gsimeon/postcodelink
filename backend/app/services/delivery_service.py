@@ -596,7 +596,10 @@ def get_public_tracking(db: Session, identifier: str) -> DeliveryPublicTrackingR
             detail="Public tracking requires a valid 32-character tracking token. Human-readable delivery IDs cannot be used for public tracking."
         )
 
-    delivery = db.query(Delivery).filter(Delivery.tracking_token == token).first()
+    delivery = db.query(Delivery).filter(
+        Delivery.tracking_token == token,
+        Delivery.is_deleted == False,
+    ).first()
     if not delivery:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -889,10 +892,12 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
         if not getattr(item, "idempotency_key", None):
             item.idempotency_key = f"outbox_{item.id}_{item.delivery_version}_{item.retry_count}"
 
-        # Idempotent reconciliation guard:
-        # If the item already has a provider_message_id recorded (e.g. from previous dispatch attempt
-        # where the provider accepted the SMS), reconcile to SENT immediately without re-dispatching.
-        if getattr(item, "provider_message_id", None):
+        # Idempotent crash recovery guard:
+        # If the item already has a provider_message_id recorded from prior provider acceptance before a DB crash,
+        # reconcile to SENT immediately without duplicate dispatch.
+        # Note: When an item is manually requeued, api_reconcile_outbox_item explicitly clears provider_message_id = None
+        # and moves the old ID to last_failed_provider_message_id, ensuring a requeued item is always re-dispatched cleanly.
+        if getattr(item, "provider_message_id", None) and item.provider_message_id.strip():
             logger.info(
                 f"[Outbox Worker] Item {item.id} already has provider_message_id '{item.provider_message_id}'. "
                 "Reconciling to SENT without duplicate dispatch."

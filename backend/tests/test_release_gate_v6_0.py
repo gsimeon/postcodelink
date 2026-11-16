@@ -28,7 +28,11 @@ from backend.app.services.notification_service import (
     TermiiNotificationProvider,
     SimulatedNotificationProvider,
 )
-from backend.app.core.security import create_access_token, hash_otp
+from alembic.config import Config
+from alembic import command
+from backend.app.models.api_key import ApiKey
+from backend.app.services.delivery_service import process_notification_outbox
+from backend.app.core.security import create_access_token, hash_otp, encrypt_authenticated_pin
 from backend.app.core.rate_limiter import (
     check_api_key_rate_limit,
     reset_api_key_rate_limits,
@@ -680,3 +684,449 @@ def test_manual_requeue_dispatch_attempt_and_idempotency_history():
             deliv.is_deleted = True
         db.commit()
         db.close()
+
+
+# ==============================================================================
+# 8. P1: Provider Verification Rejects Simulated Evidence
+# ==============================================================================
+def test_provider_telemetry_verified_strictly_rejects_simulated_provider():
+    """Verify that provider_telemetry_verified strictly rejects simulated provider records with HTTP 422."""
+    admin_token = get_token(AppRole.ADMIN, "v60_sim_reject_admin@test.ng")
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+    delivery_id = f"PL-SIM-REJECT-{secrets.token_hex(4)}"
+    db = SessionLocal()
+    try:
+        delivery = Delivery(
+            id=delivery_id,
+            recipient_phone="+2348011223344",
+            recipient_name="Sim Reject Recipient",
+            destination_state="Lagos",
+            destination_area="Ikeja",
+            destination_address="45 Sim St",
+            package_description="Sim Reject Package",
+            postcode_input="100271",
+            status=DeliveryStatus.PENDING,
+            otp_hash=hash_otp("112233"),
+            tracking_token=f"token_{secrets.token_hex(16)}",
+            is_deleted=False,
+        )
+        db.add(delivery)
+        db.commit()
+
+        outbox_item = NotificationOutbox(
+            delivery_id=delivery.id,
+            notification_type="otp_delivery_pin",
+            recipient_phone=delivery.recipient_phone,
+            recipient_name=delivery.recipient_name,
+            provider="simulated",
+            status=NotificationDeliveryStatus.RECONCILIATION_REQUIRED,
+            retry_count=3,
+            max_retries=3,
+            idempotency_key=f"idemp_sim_rej_{secrets.token_hex(4)}",
+            dispatch_attempt=1,
+        )
+        db.add(outbox_item)
+        db.commit()
+        db.refresh(outbox_item)
+        outbox_id = outbox_item.id
+
+        # Attempt provider_telemetry_verified on simulated item -> Must receive HTTP 422!
+        resp = client.post(
+            f"/api/v1/deliveries/outbox/{outbox_id}/reconcile",
+            json={
+                "resolution": "mark_sent",
+                "evidence_type": "provider_telemetry_verified",
+                "provider_message_id": "sim_fabricated_999",
+                "reason": "Operator asserting simulated gateway response.",
+            },
+            headers=admin_headers,
+        )
+        assert resp.status_code == 422
+        assert "simulated notifications cannot be used" in resp.json()["detail"].lower()
+    finally:
+        deliv = db.query(Delivery).filter(Delivery.id == delivery_id).first()
+        if deliv:
+            deliv.is_deleted = True
+        db.commit()
+        db.close()
+
+
+# ==============================================================================
+# 9. P1: Twilio Verification Fail-Closed on Missing Upstream Fields
+# ==============================================================================
+def test_twilio_verification_fail_closed_missing_fields():
+    """Verify Twilio check_message_status fails closed (returns None) when sender, body, or recipient is missing."""
+    provider = TwilioNotificationProvider(
+        account_sid="AC_test_account_sid_12345",
+        auth_token="test_auth_token_12345",
+        from_number="+15005550006",
+    )
+    delivery_id = "PL-TWILIO-MISSING-01"
+    msg_id = "SM_twilio_missing_fields"
+
+    # 1. Missing sender 'from' in provider response -> returns None
+    resp_missing_from = MagicMock(status_code=200, json=lambda: {
+        "sid": msg_id,
+        "to": "+2348011223344",
+        "body": f"Your PostcodeLink delivery confirmation PIN for order {delivery_id} is 849201.",
+        "status": "delivered",
+    })
+    with patch("httpx.get", return_value=resp_missing_from):
+        assert provider.check_message_status(
+            idempotency_key="key",
+            provider_message_id=msg_id,
+            recipient_phone="+2348011223344",
+            delivery_id=delivery_id,
+        ) is None
+
+    # 2. Missing 'body' in provider response -> returns None
+    resp_missing_body = MagicMock(status_code=200, json=lambda: {
+        "sid": msg_id,
+        "to": "+2348011223344",
+        "from": "+15005550006",
+        "status": "delivered",
+    })
+    with patch("httpx.get", return_value=resp_missing_body):
+        assert provider.check_message_status(
+            idempotency_key="key",
+            provider_message_id=msg_id,
+            recipient_phone="+2348011223344",
+            delivery_id=delivery_id,
+        ) is None
+
+    # 3. Missing 'to' in provider response -> returns None
+    resp_missing_to = MagicMock(status_code=200, json=lambda: {
+        "sid": msg_id,
+        "from": "+15005550006",
+        "body": f"Your PostcodeLink delivery confirmation PIN for order {delivery_id} is 849201.",
+        "status": "delivered",
+    })
+    with patch("httpx.get", return_value=resp_missing_to):
+        assert provider.check_message_status(
+            idempotency_key="key",
+            provider_message_id=msg_id,
+            recipient_phone="+2348011223344",
+            delivery_id=delivery_id,
+        ) is None
+
+
+# ==============================================================================
+# 10. P1: Termii Verification Fail-Closed & No Fallback to Inbox
+# ==============================================================================
+def test_termii_verification_fail_closed_missing_fields_and_no_inbox_fallback():
+    """Verify Termii check_message_status fails closed on missing fields and rejects non-200 without inbox fallback."""
+    provider = TermiiNotificationProvider(
+        api_key="test_termii_api_key_12345",
+        sender_id="PostcodeLink",
+    )
+    delivery_id = "PL-TERMII-MISSING-01"
+    msg_id = "MSG_termii_missing_fields"
+
+    # 1. Non-200 status -> returns None immediately without querying inbox
+    resp_error = MagicMock(status_code=404, json=lambda: {"message": "Not found"})
+    with patch("httpx.get", return_value=resp_error) as mock_get:
+        res = provider.check_message_status(
+            idempotency_key="key",
+            provider_message_id=msg_id,
+            recipient_phone="+2348011223344",
+            delivery_id=delivery_id,
+        )
+        assert res is None
+        # Assert httpx.get was called strictly once (no fallback to inbox!)
+        assert mock_get.call_count == 1
+        assert "inbox" not in mock_get.call_args[0][0]
+
+    # 2. Missing sender in response -> returns None
+    resp_missing_sender = MagicMock(status_code=200, json=lambda: {
+        "message_id": msg_id,
+        "to": "2348011223344",
+        "text": f"Your delivery PIN for order {delivery_id} is 123456.",
+        "status": "delivered",
+    })
+    with patch("httpx.get", return_value=resp_missing_sender):
+        assert provider.check_message_status(
+            idempotency_key="key",
+            provider_message_id=msg_id,
+            recipient_phone="+2348011223344",
+            delivery_id=delivery_id,
+        ) is None
+
+    # 3. Missing text in response -> returns None
+    resp_missing_text = MagicMock(status_code=200, json=lambda: {
+        "message_id": msg_id,
+        "to": "2348011223344",
+        "from": "PostcodeLink",
+        "status": "delivered",
+    })
+    with patch("httpx.get", return_value=resp_missing_text):
+        assert provider.check_message_status(
+            idempotency_key="key",
+            provider_message_id=msg_id,
+            recipient_phone="+2348011223344",
+            delivery_id=delivery_id,
+        ) is None
+
+
+# ==============================================================================
+# 11. P1: Manual Requeue Clears Active Provider Message ID
+# ==============================================================================
+def test_manual_requeue_clears_active_provider_message_id_and_prevents_stale_sent():
+    """Verify that manual requeue clears active provider_message_id, records last_failed_provider_message_id, and causes the worker to dispatch anew."""
+    admin_token = get_token(AppRole.ADMIN, "v60_requeue_stale_admin@test.ng")
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+    delivery_id = f"PL-REQUEUE-STALE-{secrets.token_hex(4)}"
+    stale_msg_id = "old_stale_provider_message_998877"
+    db = SessionLocal()
+    try:
+        delivery = Delivery(
+            id=delivery_id,
+            recipient_phone="+2348011223344",
+            recipient_name="Requeue Recipient",
+            destination_state="Lagos",
+            destination_area="Ikeja",
+            destination_address="10 Marina St",
+            package_description="Requeue Test Package",
+            postcode_input="100271",
+            status=DeliveryStatus.PENDING,
+            otp_hash=hash_otp("112233"),
+            tracking_token=f"token_{secrets.token_hex(16)}",
+            is_deleted=False,
+        )
+        db.add(delivery)
+        db.commit()
+
+        outbox_item = NotificationOutbox(
+            delivery_id=delivery.id,
+            notification_type="otp_delivery_pin",
+            recipient_phone=delivery.recipient_phone,
+            recipient_name=delivery.recipient_name,
+            message_payload=encrypt_authenticated_pin("112233", delivery_id=delivery.id),
+            provider="simulated",
+            status=NotificationDeliveryStatus.FAILED,
+            retry_count=3,
+            max_retries=3,
+            provider_message_id=stale_msg_id,
+            idempotency_key=f"idemp_stale_{secrets.token_hex(4)}",
+            dispatch_attempt=1,
+        )
+        db.add(outbox_item)
+        db.commit()
+        db.refresh(outbox_item)
+        outbox_id = outbox_item.id
+
+        # 1. Requeue item
+        req_res = client.post(
+            f"/api/v1/deliveries/outbox/{outbox_id}/reconcile",
+            json={
+                "resolution": "requeue",
+                "reason": "Previous dispatch confirmed failed; operator authorized attempt 2.",
+            },
+            headers=admin_headers,
+        )
+        assert req_res.status_code == 200
+
+        db.refresh(outbox_item)
+        # Verify active provider_message_id is CLEARED (None), and stale ID preserved in last_failed_provider_message_id
+        assert outbox_item.provider_message_id is None
+        assert outbox_item.last_failed_provider_message_id == stale_msg_id
+        assert outbox_item.status == NotificationDeliveryStatus.QUEUED
+        assert outbox_item.dispatch_attempt == 2
+        assert "_att2" in outbox_item.idempotency_key
+
+        # 2. Process outbox with worker: worker must perform fresh dispatch, NOT falsely mark SENT with stale ID!
+        processed = process_notification_outbox(db, max_items=10)
+        assert processed >= 1
+
+        db.refresh(outbox_item)
+        assert outbox_item.status in [NotificationDeliveryStatus.SENT, NotificationDeliveryStatus.SIMULATED]
+        # Verify fresh message ID generated, distinct from stale ID
+        assert outbox_item.provider_message_id is not None
+        assert outbox_item.provider_message_id != stale_msg_id
+        assert outbox_item.provider_message_id.startswith("sim_")
+
+        # 3. Requeuing an already sent item must be REJECTED (HTTP 422)
+        rej_res = client.post(
+            f"/api/v1/deliveries/outbox/{outbox_id}/reconcile",
+            json={"resolution": "requeue", "reason": "Attempting invalid requeue of sent item"},
+            headers=admin_headers,
+        )
+        assert rej_res.status_code == 422
+    finally:
+        deliv = db.query(Delivery).filter(Delivery.id == delivery_id).first()
+        if deliv:
+            deliv.is_deleted = True
+        db.commit()
+        db.close()
+
+
+# ==============================================================================
+# 12. P1: Commercial Postcode API Authentication & Metering
+# ==============================================================================
+def test_commercial_postcode_api_key_mandatory_authentication():
+    """Verify commercial postcode endpoints strictly require active API keys and meter quota."""
+    merchant_token = get_token(AppRole.MERCHANT, "v60_comm_merchant@test.ng")
+    merchant_headers = {"Authorization": f"Bearer {merchant_token}"}
+
+    # 1. Create a commercial API key with quota 5
+    key_resp = client.post("/api/v1/api-keys/", json={"name": "Commercial Key", "monthly_quota": 5}, headers=merchant_headers)
+    assert key_resp.status_code == 201
+    key_data = key_resp.json()
+    raw_api_key = key_data["api_key"]
+
+    # 2. Missing x-api-key on commercial endpoint -> HTTP 401
+    unauth_res = client.get("/api/v1/postcodes/commercial/lookup?state=Lagos")
+    assert unauth_res.status_code == 401
+    assert "missing 'x-api-key'" in unauth_res.json()["detail"].lower()
+
+    # 3. Invalid x-api-key -> HTTP 401
+    invalid_res = client.get("/api/v1/postcodes/commercial/lookup?state=Lagos", headers={"x-api-key": "invalid_key_999999"})
+    assert invalid_res.status_code == 401
+    assert "invalid or revoked" in invalid_res.json()["detail"].lower()
+
+    # 4. Valid x-api-key -> HTTP 200 and meters quota
+    valid_res = client.get("/api/v1/postcodes/commercial/lookup?state=Lagos", headers={"x-api-key": raw_api_key})
+    assert valid_res.status_code == 200
+    assert valid_res.json()["count"] > 0
+
+    # 5. Cleanse endpoint with valid x-api-key -> HTTP 200
+    cleanse_res = client.post(
+        "/api/v1/postcodes/commercial/cleanse",
+        json={"address": "15 Marina St, Lagos Island", "state": "Lagos"},
+        headers={"x-api-key": raw_api_key},
+    )
+    assert cleanse_res.status_code == 200
+
+
+# ==============================================================================
+# 13. P1: Public Postcode Demo IP Rate Limiting
+# ==============================================================================
+def test_public_postcode_demo_client_ip_rate_limiting():
+    """Verify that unauthenticated callers on public demo endpoints are restricted by IP rate limiting."""
+    reset_api_key_rate_limits()
+    test_ip = "192.168.100.55"
+    headers = {"x-forwarded-for": test_ip}
+
+    # First 15 requests succeed (within limit of 15/min)
+    for _ in range(15):
+        res = client.get("/api/v1/postcodes/lookup?state=Lagos", headers=headers)
+        assert res.status_code == 200
+
+    # 16th request must be rate-limited (HTTP 429)
+    limited_res = client.get("/api/v1/postcodes/lookup?state=Lagos", headers=headers)
+    assert limited_res.status_code == 429
+    assert "public demo rate limit exceeded" in limited_res.json()["detail"].lower()
+    assert "retry-after" in limited_res.headers
+
+
+# ==============================================================================
+# 14. P2: Soft-Deleted Deliveries Excluded From Public Tracking
+# ==============================================================================
+def test_soft_deleted_deliveries_excluded_from_public_tracking():
+    """Verify that soft-deleted deliveries are excluded from public tracking and their tracking tokens are revoked."""
+    merchant_token = get_token(AppRole.MERCHANT, "v60_track_merchant@test.ng")
+    merchant_headers = {"Authorization": f"Bearer {merchant_token}"}
+
+    tracking_token = f"token_track_test_{secrets.token_hex(16)}"
+    delivery_id = f"PL-TRACK-TEST-{secrets.token_hex(4)}"
+    db = SessionLocal()
+    merchant = db.query(Profile).filter(Profile.email == "v60_track_merchant@test.ng").first()
+    try:
+        deliv = Delivery(
+            id=delivery_id,
+            merchant_id=merchant.id,
+            recipient_phone="+2348011223344",
+            recipient_name="Tracking Test Recipient",
+            destination_state="Lagos",
+            destination_area="Ikeja",
+            destination_address="12 Track Ave",
+            package_description="Tracking Package",
+            postcode_input="100271",
+            status=DeliveryStatus.PENDING,
+            otp_hash=hash_otp("123456"),
+            tracking_token=tracking_token,
+            is_deleted=False,
+        )
+        db.add(deliv)
+        db.commit()
+
+        # 1. Public tracking before deletion -> HTTP 200
+        pub_res = client.get(f"/api/v1/deliveries/track/{tracking_token}")
+        assert pub_res.status_code == 200
+        assert pub_res.json()["status"] == DeliveryStatus.PENDING.value
+
+        # 2. Soft-delete the delivery
+        del_res = client.delete(f"/api/v1/deliveries/{delivery_id}", headers=merchant_headers)
+        assert del_res.status_code == 204
+
+        # 3. Public tracking with original tracking token must return HTTP 404!
+        after_del_res = client.get(f"/api/v1/deliveries/track/{tracking_token}")
+        assert after_del_res.status_code == 404
+        assert "not found" in after_del_res.json()["detail"].lower()
+    finally:
+        deliv_obj = db.query(Delivery).filter(Delivery.id == delivery_id).first()
+        if deliv_obj:
+            deliv_obj.is_deleted = True
+        db.commit()
+        db.close()
+
+
+# ==============================================================================
+# 15. P2: Migration Downgrade Restores Audit Triggers & Upgrade Lifecycle
+# ==============================================================================
+def test_migration_downgrade_restores_audit_triggers_and_upgrade_lifecycle():
+    """Verify that downgrade to v5.9 restores audit triggers without error, and upgrade back to v6.0 succeeds."""
+    alembic_cfg = Config("alembic.ini")
+
+    try:
+        # 1. Downgrade to Release Gate v5.9 revision (b2c3d4e5f6a7)
+        command.downgrade(alembic_cfg, "b2c3d4e5f6a7")
+
+        # Verify v5.9 audit trigger works: raw update on delivery_events must fail
+        db = SessionLocal()
+        deliv_id = f"PL-MIGR-TEST-{secrets.token_hex(4)}"
+        tok_id = f"tok_migr_{secrets.token_hex(8)}"
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            # Insert using raw SQL because v5.9 schema does not have v6.0 columns (is_deleted, deleted_at)
+            db.execute(text(f"""
+            INSERT INTO deliveries (
+                id, tracking_token, recipient_name, recipient_phone,
+                destination_address, destination_area, destination_state,
+                postcode_input, postcode_status, package_description,
+                fee, status, otp_hash, otp_attempts, otp_max_attempts,
+                pod_verified, version, created_at, updated_at
+            )
+            VALUES (
+                '{deliv_id}', '{tok_id}', 'Migr Recipient', '+2348011223344',
+                '55 Migr St', 'Ikeja', 'Lagos',
+                '100271', 'UNVERIFIED', 'Migr Package',
+                2500.0, 'PENDING', 'hash123', 0, 3,
+                0, 1, '{now_iso}', '{now_iso}'
+            )
+            """))
+            db.execute(text(f"""
+            INSERT INTO delivery_events (
+                id, delivery_id, status, actor_name, actor_role, note, occurred_at
+            )
+            VALUES (
+                'evt_{deliv_id}', '{deliv_id}', 'PENDING', 'Migration Tester', 'admin', 'Testing v5.9 audit trigger', '{now_iso}'
+            )
+            """))
+            db.commit()
+
+            # Direct SQL UPDATE must still be blocked by restored v5.9 trigger
+            update_blocked = False
+            try:
+                db.execute(text(f"UPDATE delivery_events SET note = 'Tampered' WHERE id = 'evt_{deliv_id}'"))
+                db.commit()
+            except Exception:
+                update_blocked = True
+                db.rollback()
+            assert update_blocked, "Restored v5.9 trigger must block direct raw SQL UPDATE on delivery_events!"
+        finally:
+            db.close()
+    finally:
+        # 2. Upgrade back to Release Gate v6.0 revision (c3d4e5f6a7b8)
+        command.upgrade(alembic_cfg, "head")

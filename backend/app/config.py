@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     REDIS_REQUIRED_IN_PRODUCTION: bool = True
     RATE_LIMIT_REDIS_FAIL_CLOSED: bool = True
     ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION: bool = os.getenv("ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION", "false").lower() in ["true", "1"]
+    PUBLIC_DEMO_RATE_LIMIT_PER_MINUTE: int = int(os.getenv("PUBLIC_DEMO_RATE_LIMIT_PER_MINUTE", "15"))
 
     @model_validator(mode="before")
     @classmethod

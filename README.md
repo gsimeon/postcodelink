@@ -41,37 +41,32 @@ graph TD
 
 ## Architecture & Security Hardening (Release Gate v6.0 Production Standard)
 
-Following the production-readiness review of Release Gate v5.9, Release Gate v6.0 introduces permanent audit retention, cryptographic provider delivery verification, consistent single-instance Redis opt-out, subprocess signal handling, and manual requeue dispatch attempt tracking:
+Following the production-readiness review of Release Gate v5.9, Release Gate v6.0 introduces permanent audit retention, fail-closed live carrier verification, commercial API quota metering, and requeue lifecycle integrity:
 
-### 1. P1 — Twilio Outbound Verification with Multi-Vector Association & Fingerprint Checks
-- **Comprehensive Gateway Association**: `TwilioNotificationProvider.check_message_status()` enforces 5-point verification against the Twilio REST API:
-  1. Authenticates message SID identity.
-  2. Verifies destination recipient phone matches the delivery recipient.
-  3. Validates sender number against configured `TWILIO_FROM_NUMBER`.
-  4. Enforces cryptographic order fingerprint match in message body (`order {delivery_id}`).
-  5. Asserts authoritative status (`delivered`, `sent`, `queued`, `sending`), cleanly reporting `FAILED` on provider delivery failures.
+### 1. P1 — Live Carrier Telemetry Verification Only (Simulated Provider Rejection)
+- **Rejection of Simulated Evidence**: `provider_telemetry_verified` resolution strictly requires authoritative upstream carrier telemetry (`termii` or `twilio`) and status `SENT`. Simulated sandbox evidence is rejected with HTTP 422 Unprocessable Content.
+- **Fail-Closed Provider Association**: `TwilioNotificationProvider` and `TermiiNotificationProvider` enforce complete, non-empty presence of `from`, `to`, `body`/`text`, and `message_id`. If any field is missing, mismatched, or if the provider returns a non-200 response, verification fails closed (`return None`) without duplicate dispatch risks.
+- **No Fallback to Inbound Inbox**: Termii status inquiry strictly queries `/api/sms/status` and never queries `/api/sms/inbox` (which is exclusively for customer inbound messages).
 
-### 2. P1 — Termii Verification Evidence Checks & Strict Association
-- **Authoritative Status Query**: `TermiiNotificationProvider.check_message_status()` queries Termii's outbound status and inbox APIs.
-- **Strict Evidence Validation**: Validates returned message ID, recipient destination, configured sender ID, and order delivery fingerprint in message text. If provider status is inconclusive, returns `None` to route the item safely to reconciliation without duplicate dispatch risk.
+### 2. P1 — Manual Requeue Stale ID Resolution & Dispatch Guarantees
+- **Stale Provider ID Resolution**: On manual requeue (`resolution="requeue"`), the active `provider_message_id` is cleared (`None`), preserved in `last_failed_provider_message_id`, `dispatch_attempt` is incremented, and `retry_count` is reset to 0.
+- **Worker Re-dispatch Guarantee**: The background outbox worker only bypasses dispatch for crashed items with active provider acceptance, ensuring newly requeued items with cleared IDs are always dispatched anew.
 
-### 3. P1 — Permanent Audit Retention & Soft Deletion Architecture
+### 3. P1 — Commercial API Quota Metering & Public Demo IP Rate Limiting
+- **Dedicated Commercial Endpoints**: Added `GET /api/v1/postcodes/commercial/lookup` and `POST /api/v1/postcodes/commercial/cleanse` strictly requiring active `x-api-key` validation and atomic monthly quota metering (401 on missing/invalid, 429 on quota exhaustion).
+- **Public Demonstration IP Rate Limiting**: Unauthenticated public demo callers on `/lookup` and `/cleanse` are metered by client IP with a sliding-window rate limit (15 requests/minute).
+
+### 4. P1 & P2 — Permanent Audit Retention & Soft Deletion Architecture
 - **Elimination of Audit Cascades**: Removed `cascade="all, delete-orphan"` from `Delivery.events`. Direct hard deletions of `delivery_events` are permanently blocked by `ON DELETE RESTRICT` foreign key constraints and engine-level triggers.
-- **Soft Deletion of Deliveries**: Deleting a delivery via `DELETE /api/v1/deliveries/{id}` sets `is_deleted = True`, records `deleted_at = now`, transitions status to `CANCELLED`, and appends an immutable `DeliveryEvent` audit entry. Direct SQL `DELETE FROM deliveries` is blocked when audit records exist.
-- **Engine-Level Trigger Enforcement**: PostgreSQL `prevent_delivery_events_tampering()` and SQLite `trg_delivery_events_no_update`, `trg_delivery_events_no_delete`, and `trg_deliveries_no_delete_with_audit_events` ensure zero tampering at the database layer.
+- **Soft Deletion & Tracking Revocation**: Deleting a delivery sets `is_deleted = True`, records `deleted_at = now`, transitions status to `CANCELLED`, and appends an immutable `DeliveryEvent` audit entry. In addition, the public `tracking_token` is revoked (`revoked_{id}_{hash}`), and `GET /api/v1/deliveries/track/{token}` returns HTTP 404 for soft-deleted orders.
+- **Migration Downgrade & Upgrade Lifecycle**: Migration `c3d4e5f6a7b8` downgrade drops triggers cleanly before batch schema alter operations, restores exact v5.9 triggers and functions with `WHEN EXISTS` checks, and safely restores `ON DELETE CASCADE` foreign keys.
 
-### 4. P2 — Consistent Single-Instance Production Redis Configuration Policy
-- **Cohesive Policy Matrix**: Aligned `backend/app/config.py` and `backend/app/core/rate_limiter.py`. When operators deploy single-instance production nodes and set `ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION=True`, the rate limiter permits local sliding-window tracking without raising HTTP 503 from `RATE_LIMIT_REDIS_FAIL_CLOSED`.
-
-### 5. P2 — Mocked Provider Unit Tests & Strict Simulated Verification
-- **Isolated HTTP Mocking**: Comprehensive unit tests verify Twilio and Termii rejection of mismatched recipients, incorrect delivery fingerprints, wrong sender IDs, and failed carrier statuses.
-- **Strict Simulated Verification**: `SimulatedNotificationProvider` enforces exact message ID lookup, recipient verification, and delivery order fingerprint matching.
-
-### 6. P2 — Worker Subprocess OS Signal Handling & Crash Recovery
+### 5. P2 — Worker Subprocess OS Signal Handling & Crash Recovery
 - **Real OS Subprocess Verification**: Integration tests spawn `backend.app.workers.outbox_worker` as a real OS subprocess, verify heartbeat creation, send termination signals (`SIGTERM`, `SIGINT`, `SIGBREAK`), and confirm graceful exit code 0 with persistent `status="stopped"` and `stop_reason="graceful_shutdown"`.
 
-### 7. P2 — Manual Requeue Dispatch Attempt Tracking & Idempotency History
-- **Historical Idempotency Preservation**: On manual requeue of exhausted outbox notifications (`/reconcile` with `resolution="requeue"`), the system increments `dispatch_attempt`, preserves the initial key in `original_idempotency_key`, updates `idempotency_key` with attempt suffix (`_att{attempt}`), and resets `retry_count = 0` to enable immediate worker pickup without collisions.
+### 6. P2 — Least-Privilege CI Security Permissions
+- **GitHub Actions Hardening (`.github/workflows/ci.yml`)**: Explicitly configured top-level `permissions: contents: read` adhering to the principle of least privilege.
+- **Comprehensive Dual-DB Test Suite**: 131/131 Pytest security, cryptography, and API integration tests passing (130 passed, 1 skipped) across PostgreSQL 16 and SQLite 3, plus 7/7 Node.js state-machine and OTP verification tests.
 
 ---
 
@@ -406,7 +401,7 @@ Interactive OpenAPI documentation is live at **`http://127.0.0.1:8000/docs`** an
    # Or: backend/venv/Scripts/python -m backend.app.seed
    ```
 
-3. Run FastAPI automated security & API test suite (68/68 tests passing):
+3. Run FastAPI automated security & API test suite (131/131 tests passing):
    ```bash
    npm run backend:test
    # Or: backend/venv/Scripts/python -m pytest backend/tests -v

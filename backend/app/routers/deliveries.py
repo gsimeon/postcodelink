@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
 from backend.app.database import get_db
+from backend.app.config import settings
 from backend.app.models.delivery import Delivery
 from backend.app.models.delivery_event import DeliveryEvent
 from backend.app.models.operator import Operator
@@ -261,6 +262,8 @@ def api_delete_delivery(
     delivery.is_deleted = True
     delivery.deleted_at = now
     delivery.status = DeliveryStatus.CANCELLED
+    if delivery.tracking_token:
+        delivery.tracking_token = f"revoked_{delivery.id}_{uuid.uuid4().hex[:12]}"
 
     # Record immutable audit event
     actor_role_str = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
@@ -355,7 +358,16 @@ def api_reconcile_outbox_item(
                 )
             # Contact the configured provider to verify message existence, status, and delivery association
             from backend.app.services.notification_service import get_notification_provider
-            provider_name = item.provider if item.provider in ["termii", "twilio", "simulated"] else settings.SMS_PROVIDER
+            provider_name = (item.provider or settings.SMS_PROVIDER or "").lower()
+            if provider_name == "simulated" or provider_name not in ["termii", "twilio"]:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        "Simulated notifications cannot be used for 'provider_telemetry_verified' resolution. "
+                        "Evidence from local sandbox providers does not qualify as carrier telemetry. "
+                        "Use 'manual_operator_asserted' with supporting ticket reference, or configure an authoritative carrier (Termii/Twilio)."
+                    ),
+                )
             active_provider = get_notification_provider(provider_name)
             telemetry_res = None
             if active_provider and hasattr(active_provider, "check_message_status"):
@@ -369,7 +381,7 @@ def api_reconcile_outbox_item(
                 except Exception as exc:
                     logger.warning(f"Provider telemetry verification check exception: {exc}")
 
-            if not telemetry_res or telemetry_res.status not in [NotificationDeliveryStatus.SENT, NotificationDeliveryStatus.SIMULATED]:
+            if not telemetry_res or telemetry_res.status != NotificationDeliveryStatus.SENT:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail=(
@@ -403,6 +415,12 @@ def api_reconcile_outbox_item(
         item.locked_at = None
         item.locked_by = None
     elif req.resolution == "requeue":
+        if item.status not in [NotificationDeliveryStatus.FAILED, NotificationDeliveryStatus.RECONCILIATION_REQUIRED]:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Cannot requeue notification in active status '{item.status.value}'. Requeue is only permitted for failed or reconciliation-required items.",
+            )
+
         item.status = NotificationDeliveryStatus.QUEUED
         item.failure_classification = "manual_requeue_authorized"
         item.retry_count = 0  # Reset retry counter so exhausted items are eligible for processing
@@ -414,12 +432,19 @@ def api_reconcile_outbox_item(
         if not getattr(item, "original_idempotency_key", None):
             item.original_idempotency_key = item.idempotency_key
 
+        # Preserve the previous provider message ID in attempt history and clear active provider_message_id
+        # so the worker performs a fresh dispatch rather than incorrectly short-circuiting to SENT!
+        if item.provider_message_id:
+            item.last_failed_provider_message_id = item.provider_message_id
+            item.provider_message_id = None
+
         base_idempotency = (item.original_idempotency_key or item.idempotency_key or f"outbox_{item.id}")[:48]
         item.idempotency_key = f"{base_idempotency}_att{new_attempt}"
 
         item.error_details = (
             f"Supervisor {current_user.email} authorized manual requeue (dispatch_attempt: {new_attempt}, "
-            f"prior_idempotency: {item.original_idempotency_key}). Reason: {req.reason}."
+            f"prior_idempotency: {item.original_idempotency_key}, "
+            f"prior_provider_msg_id: {item.last_failed_provider_message_id}). Reason: {req.reason}."
         )
         item.next_attempt_at = now
         item.locked_at = None
