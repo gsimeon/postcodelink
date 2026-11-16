@@ -16,7 +16,7 @@ class PostcodeRecordSchema(BaseModel):
     building_reference: Optional[str] = None
     verification_status: Optional[str] = "local_reference"  # official_verified | local_reference | synthetic_demo | unverified
     provenance: Optional[str] = "PostcodeLink Local Reference Dataset"
-    dataset_version: Optional[str] = "2024.2"
+    dataset_version: Optional[str] = None
     verified_at: Optional[datetime] = None
     source_owner: Optional[str] = "PostcodeLink"
     source_type: Optional[str] = "local_reference"
@@ -36,8 +36,16 @@ class PostcodeLookupResponse(BaseModel):
     count: int
     matches: List[PostcodeRecordSchema]
     is_live_nipost: bool = False
-    dataset_version: str = "2024.2"
-    provenance: str = "NIPOST National Pilot Directory Edition 2024.2"
+    dataset_version: Optional[str] = None
+    api_integration_version: str = "2026.1"
+    provenance: str = "PostcodeLink Local Reference Dataset"
+    lookup_status: str = "local_reference"  # official_verified | not_found | fallback_reference | local_reference
+    verification_source: str = "local_nipost_reference_dataset"
+    verification_status: str = "local_reference"  # official_verified | local_reference | unverified
+    fallback_used: bool = False
+    fallback_reason: Optional[str] = None
+    upstream_status: Optional[str] = None
+    upstream_error: Optional[str] = None
 
 
 class CleanseAddressRequest(BaseModel):
@@ -57,7 +65,7 @@ class CleanseAddressResponse(BaseModel):
     postcode_type: str = "conventional_area"  # conventional_area | digital_location
     postcode_category: Optional[str] = "legacy_postal_code"  # legacy_postal_code | official_digital_postcode | local_address_reference
     resolution_level: str = "area_district"  # area_district | building_location
-    postcode_status: str  # verified | unverified | estimated | conflict | invalid
+    postcode_status: str  # verified | local_match | unverified | estimated | conflict | invalid
     verification_status: Optional[str] = "local_reference"
     confidence: float
     # Explicit three-dimension validation

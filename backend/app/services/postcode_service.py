@@ -1,33 +1,41 @@
 """Postcode directory service and Nigerian address cleanser.
 
-NIPOST Reference Provenance:
-- Source: NIPOST (Nigerian Postal Service) Official Digital Postcode Directory
-- Edition: National Pilot Directory Edition
+PostcodeLink Local Reference Provenance:
+- Source: PostcodeLink Demonstration Reference Dataset (independent local reference)
+- Edition: Demonstration & Reference Edition
 - Version: 2024.2
-- Publication Date: 2024-06-01
 - States Covered (11): Lagos, Abuja FCT, Rivers, Oyo, Ogun, Kano, Kaduna, Enugu, Delta, Edo, Anambra
-- Standard: Official 6-digit postal codes (1st digit: Zone, 2nd-3rd digits: Dispatch district, 4th-6th digits: Delivery office)
+- Note: Live official national postcode validation and autofill are provided via the NIPOST API client.
+  Local records are strictly categorized as local_reference and never represented as official government verification.
 """
 import re
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
 from backend.app.models.postcode import PostcodeDirectory
 from backend.app.schemas.postcode import CleanseAddressResponse, PostcodeRecordSchema
+from backend.app.core.postcode_utils import (
+    parse_digital_postcode_components,
+    parse_legacy_postcode,
+    parse_legacy_3part_code,
+    is_well_formed_postcode,
+    normalize_postcode,
+    extract_postcode_from_text,
+)
 
 DATASET_METADATA = {
     "version": "2024.2",
-    "edition": "National Pilot Directory Edition",
-    "source": "NIPOST (Nigerian Postal Service) Official Digital Postcode Directory",
+    "edition": "Local Demonstration & Reference Edition",
+    "source": "PostcodeLink Local Reference & Demonstration Dataset",
     "publication_date": "2024-06-01",
     "states_covered": [
         "Lagos", "Abuja FCT", "Rivers", "Oyo", "Ogun",
         "Kano", "Kaduna", "Enugu", "Delta", "Edo", "Anambra"
     ],
-    "status": "verified_pilot_dataset",
+    "status": "local_reference",
 }
 
-# Verified multi-state reference registry across all 11 covered Nigerian states
-OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
+# Legacy postal references and demonstration fixtures (multi-state pilot & format demonstration)
+LEGACY_POSTAL_REFERENCES: List[Dict[str, Any]] = [
     # 1. Lagos State (Zone 1)
     {"code": "100001", "area": "Ikeja Central / Alausa", "state": "Lagos", "lga": "Ikeja", "lat": 6.6186, "lng": 3.3570},
     {"code": "100271", "area": "Ikeja GRA", "state": "Lagos", "lga": "Ikeja", "lat": 6.5885, "lng": 3.3556},
@@ -163,7 +171,7 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
         "source_owner": "PostcodeLink",
         "source_type": "locally_collected_reference",
     },
-    # Official National 11-Character 5-Component Digital Postcodes (October 2026 National Standard)
+    # National 11-Character 5-Component Digital Postcode Fixtures (Format Demonstration Reference)
     {
         "code": "FC-02-A09-DB-09",
         "area": "Garki District Area 2",
@@ -172,13 +180,13 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
         "lat": 9.0321,
         "lng": 7.4891,
         "postcode_type": "digital_location",
-        "postcode_category": "official_digital_postcode",
-        "verification_status": "official_verified",
+        "postcode_category": "local_address_reference",
+        "verification_status": "local_reference",
         "building_reference": "Federal Commerce House",
-        "provenance": "NIPOST Official Digital Postcode Directory",
+        "provenance": "PostcodeLink National Postcode Format Demonstration Reference",
         "dataset_version": "2026.1",
-        "source_owner": "NIPOST",
-        "source_type": "official_national_directory",
+        "source_owner": "PostcodeLink",
+        "source_type": "demonstration_fixture",
         "national_components": {
             "state": "FC",
             "lga": "02",
@@ -195,13 +203,13 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
         "lat": 6.5921,
         "lng": 3.3541,
         "postcode_type": "digital_location",
-        "postcode_category": "official_digital_postcode",
-        "verification_status": "official_verified",
+        "postcode_category": "local_address_reference",
+        "verification_status": "local_reference",
         "building_reference": "Plot 4 Ikeja Commercial Plaza",
-        "provenance": "NIPOST Official Digital Postcode Directory",
+        "provenance": "PostcodeLink National Postcode Format Demonstration Reference",
         "dataset_version": "2026.1",
-        "source_owner": "NIPOST",
-        "source_type": "official_national_directory",
+        "source_owner": "PostcodeLink",
+        "source_type": "demonstration_fixture",
         "national_components": {
             "state": "LA",
             "lga": "01",
@@ -212,56 +220,29 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
     },
 ]
 
+# Backward-compatible alias for existing imports
+OFFICIAL_POSTCODES = LEGACY_POSTAL_REFERENCES
+
 
 def parse_national_digital_postcode(code: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Parse Nigeria's official 11-character 5-component national digital postcode.
-    
-    Structure established by NIPOST and the Federal Ministry (FMCIDE, launched Oct 2026):
-    - State: 2 uppercase letters (e.g. 'FC', 'LA', 'KN')
-    - LGA: 2 alphanumeric chars (e.g. '02', '01')
-    - District: 3 alphanumeric chars (e.g. 'A09', 'C03')
-    - Area: 2 alphanumeric chars (e.g. 'DB', 'IK')
-    - Building: 2 alphanumeric chars (e.g. '09', '02')
-    Total: exactly 11 alphanumeric characters.
-    
-    Returns structured component dictionary or None if code is invalid/malformed.
-    """
-    if not code or not isinstance(code, str):
-        return None
-    cleaned = code.strip().upper()
-    match = re.match(
-        r"^(?P<state>[A-Z]{2})[\s\-]?(?P<lga>[A-Z0-9]{2})[\s\-]?(?P<district>[A-Z0-9]{3})[\s\-]?(?P<area>[A-Z0-9]{2})[\s\-]?(?P<building>[A-Z0-9]{2})$",
-        cleaned,
-    )
-    if match:
-        data = match.groupdict()
-        data["canonical_code"] = f"{data['state']}-{data['lga']}-{data['district']}-{data['area']}-{data['building']}"
-        data["compact_code"] = f"{data['state']}{data['lga']}{data['district']}{data['area']}{data['building']}"
-        data["total_length"] = 11
-        return data
-    return None
+    """Parse Nigeria's official 11-character 5-component national digital postcode via shared core utility."""
+    return parse_digital_postcode_components(code)
 
 
 def normalize_digital_postcode(code: Optional[str]) -> Optional[str]:
     """Normalize and format Nigerian digital postcodes into canonical format.
-    
-    Supports:
-    1. Official National 11-character 5-component format: SS-LL-DDD-AA-BB (e.g. FC-02-A09-DB-09)
-    2. Local Reference 3-part format: SSS-DDD-BBBB[B] (e.g. LAG-IKJ-0012)
+    Returns canonical format for 11-char national digital codes or 3-part local reference codes;
+    returns None for legacy 6-digit conventional codes or invalid strings.
     """
     if not code or not isinstance(code, str):
         return None
     cleaned = code.strip().upper()
-    
-    # 1. Official National 11-character format
-    nat = parse_national_digital_postcode(cleaned)
+    nat = parse_digital_postcode_components(cleaned)
     if nat:
         return nat["canonical_code"]
-
-    # 2. Local Reference 3-part format
-    match = re.match(r"^([A-Z]{3})[\s\-]?([A-Z0-9]{3,4})[\s\-]?([A-Z0-9]{4,5})$", cleaned)
-    if match:
-        return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+    loc = parse_legacy_3part_code(cleaned)
+    if loc:
+        return loc
     return None
 
 
@@ -281,11 +262,21 @@ def find_postcodes(
     area: Optional[str] = None,
     code: Optional[str] = None,
 ) -> List[PostcodeRecordSchema]:
-    """Search postcodes by state, area, or 6-digit postal code."""
+    """Search postcodes by state, area, or 6-digit postal code / digital postcode."""
+    clean_code = code.strip().upper() if code else ""
+    compact_code = clean_code.replace("-", "") if clean_code else ""
+
     if db:
+        from sqlalchemy import or_
         query = db.query(PostcodeDirectory).filter(PostcodeDirectory.is_active == True)
-        if code:
-            query = query.filter(PostcodeDirectory.code == code.strip())
+        if clean_code:
+            query = query.filter(
+                or_(
+                    PostcodeDirectory.code == clean_code,
+                    PostcodeDirectory.code == compact_code,
+                    PostcodeDirectory.code.ilike(clean_code),
+                )
+            )
         if state:
             query = query.filter(PostcodeDirectory.state.ilike(f"%{state.strip()}%"))
         if area:
@@ -299,11 +290,13 @@ def find_postcodes(
     results: List[PostcodeRecordSchema] = []
     norm_state = normalize_string(state)
     norm_area = normalize_string(area)
-    norm_code = code.strip() if code else ""
 
     for rec in OFFICIAL_POSTCODES:
-        if norm_code and rec["code"] != norm_code:
-            continue
+        if clean_code:
+            rec_c = rec["code"].strip().upper()
+            rec_comp = rec_c.replace("-", "")
+            if rec_c != clean_code and rec_comp != compact_code:
+                continue
         if norm_state and norm_state not in normalize_string(rec["state"]):
             continue
         if norm_area and norm_area not in normalize_string(rec["area"]):
@@ -344,19 +337,12 @@ def cleanse_address(
         extracted_code = cleaned_hint
         is_digital_location = False
     else:
-        # Search address string for digital pattern or 6-digit conventional
-        found_digital = re.findall(r"\b([A-Za-z]{3}[\s\-][A-Za-z0-9]{3,4}[\s\-][A-Za-z0-9]{4,5})\b", clean_addr)
-        if found_digital:
-            norm_found = normalize_digital_postcode(found_digital[0])
-            if norm_found:
-                extracted_code = norm_found
-                is_digital_location = True
-                is_digital_syntax = True
-        if not extracted_code:
-            found_codes = re.findall(r"\b(\d{6})\b", clean_addr)
-            if found_codes:
-                extracted_code = found_codes[0]
-                is_digital_location = False
+        # Search address string for digital pattern or 6-digit conventional using unified extractor
+        found_code, found_type, _ = extract_postcode_from_text(clean_addr)
+        if found_code:
+            extracted_code = found_code
+            is_digital_location = (found_type == "digital_location")
+            is_digital_syntax = (found_type == "digital_location")
 
     postcode_type = "digital_location" if is_digital_location else "conventional_area"
     postcode_category = "official_digital_postcode" if is_digital_location else "legacy_postal_code"
@@ -404,9 +390,12 @@ def cleanse_address(
         norm_rec_area = normalize_string(rec["area"])
         rec_code_norm = rec["code"].strip().upper()
 
-        # Prioritize matching exact code
-        if extracted_code and (rec_code_norm == extracted_code.upper() or rec["code"] == extracted_code):
-            score += 100
+        # Prioritize matching exact code or compact variant
+        if extracted_code:
+            rec_c = rec["code"].strip().upper()
+            ext_c = extracted_code.strip().upper()
+            if rec_c == ext_c or rec_c.replace("-", "") == ext_c.replace("-", ""):
+                score += 100
 
         # Substring area matching
         for part in norm_rec_area.split():
@@ -435,10 +424,19 @@ def cleanse_address(
 
     # Check postcode validity against reference registry
     if extracted_code:
-        matching_code_rec = next((r for r in candidates if r["code"].strip().upper() == extracted_code.upper()), None)
+        ext_clean = extracted_code.strip().upper()
+        ext_compact = ext_clean.replace("-", "")
+        matching_code_rec = next(
+            (
+                r for r in candidates
+                if r["code"].strip().upper() == ext_clean
+                or r["code"].strip().upper().replace("-", "") == ext_compact
+            ),
+            None,
+        )
         if matching_code_rec:
             postcode_valid = True
-            if not best_match or best_match["code"].strip().upper() != extracted_code.upper():
+            if not best_match or best_match["code"].strip().upper() != matching_code_rec["code"].strip().upper():
                 best_match = matching_code_rec
                 matched_area = matching_code_rec["area"]
 
@@ -473,7 +471,14 @@ def cleanse_address(
         )
 
     # CASE 1: Exact postcode provided and matches reference record
-    if best_match and extracted_code and (best_match["code"].strip().upper() == extracted_code.strip().upper()):
+    if (
+        best_match
+        and extracted_code
+        and (
+            best_match["code"].strip().upper() == extracted_code.strip().upper()
+            or best_match["code"].strip().upper().replace("-", "") == extracted_code.strip().upper().replace("-", "")
+        )
+    ):
         verified_code = best_match["code"]
         detected_state = best_match["state"]
         detected_lga = best_match.get("lga")
@@ -527,7 +532,20 @@ def cleanse_address(
 
         if address_consistent:
             formatted = f"{clean_addr.rstrip(',')}, {matched_area}, {detected_state} {verified_code}"
-            changes.append(f"Verified against NIPOST reference registry code {verified_code} for {matched_area}, {detected_state}")
+            is_demo = (best_match.get("source_type") == "demonstration_fixture")
+            p_status = "local_match" if is_demo else "verified"
+            conf = 0.75 if is_demo else 0.95
+            disp_conf = 0.75 if is_demo else 0.95
+
+            if is_demo:
+                changes.append(
+                    f"Matched against PostcodeLink local reference registry code {verified_code} for {matched_area}, {detected_state} (unverified with official NIPOST)"
+                )
+            else:
+                changes.append(
+                    f"Verified against NIPOST reference registry code {verified_code} for {matched_area}, {detected_state}"
+                )
+
             return CleanseAddressResponse(
                 original_address=clean_addr,
                 formatted_address=formatted,
@@ -538,16 +556,19 @@ def cleanse_address(
                 postcode_type=rec_type,
                 postcode_category=rec_category,
                 resolution_level=rec_resolution,
-                postcode_status="verified",
+                postcode_status=p_status,
                 verification_status=best_match.get("verification_status", "local_reference"),
-                confidence=0.95,
+                confidence=conf,
                 postcode_valid=True,
                 address_consistent=True,
-                dispatch_confidence=0.95,
+                dispatch_confidence=disp_conf,
                 source=source_name,
                 matched_record=PostcodeRecordSchema(**best_match),
                 changes_made=changes,
                 provenance=best_match.get("provenance", "NIPOST 6-Digit Postal Directory (Zone Reference)"),
+                source_owner=best_match.get("source_owner", "PostcodeLink"),
+                source_type=best_match.get("source_type", "local_reference"),
+                national_components=best_match.get("national_components"),
             )
         else:
             # Conflict detected: Postcode is valid, but supplied area/state contradicts postcode directory!
