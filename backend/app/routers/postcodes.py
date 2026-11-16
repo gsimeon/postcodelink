@@ -137,7 +137,12 @@ def execute_postcode_lookup(
             upstream_error = err_msg
 
             if strict:
-                if res.status == NIPOSTLookupStatus.UNAUTHORIZED:
+                if res.status == NIPOSTLookupStatus.INVALID_INPUT:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"NIPOST API validation error ({res.status.value}): {err_msg or 'Invalid postcode format'}.",
+                    )
+                elif res.status == NIPOSTLookupStatus.UNAUTHORIZED:
                     raise HTTPException(
                         status_code=status.HTTP_502_BAD_GATEWAY,
                         detail=f"Official NIPOST API authorization failed ({res.status.value}): {err_msg or 'Invalid or expired credentials'}. Fallback disabled in strict verification mode.",

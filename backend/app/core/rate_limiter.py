@@ -23,7 +23,7 @@ _CONNECT_BACKOFF_SECONDS: float = 15.0
 
 
 def _sanitize_redis_url(url: Optional[str]) -> str:
-    """Mask credentials in Redis connection URL for secure operational logging."""
+    """Mask credentials and usernames in Redis connection URL for secure operational logging."""
     if not url:
         return "unconfigured"
     try:
@@ -33,14 +33,8 @@ def _sanitize_redis_url(url: Optional[str]) -> str:
         path = parsed.path or "/0"
         scheme = parsed.scheme or "redis"
 
-        if parsed.username and parsed.password:
-            user_auth = f"{parsed.username}:***@"
-        elif parsed.password:
-            user_auth = "***@"
-        elif parsed.username:
-            user_auth = f"{parsed.username}@"
-        else:
-            user_auth = ""
+        # Completely mask user credentials to prevent infrastructure disclosure (ACL username exposure)
+        user_auth = "***:***@" if (parsed.username or parsed.password) else ""
 
         return f"{scheme}://{user_auth}{hostname}{port_str}{path}"
     except Exception:
