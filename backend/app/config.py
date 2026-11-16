@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     SMS_PROVIDER: str = "simulated"
     TERMII_API_KEY: str = ""
     TERMII_SENDER_ID: str = "PostcodeLnk"
+    TERMII_BASE_URL: str = os.getenv("TERMII_BASE_URL", "https://api.ng.termii.com")
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_FROM_NUMBER: str = ""

@@ -140,12 +140,22 @@ class TermiiNotificationProvider(BaseNotificationProvider):
         self,
         api_key: str,
         sender_id: str = "PostcodeLnk",
-        base_url: str = "https://api.ng.termii.com/api/sms/send",
+        base_url: str = "https://api.ng.termii.com",
         timeout: float = 10.0,
     ):
         self.api_key = api_key
         self.sender_id = sender_id
-        self.base_url = base_url
+        clean_base = (base_url or "https://api.ng.termii.com").strip().rstrip("/")
+        if clean_base.endswith("/api/sms/send"):
+            clean_base = clean_base[:-len("/api/sms/send")].rstrip("/")
+        elif clean_base.endswith("/api/sms/status"):
+            clean_base = clean_base[:-len("/api/sms/status")].rstrip("/")
+        elif clean_base.endswith("/api/sms"):
+            clean_base = clean_base[:-len("/api/sms")].rstrip("/")
+        self.account_base_url = clean_base
+        self.send_url = f"{clean_base}/api/sms/send"
+        self.status_url = f"{clean_base}/api/sms/status"
+        self.base_url = self.send_url
         self.timeout = timeout
 
     def send_delivery_pin(
@@ -189,7 +199,7 @@ class TermiiNotificationProvider(BaseNotificationProvider):
             payload["sms_id"] = idempotency_key
 
         try:
-            resp = httpx.post(self.base_url, json=payload, timeout=self.timeout)
+            resp = httpx.post(self.send_url, json=payload, timeout=self.timeout)
             resp.raise_for_status()
             try:
                 resp_data = resp.json() if callable(getattr(resp, "json", None)) else {}
@@ -252,7 +262,7 @@ class TermiiNotificationProvider(BaseNotificationProvider):
             "api_key": self.api_key,
         }
         try:
-            resp = httpx.post(self.base_url, json=payload, timeout=self.timeout)
+            resp = httpx.post(self.send_url, json=payload, timeout=self.timeout)
             resp.raise_for_status()
             resp_data = resp.json() if callable(getattr(resp, "json", None)) else {}
             if not isinstance(resp_data, dict) or resp_data.get("code") != "ok" or not resp_data.get("message_id"):
@@ -284,11 +294,11 @@ class TermiiNotificationProvider(BaseNotificationProvider):
     ) -> Optional[NotificationDispatchResult]:
         """Check status of a message on Termii gateway for crash recovery and status reconciliation.
         
-        Enforces strict cryptographic and identity verification:
+        Enforces strict delivery identifier correlation and carrier association checks:
         1. Validates returned message_id matches provider_message_id.
         2. Validates recipient destination matches expected recipient phone.
         3. Validates sender ID matches configured sender.
-        4. Validates message content contains delivery order fingerprint.
+        4. Validates message content contains delivery order correlation identifier.
         5. Validates authoritative outbound delivery status.
         """
         if not provider_message_id:
@@ -298,9 +308,8 @@ class TermiiNotificationProvider(BaseNotificationProvider):
             )
             return None
         try:
-            url = f"https://api.ng.termii.com/api/sms/status"
             params = {"api_key": self.api_key, "message_id": provider_message_id}
-            resp = httpx.get(url, params=params, timeout=self.timeout)
+            resp = httpx.get(self.status_url, params=params, timeout=self.timeout)
             if resp.status_code != 200:
                 logger.warning(f"[Termii Gateway] Non-200 status ({resp.status_code}) on status check for {provider_message_id}")
                 return None
@@ -761,7 +770,8 @@ def get_notification_provider(provider_type: Optional[str] = None) -> BaseNotifi
     if selected == "termii" or (not selected and settings.TERMII_API_KEY):
         return TermiiNotificationProvider(
             api_key=settings.TERMII_API_KEY,
-            sender_id=settings.TERMII_SENDER_ID
+            sender_id=settings.TERMII_SENDER_ID,
+            base_url=getattr(settings, "TERMII_BASE_URL", "https://api.ng.termii.com"),
         )
 
     if selected == "twilio" or (not selected and settings.TWILIO_ACCOUNT_SID):

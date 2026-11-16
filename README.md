@@ -45,16 +45,17 @@ Following the production-readiness review of Release Gate v5.9, Release Gate v6.
 
 ### 1. P1 — Live Carrier Telemetry Verification Only (Simulated Provider Rejection)
 - **Rejection of Simulated Evidence**: `provider_telemetry_verified` resolution strictly requires authoritative upstream carrier telemetry (`termii` or `twilio`) and status `SENT`. Simulated sandbox evidence is rejected with HTTP 422 Unprocessable Content.
-- **Fail-Closed Provider Association**: `TwilioNotificationProvider` and `TermiiNotificationProvider` enforce complete, non-empty presence of `from`, `to`, `body`/`text`, and `message_id`. If any field is missing, mismatched, or if the provider returns a non-200 response, verification fails closed (`return None`) without duplicate dispatch risks.
-- **No Fallback to Inbound Inbox**: Termii status inquiry strictly queries `/api/sms/status` and never queries `/api/sms/inbox` (which is exclusively for customer inbound messages).
+- **Fail-Closed Carrier Association & Delivery Identifier Correlation**: `TwilioNotificationProvider` and `TermiiNotificationProvider` enforce complete, non-empty presence of `from`, `to`, `body`/`text`, and `message_id`. They perform delivery identifier correlation (`order {delivery_id}` in message text) and carrier association checks (exact match on recipient, sender, and message ID). Note that while PIN proof-of-delivery uses SHA-256 and stored payloads use AES-256-GCM, SMS verification is carrier identifier association rather than cryptographic message signing.
+- **No Fallback to Inbound Inbox & Configurable Account Base URL**: Termii status inquiry strictly queries `{TERMII_BASE_URL}/api/sms/status` (defaulting to `https://api.ng.termii.com`) and never queries `/api/sms/inbox` (which is exclusively for customer inbound messages). Custom enterprise account base URLs are fully supported.
 
 ### 2. P1 — Manual Requeue Stale ID Resolution & Dispatch Guarantees
 - **Stale Provider ID Resolution**: On manual requeue (`resolution="requeue"`), the active `provider_message_id` is cleared (`None`), preserved in `last_failed_provider_message_id`, `dispatch_attempt` is incremented, and `retry_count` is reset to 0.
 - **Worker Re-dispatch Guarantee**: The background outbox worker only bypasses dispatch for crashed items with active provider acceptance, ensuring newly requeued items with cleared IDs are always dispatched anew.
 
-### 3. P1 — Commercial API Quota Metering & Public Demo IP Rate Limiting
-- **Dedicated Commercial Endpoints**: Added `GET /api/v1/postcodes/commercial/lookup` and `POST /api/v1/postcodes/commercial/cleanse` strictly requiring active `x-api-key` validation and atomic monthly quota metering (401 on missing/invalid, 429 on quota exhaustion).
-- **Public Demonstration IP Rate Limiting**: Unauthenticated public demo callers on `/lookup` and `/cleanse` are metered by client IP with a sliding-window rate limit (15 requests/minute).
+### 3. P1 — Commercial API Quota Metering & Anti-Spoofing IP Rate Limiting
+- **Dedicated Commercial Endpoints & Single Quota Metering**: `GET /api/v1/postcodes/commercial/lookup` and `POST /api/v1/postcodes/commercial/cleanse` strictly require active `x-api-key` validation with atomic monthly quota metering (401 on missing/invalid, 429 on quota exhaustion). Route handlers invoke core business logic directly without re-triggering dependency checks, guaranteeing exactly one quota debit per request.
+- **Anti-Spoofing Reverse Proxy IP Extraction**: Unauthenticated public demo callers on `/lookup` and `/cleanse` are metered by client IP with a sliding-window rate limit (15 requests/minute). The real client IP is extracted via `get_trusted_client_ip()`, which only respects `X-Forwarded-For` when the direct peer connection originates from a configured `TRUSTED_PROXIES` entry. Untrusted direct callers attempting to rotate spoofed headers are restricted by their physical connection IP.
+- **Accurate NIPOST Provenance**: Live NIPOST responses maintain accurate provenance, returning `dataset_version: null` when omitted or not found in upstream directory results, while exposing `api_integration_version: "2026.1"`. Local fallback reference responses clearly declare `dataset_version: "2024.2"`.
 
 ### 4. P1 & P2 — Permanent Audit Retention & Soft Deletion Architecture
 - **Elimination of Audit Cascades**: Removed `cascade="all, delete-orphan"` from `Delivery.events`. Direct hard deletions of `delivery_events` are permanently blocked by `ON DELETE RESTRICT` foreign key constraints and engine-level triggers.

@@ -16,7 +16,7 @@ class PostcodeRecordSchema(BaseModel):
     building_reference: Optional[str] = None
     verification_status: Optional[str] = "local_reference"  # official_verified | local_reference | synthetic_demo | unverified
     provenance: Optional[str] = "PostcodeLink Local Reference Dataset"
-    dataset_version: Optional[str] = "2024.2"
+    dataset_version: Optional[str] = None
     verified_at: Optional[datetime] = None
     source_owner: Optional[str] = "PostcodeLink"
     source_type: Optional[str] = "local_reference"
@@ -36,7 +36,8 @@ class PostcodeLookupResponse(BaseModel):
     count: int
     matches: List[PostcodeRecordSchema]
     is_live_nipost: bool = False
-    dataset_version: str = "2024.2"
+    dataset_version: Optional[str] = None
+    api_integration_version: str = "2026.1"
     provenance: str = "PostcodeLink Local Reference Dataset"
     lookup_status: str = "local_reference"  # official_verified | not_found | fallback_reference | local_reference
     verification_source: str = "local_nipost_reference_dataset"

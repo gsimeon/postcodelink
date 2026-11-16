@@ -14,6 +14,7 @@ from backend.app.services.postcode_service import find_postcodes, cleanse_addres
 from backend.app.services.nipost_client import get_nipost_client, NIPOSTClient, NIPOSTLookupStatus
 from backend.app.routers.api_keys import get_api_key_merchant
 from backend.app.core.rate_limiter import check_client_ip_rate_limit
+from backend.app.core.network import get_trusted_client_ip
 from backend.app.config import settings
 from backend.app.models.profile import Profile
 
@@ -26,36 +27,31 @@ def check_optional_api_key(request: Request, db: Session):
     1. If x-api-key header is present: validates key and meters monthly quota atomically.
     2. If x-api-key header is absent: enforces strict IP-based sliding window rate limiting
        to prevent unmetered commercial scraping or abuse of public demonstration endpoints.
+       Uses get_trusted_client_ip to reject spoofed X-Forwarded-For headers from untrusted origins.
     """
     x_api_key = request.headers.get("x-api-key")
     if x_api_key:
         get_api_key_merchant(x_api_key=x_api_key, db=db)
     else:
         # Enforce strict client IP rate limiting on unauthenticated public demo calls
-        client_ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else "127.0.0.1")
-        if "," in client_ip:
-            client_ip = client_ip.split(",")[0].strip()
+        client_ip = get_trusted_client_ip(request)
         if client_ip != "testclient":
             check_client_ip_rate_limit(client_ip, limit_per_minute=settings.PUBLIC_DEMO_RATE_LIMIT_PER_MINUTE)
 
 
-@router.get("/lookup", response_model=PostcodeLookupResponse)
-def api_lookup_postcodes(
-    request: Request,
-    state: Optional[str] = Query(None),
-    area: Optional[str] = Query(None),
-    code: Optional[str] = Query(None),
-    strict: bool = Query(False, description="Strict verification mode: fail closed if live NIPOST verification is unavailable or unauthorized"),
-    client: NIPOSTClient = Depends(get_nipost_client),
-    db: Session = Depends(get_db),
-):
-    """Search official Nigerian postal codes from live NIPOST API or local reference dataset.
+def execute_postcode_lookup(
+    db: Session,
+    state: Optional[str] = None,
+    area: Optional[str] = None,
+    code: Optional[str] = None,
+    strict: bool = False,
+    client: Optional[NIPOSTClient] = None,
+) -> PostcodeLookupResponse:
+    """Core business logic for searching official Nigerian postal codes from live NIPOST API or local reference dataset.
     
     If strict=True: fails closed with HTTP 502/503 if upstream NIPOST returns unauthorized,
     unavailable, or invalid response, strictly preventing local fallback masquerading as official verification.
     """
-    check_optional_api_key(request, db)
-
     upstream_status = None
     upstream_error = None
     fallback_reason = None
@@ -66,16 +62,17 @@ def api_lookup_postcodes(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Strict verification mode requires an authoritative 'code' parameter. Area-only discovery cannot be strictly verified against NIPOST.",
             )
-        if not client.is_configured:
+        if not client or not client.is_configured:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Official NIPOST API gateway is not configured or enabled. Strict verification requires live NIPOST connectivity.",
             )
 
-    if client.is_configured and code:
+    if client and client.is_configured and code:
         res = client.lookup_postcode(code)
         if res.status == NIPOSTLookupStatus.FOUND and res.data:
             live_res = res.data
+            upstream_version = live_res.get("dataset_version")
             schema_rec = PostcodeRecordSchema(
                 code=live_res["code"],
                 area=live_res["area"],
@@ -88,7 +85,7 @@ def api_lookup_postcodes(
                 building_reference=live_res.get("building_reference"),
                 verification_status="official_verified",
                 provenance="NIPOST Official National Directory (Live API)",
-                dataset_version=live_res.get("dataset_version", "2026.1"),
+                dataset_version=upstream_version,
                 source_owner="NIPOST",
                 source_type="official_national_directory",
             )
@@ -97,7 +94,8 @@ def api_lookup_postcodes(
                 count=1,
                 matches=[schema_rec],
                 is_live_nipost=True,
-                dataset_version=live_res.get("dataset_version", "2026.1"),
+                dataset_version=upstream_version,
+                api_integration_version="2026.1",
                 provenance="NIPOST Official National Directory (Live API)",
                 lookup_status="official_verified",
                 verification_source="live_nipost_api",
@@ -108,12 +106,14 @@ def api_lookup_postcodes(
         elif res.status == NIPOSTLookupStatus.NOT_FOUND:
             # Authoritative response: code does not exist in NIPOST directory. Do NOT fall back to local data.
             err_msg = res.error_message or getattr(res, "error", None) or "Postcode not found in official national directory."
+            upstream_version = res.data.get("dataset_version") if (res.data and isinstance(res.data, dict)) else None
             return PostcodeLookupResponse(
                 source="live_nipost_api",
                 count=0,
                 matches=[],
                 is_live_nipost=True,
-                dataset_version="2026.1",
+                dataset_version=upstream_version,
+                api_integration_version="2026.1",
                 provenance="NIPOST Official National Directory (Live API: Postcode Not Found)",
                 lookup_status="not_found",
                 verification_source="live_nipost_api",
@@ -155,6 +155,7 @@ def api_lookup_postcodes(
         if isinstance(m, dict):
             m["verification_status"] = "local_reference"
             m["source_owner"] = "PostcodeLink"
+            m["dataset_version"] = m.get("dataset_version", "2024.2")
             if m.get("code") and len(m["code"].replace("-", "")) > 6:
                 m["postcode_category"] = "local_address_reference"
             matches.append(PostcodeRecordSchema(**m))
@@ -162,6 +163,7 @@ def api_lookup_postcodes(
             m_dict = PostcodeRecordSchema.model_validate(m).model_dump()
             m_dict["verification_status"] = "local_reference"
             m_dict["source_owner"] = "PostcodeLink"
+            m_dict["dataset_version"] = m_dict.get("dataset_version", "2024.2")
             if m_dict.get("code") and len(m_dict["code"].replace("-", "")) > 6:
                 m_dict["postcode_category"] = "local_address_reference"
             matches.append(PostcodeRecordSchema(**m_dict))
@@ -173,6 +175,7 @@ def api_lookup_postcodes(
         matches=matches,
         is_live_nipost=False,
         dataset_version="2024.2",
+        api_integration_version="2026.1",
         provenance="PostcodeLink Local Reference Dataset",
         lookup_status="fallback_reference" if fallback_used else "local_reference",
         verification_source="local_nipost_reference_dataset",
@@ -181,6 +184,32 @@ def api_lookup_postcodes(
         fallback_reason=fallback_reason,
         upstream_status=upstream_status,
         upstream_error=upstream_error,
+    )
+
+
+@router.get("/lookup", response_model=PostcodeLookupResponse)
+def api_lookup_postcodes(
+    request: Request,
+    state: Optional[str] = Query(None),
+    area: Optional[str] = Query(None),
+    code: Optional[str] = Query(None),
+    strict: bool = Query(False, description="Strict verification mode: fail closed if live NIPOST verification is unavailable or unauthorized"),
+    client: NIPOSTClient = Depends(get_nipost_client),
+    db: Session = Depends(get_db),
+):
+    """Search official Nigerian postal codes from live NIPOST API or local reference dataset.
+    
+    If strict=True: fails closed with HTTP 502/503 if upstream NIPOST returns unauthorized,
+    unavailable, or invalid response, strictly preventing local fallback masquerading as official verification.
+    """
+    check_optional_api_key(request, db)
+    return execute_postcode_lookup(
+        db=db,
+        state=state,
+        area=area,
+        code=code,
+        strict=strict,
+        client=client,
     )
 
 
@@ -212,15 +241,18 @@ def api_commercial_lookup_postcodes(
     merchant: Profile = Depends(get_api_key_merchant),
     db: Session = Depends(get_db),
 ):
-    """Commercial enterprise postcode lookup. Strictly requires active 'x-api-key' with valid quota."""
-    return api_lookup_postcodes(
-        request=request,
+    """Commercial enterprise postcode lookup. Strictly requires active 'x-api-key' with valid quota.
+    
+    Authenticates and meters monthly quota exactly once via dependency injection.
+    Directly invokes business logic without duplicate route execution or double metering.
+    """
+    return execute_postcode_lookup(
+        db=db,
         state=state,
         area=area,
         code=code,
         strict=strict,
         client=client,
-        db=db,
     )
 
 
@@ -231,5 +263,15 @@ def api_commercial_cleanse_address(
     merchant: Profile = Depends(get_api_key_merchant),
     db: Session = Depends(get_db),
 ):
-    """Commercial enterprise address cleansing. Strictly requires active 'x-api-key' with valid quota."""
-    return api_cleanse_address(request=request, http_req=http_req, db=db)
+    """Commercial enterprise address cleansing. Strictly requires active 'x-api-key' with valid quota.
+    
+    Authenticates and meters monthly quota exactly once via dependency injection.
+    Directly invokes business logic without duplicate route execution or double metering.
+    """
+    return cleanse_address(
+        address=request.address,
+        state_hint=request.state,
+        area_hint=request.area,
+        postcode_hint=request.postcode,
+        db=db,
+    )

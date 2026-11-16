@@ -5,6 +5,7 @@ import secrets
 import signal
 import subprocess
 import os
+import hashlib
 import pytest
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
@@ -1164,3 +1165,331 @@ def test_migration_downgrade_restores_audit_triggers_and_upgrade_lifecycle():
     finally:
         # 2. Upgrade back to Release Gate v6.0 revision (c3d4e5f6a7b8)
         command.upgrade(alembic_cfg, "head")
+
+
+# ==============================================================================
+# 16. Commercial API Quota Metering & Anti-Spoofing IP Rate Limiting Tests
+# ==============================================================================
+
+def test_commercial_lookup_increments_monthly_quota_by_exactly_one():
+    """Verify commercial postcode lookup meters monthly quota exactly once (eliminating double-metering)."""
+    reset_api_key_rate_limits()
+    db = SessionLocal()
+    try:
+        email = f"comm_lookup_{secrets.token_hex(6)}@example.com"
+        merchant = Profile(
+            id=f"prof_{secrets.token_hex(8)}",
+            email=email,
+            hashed_password="pw",
+            full_name="Commercial Merchant 1",
+            role=AppRole.MERCHANT,
+        )
+        db.add(merchant)
+        db.commit()
+
+        raw_key = f"pkl_live_{secrets.token_hex(20)}"
+        key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+        now_period = datetime.now(timezone.utc).strftime("%Y-%m")
+        api_key = ApiKey(
+            id=f"key_{secrets.token_hex(8)}",
+            merchant_id=merchant.id,
+            name="Commercial Lookup Key",
+            key_prefix=raw_key[:12],
+            hashed_key=key_hash,
+            monthly_quota=100,
+            current_period=now_period,
+            period_usage_count=0,
+            usage_count=0,
+            is_active=True,
+            is_revoked=False,
+        )
+        db.add(api_key)
+        db.commit()
+
+        # Call commercial lookup endpoint
+        res = client.get(
+            "/api/v1/postcodes/commercial/lookup?state=Lagos",
+            headers={"x-api-key": raw_key},
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["count"] > 0
+        assert data["api_integration_version"] == "2026.1"
+
+        # Verify quota incremented by EXACTLY 1 in database
+        db.expire_all()
+        updated_key = db.query(ApiKey).filter(ApiKey.id == api_key.id).first()
+        assert updated_key.period_usage_count == 1, f"Expected period_usage_count=1, got {updated_key.period_usage_count} (double metering bug!)"
+        assert updated_key.usage_count == 1
+    finally:
+        db.close()
+
+
+def test_commercial_cleanse_increments_monthly_quota_by_exactly_one():
+    """Verify commercial address cleanse meters monthly quota exactly once (eliminating double-metering)."""
+    reset_api_key_rate_limits()
+    db = SessionLocal()
+    try:
+        email = f"comm_cleanse_{secrets.token_hex(6)}@example.com"
+        merchant = Profile(
+            id=f"prof_{secrets.token_hex(8)}",
+            email=email,
+            hashed_password="pw",
+            full_name="Commercial Merchant 2",
+            role=AppRole.MERCHANT,
+        )
+        db.add(merchant)
+        db.commit()
+
+        raw_key = f"pkl_live_{secrets.token_hex(20)}"
+        key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+        now_period = datetime.now(timezone.utc).strftime("%Y-%m")
+        api_key = ApiKey(
+            id=f"key_{secrets.token_hex(8)}",
+            merchant_id=merchant.id,
+            name="Commercial Cleanse Key",
+            key_prefix=raw_key[:12],
+            hashed_key=key_hash,
+            monthly_quota=100,
+            current_period=now_period,
+            period_usage_count=0,
+            usage_count=0,
+            is_active=True,
+            is_revoked=False,
+        )
+        db.add(api_key)
+        db.commit()
+
+        # Call commercial cleanse endpoint
+        res = client.post(
+            "/api/v1/postcodes/commercial/cleanse",
+            headers={"x-api-key": raw_key},
+            json={
+                "address": "12 Broad Street, Marina, Lagos",
+                "state": "Lagos",
+                "area": "Marina",
+                "postcode": "100221",
+            },
+        )
+        assert res.status_code == 200
+
+        # Verify quota incremented by EXACTLY 1 in database
+        db.expire_all()
+        updated_key = db.query(ApiKey).filter(ApiKey.id == api_key.id).first()
+        assert updated_key.period_usage_count == 1, f"Expected period_usage_count=1, got {updated_key.period_usage_count} (double metering bug!)"
+        assert updated_key.usage_count == 1
+    finally:
+        db.close()
+
+
+def test_commercial_quota_boundary_permits_one_and_rejects_second():
+    """Verify that an API key with monthly_quota=1 succeeds on 1st call and is blocked with HTTP 429 on 2nd call."""
+    reset_api_key_rate_limits()
+    db = SessionLocal()
+    try:
+        email = f"comm_quota_{secrets.token_hex(6)}@example.com"
+        merchant = Profile(
+            id=f"prof_{secrets.token_hex(8)}",
+            email=email,
+            hashed_password="pw",
+            full_name="Commercial Merchant Quota Boundary",
+            role=AppRole.MERCHANT,
+        )
+        db.add(merchant)
+        db.commit()
+
+        raw_key = f"pkl_live_{secrets.token_hex(20)}"
+        key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+        now_period = datetime.now(timezone.utc).strftime("%Y-%m")
+        api_key = ApiKey(
+            id=f"key_{secrets.token_hex(8)}",
+            merchant_id=merchant.id,
+            name="Strict 1-Quota Key",
+            key_prefix=raw_key[:12],
+            hashed_key=key_hash,
+            monthly_quota=1,
+            current_period=now_period,
+            period_usage_count=0,
+            usage_count=0,
+            is_active=True,
+            is_revoked=False,
+        )
+        db.add(api_key)
+        db.commit()
+
+        # 1st request should succeed (using 1 of 1 quota)
+        res1 = client.get(
+            "/api/v1/postcodes/commercial/lookup?state=Lagos",
+            headers={"x-api-key": raw_key},
+        )
+        assert res1.status_code == 200
+
+        # 2nd request must fail with HTTP 429
+        res2 = client.get(
+            "/api/v1/postcodes/commercial/lookup?state=Lagos",
+            headers={"x-api-key": raw_key},
+        )
+        assert res2.status_code == 429
+        assert "exceeded" in res2.json()["detail"].lower() and "quota" in res2.json()["detail"].lower()
+
+        # Check DB count remains 1
+        db.expire_all()
+        updated_key = db.query(ApiKey).filter(ApiKey.id == api_key.id).first()
+        assert updated_key.period_usage_count == 1
+    finally:
+        db.close()
+
+
+def test_public_demo_ip_rate_limiting_rejects_spoofed_x_forwarded_for():
+    """Verify that untrusted direct peer cannot bypass IP rate limiting by spoofing X-Forwarded-For."""
+    from backend.app.core.network import get_trusted_client_ip
+    from starlette.requests import Request
+
+    reset_api_key_rate_limits()
+
+    # 1. Direct unit test of get_trusted_client_ip
+    scope_untrusted = {
+        "type": "http",
+        "client": ("198.51.100.25", 54321),
+        "headers": [(b"x-forwarded-for", b"203.0.113.50, 1.1.1.1")],
+    }
+    req_untrusted = Request(scope_untrusted)
+    # Untrusted proxy origin must return direct peer IP, ignoring X-Forwarded-For
+    trusted_proxies = ["10.0.0.1", "127.0.0.1"]
+    assert get_trusted_client_ip(req_untrusted, trusted_proxies=trusted_proxies) == "198.51.100.25"
+
+    # 2. Trusted proxy origin extracts real client IP
+    scope_trusted = {
+        "type": "http",
+        "client": ("10.0.0.1", 54321),
+        "headers": [(b"x-forwarded-for", b"203.0.113.50, 10.0.0.1")],
+    }
+    req_trusted = Request(scope_trusted)
+    assert get_trusted_client_ip(req_trusted, trusted_proxies=trusted_proxies) == "203.0.113.50"
+
+    # 3. HTTP endpoint test: direct host cannot bypass rate limit by rotating spoofed XFF
+    untrusted_host = f"198.51.{secrets.randbelow(200) + 10}.{secrets.randbelow(200) + 10}"
+    with patch("backend.app.routers.postcodes.get_trusted_client_ip", return_value=untrusted_host):
+        for i in range(15):
+            spoofed_xff = f"100.{i}.{secrets.randbelow(200)}.{secrets.randbelow(200)}"
+            res = client.get(
+                "/api/v1/postcodes/lookup?state=Lagos",
+                headers={"x-forwarded-for": spoofed_xff},
+            )
+            assert res.status_code == 200
+
+        # 16th request from same direct host with yet another spoofed XFF must be rate-limited (HTTP 429)
+        new_spoofed_xff = "8.8.8.8"
+        res_blocked = client.get(
+            "/api/v1/postcodes/lookup?state=Lagos",
+            headers={"x-forwarded-for": new_spoofed_xff},
+        )
+        assert res_blocked.status_code == 429
+        assert "public demo rate limit exceeded" in res_blocked.json()["detail"].lower()
+
+
+def test_termii_status_verification_uses_configured_account_base_url():
+    """Verify TermiiNotificationProvider uses custom account base URL for status check and dispatch."""
+    custom_base = "https://custom-termii.enterprise.ng"
+    provider = TermiiNotificationProvider(
+        api_key="secret_termii_key",
+        sender_id="CustomTermii",
+        base_url=custom_base,
+    )
+    assert provider.account_base_url == custom_base
+    assert provider.send_url == f"{custom_base}/api/sms/send"
+    assert provider.status_url == f"{custom_base}/api/sms/status"
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "message_id": "msg_cust_999",
+        "to": "+2348012345678",
+        "from": "CustomTermii",
+        "text": "Your delivery confirmation PIN for order PL-8888 is 123456.",
+        "status": "delivered",
+    }
+
+    with patch("httpx.get", return_value=mock_resp) as mock_get:
+        result = provider.check_message_status(
+            idempotency_key="idemp_cust",
+            provider_message_id="msg_cust_999",
+            recipient_phone="+2348012345678",
+            delivery_id="PL-8888",
+        )
+        assert result is not None
+        assert result.status == NotificationDeliveryStatus.SENT
+        assert result.message_id == "msg_cust_999"
+
+        # Verify that httpx.get was called using the custom account status URL
+        mock_get.assert_called_once()
+        call_url = mock_get.call_args[0][0]
+        assert call_url == f"{custom_base}/api/sms/status"
+        params = mock_get.call_args[1].get("params", {})
+        assert params.get("message_id") == "msg_cust_999"
+        assert params.get("api_key") == "secret_termii_key"
+
+
+def test_nipost_provenance_preserves_upstream_version_or_returns_null():
+    """Verify NIPOST provenance preserves upstream dataset_version when present, returns None when omitted/not found, and sets api_integration_version to 2026.1."""
+    from backend.app.services.nipost_client import NIPOSTClient, NIPOSTLookupResult, NIPOSTLookupStatus
+    from backend.app.routers.postcodes import execute_postcode_lookup
+
+    db = SessionLocal()
+    try:
+        mock_client = MagicMock(spec=NIPOSTClient)
+        mock_client.is_configured = True
+
+        # Scenario 1: Upstream NIPOST provides dataset_version "2026.3"
+        mock_client.lookup_postcode.return_value = NIPOSTLookupResult(
+            status=NIPOSTLookupStatus.FOUND,
+            data={
+                "code": "100001",
+                "state": "Lagos",
+                "area": "Marina",
+                "dataset_version": "2026.3",
+            },
+        )
+        res1 = execute_postcode_lookup(db=db, code="100001", client=mock_client)
+        assert res1.is_live_nipost is True
+        assert res1.dataset_version == "2026.3"
+        assert res1.api_integration_version == "2026.1"
+
+        # Scenario 2: Upstream NIPOST omits dataset_version
+        mock_client.lookup_postcode.return_value = NIPOSTLookupResult(
+            status=NIPOSTLookupStatus.FOUND,
+            data={
+                "code": "100001",
+                "state": "Lagos",
+                "area": "Marina",
+            },
+        )
+        res2 = execute_postcode_lookup(db=db, code="100001", client=mock_client)
+        assert res2.is_live_nipost is True
+        assert res2.dataset_version is None
+        assert res2.api_integration_version == "2026.1"
+
+        # Scenario 3: Upstream NIPOST returns NOT_FOUND
+        mock_client.lookup_postcode.return_value = NIPOSTLookupResult(
+            status=NIPOSTLookupStatus.NOT_FOUND,
+            error_message="Code not in registry",
+            data=None,
+        )
+        res3 = execute_postcode_lookup(db=db, code="999999", client=mock_client)
+        assert res3.is_live_nipost is True
+        assert res3.count == 0
+        assert res3.dataset_version is None
+        assert res3.api_integration_version == "2026.1"
+
+        # Scenario 4: Local fallback reference has dataset_version "2024.2"
+        mock_client.lookup_postcode.return_value = NIPOSTLookupResult(
+            status=NIPOSTLookupStatus.UNAVAILABLE,
+            error_message="Gateway timeout",
+        )
+        res4 = execute_postcode_lookup(db=db, state="Lagos", strict=False, client=mock_client)
+        assert res4.is_live_nipost is False
+        assert res4.dataset_version == "2024.2"
+        assert res4.api_integration_version == "2026.1"
+    finally:
+        db.close()
+
