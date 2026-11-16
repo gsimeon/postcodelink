@@ -1863,7 +1863,7 @@ def test_redis_credential_sanitization_in_success_and_failure_logs():
                         mock_warn.assert_called_once()
                         fail_log = str(mock_warn.call_args[0][0])
                         assert canary_password not in fail_log
-                        assert "app_user:***@127.0.0.1:6379/2" in fail_log
+                        assert "Exception" in fail_log
 
 
 def test_nipost_official_contract_adapter_and_graded_lookup():
@@ -2138,6 +2138,70 @@ def test_rate_limiter_health_status_distinguishes_fail_closed_from_in_memory():
             status_dev = get_rate_limiter_status()
             assert status_dev["backend"] == "in_memory_fallback"
             assert status_dev["alert_fail_closed"] is False
+
+
+def test_redis_runtime_lua_operations_sanitize_exceptions():
+    """Verify that runtime Redis Lua failures in API-key and public-IP rate limiters log only error categories without credentials."""
+    import logging
+    from backend.app.core.rate_limiter import check_api_key_rate_limit, check_client_ip_rate_limit
+    import backend.app.core.rate_limiter as rl_mod
+
+    rl_logger = logging.getLogger("rate_limiter")
+    sensitive_detail = "AUTH failed on redis://admin:SecretPass123!@cache.internal:6379"
+
+    # 1. API key rate limiter Lua exception
+    mock_redis = MagicMock()
+    mock_redis.eval.side_effect = RuntimeError(sensitive_detail)
+    with patch.object(rl_mod, "_get_redis_client", return_value=mock_redis):
+        with patch.object(rl_logger, "warning") as mock_warn:
+            # dev environment to allow fallback after redis failure
+            with patch.object(settings, "ENVIRONMENT", "development"):
+                check_api_key_rate_limit("test_key_1", limit_per_minute=60)
+            mock_warn.assert_called()
+            log_str = " ".join([str(call[0][0]) % call[0][1:] if len(call[0]) > 1 else str(call[0][0]) for call in mock_warn.call_args_list])
+            assert "RuntimeError" in log_str
+            assert "SecretPass123!" not in log_str
+            assert "cache.internal" not in log_str
+
+    # 2. Public IP rate limiter Lua exception
+    mock_redis_ip = MagicMock()
+    mock_redis_ip.eval.side_effect = RuntimeError(sensitive_detail)
+    with patch.object(rl_mod, "_get_redis_client", return_value=mock_redis_ip):
+        with patch.object(rl_logger, "warning") as mock_warn_ip:
+            with patch.object(settings, "ENVIRONMENT", "development"):
+                check_client_ip_rate_limit("198.51.100.88", limit_per_minute=15)
+            mock_warn_ip.assert_called()
+            log_str_ip = " ".join([str(call[0][0]) % call[0][1:] if len(call[0]) > 1 else str(call[0][0]) for call in mock_warn_ip.call_args_list])
+            assert "RuntimeError" in log_str_ip
+            assert "SecretPass123!" not in log_str_ip
+            assert "cache.internal" not in log_str_ip
+
+
+def test_in_memory_rate_limiter_hard_bounded_capacity():
+    """Verify that in-memory storage strictly enforces MAX_IN_MEMORY_KEYS under high cardinality traffic."""
+    import backend.app.core.rate_limiter as rl_mod
+    from backend.app.core.rate_limiter import (
+        check_client_ip_rate_limit,
+        reset_api_key_rate_limits,
+        MAX_IN_MEMORY_KEYS,
+    )
+
+    reset_api_key_rate_limits()
+
+    # Test with patched small limit to verify eviction boundary
+    test_cap = 50
+    with patch.object(rl_mod, "MAX_IN_MEMORY_KEYS", test_cap):
+        with patch.object(rl_mod, "_get_redis_client", return_value=None):
+            with patch.object(settings, "ENVIRONMENT", "development"):
+                # Insert 120 unique IPs
+                for i in range(120):
+                    check_client_ip_rate_limit(f"198.51.100.{i}", limit_per_minute=10)
+
+                with rl_mod._LOCK:
+                    assert len(rl_mod._KEY_REQUEST_WINDOWS) <= test_cap
+
+    reset_api_key_rate_limits()
+
 
 
 

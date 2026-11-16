@@ -1,3 +1,4 @@
+from urllib.parse import urlsplit
 """Persistent and distributed rate limiting for API keys and service endpoints."""
 import time
 import secrets
@@ -44,6 +45,24 @@ def _sanitize_redis_url(url: Optional[str]) -> str:
         return f"{scheme}://{user_auth}{hostname}{port_str}{path}"
     except Exception:
         return "redis://***:***@redacted"
+
+
+
+def _safe_redis_endpoint(redis_url: Optional[str]) -> str:
+    """Return a non-secret Redis endpoint label suitable for operational logs."""
+    if not redis_url:
+        return "not-configured"
+    try:
+        parsed = urlsplit(redis_url)
+        if not parsed.hostname:
+            return "configured"
+        host = parsed.hostname
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"{parsed.scheme or 'redis'}://{host}:{parsed.port or 6379}"
+    except (TypeError, ValueError, Exception):
+        # Do not echo malformed URLs: they may still contain credentials.
+        return "configured"
 
 
 def _cleanup_expired_in_memory_windows(now: float, window_seconds: float = 60.0, force: bool = False) -> None:
@@ -147,10 +166,9 @@ def _get_redis_client():
             logger.info(f"[RateLimiter] Successfully connected to Redis at {sanitized_url}")
             return _REDIS_CLIENT
         except Exception as exc:
-            sanitized_url = _sanitize_redis_url(settings.REDIS_URL)
             err_type = type(exc).__name__
             logger.warning(
-                f"[RateLimiter ALERT] Redis connection attempt to {sanitized_url} failed ({err_type}). "
+                f"[RateLimiter ALERT] Redis connection attempt failed ({err_type}). "
                 f"Retrying after {_CONNECT_BACKOFF_SECONDS}s backoff."
             )
             _REDIS_CLIENT = None
@@ -211,7 +229,7 @@ def check_api_key_rate_limit(key_id: str, limit_per_minute: int = 60) -> None:
         except HTTPException:
             raise
         except Exception as exc:
-            logger.warning(f"[RateLimiter ALERT] Redis Lua operation failed: {exc}")
+            logger.warning(f"[RateLimiter ALERT] Redis Lua operation failed: {type(exc).__name__}")
             _handle_redis_failure()
 
     # Fail-closed policy enforcement in production
@@ -248,6 +266,8 @@ def check_api_key_rate_limit(key_id: str, limit_per_minute: int = 60) -> None:
 
         active_entries.append(now)
         _KEY_REQUEST_WINDOWS[key_id] = active_entries
+        if len(_KEY_REQUEST_WINDOWS) > MAX_IN_MEMORY_KEYS:
+            _cleanup_expired_in_memory_windows(now, window_seconds, force=True)
 
 
 def check_client_ip_rate_limit(client_ip: str, limit_per_minute: int = 15) -> None:
@@ -289,7 +309,7 @@ def check_client_ip_rate_limit(client_ip: str, limit_per_minute: int = 15) -> No
         except HTTPException:
             raise
         except Exception as exc:
-            logger.warning(f"[RateLimiter ALERT] Redis Lua IP rate limit operation failed: {exc}")
+            logger.warning(f"[RateLimiter ALERT] Redis Lua IP rate limit operation failed: {type(exc).__name__}")
             _handle_redis_failure()
 
     # Fail-closed policy enforcement in production
@@ -324,6 +344,8 @@ def check_client_ip_rate_limit(client_ip: str, limit_per_minute: int = 15) -> No
 
         active_entries.append(now)
         _KEY_REQUEST_WINDOWS[ip_key] = active_entries
+        if len(_KEY_REQUEST_WINDOWS) > MAX_IN_MEMORY_KEYS:
+            _cleanup_expired_in_memory_windows(now, window_seconds, force=True)
 
 
 def get_rate_limiter_status() -> Dict[str, Any]:
@@ -354,6 +376,7 @@ def get_rate_limiter_status() -> Dict[str, Any]:
 
     return {
         "backend": backend_name,
+        "available": backend_name != "unavailable_fail_closed",
         "redis_configured": bool(settings.REDIS_URL),
         "redis_connected": r_client is not None,
         "redis_endpoint": sanitized_url,
@@ -363,6 +386,7 @@ def get_rate_limiter_status() -> Dict[str, Any]:
         "in_memory_active_api_key_buckets": api_keys,
         "alert_in_memory_fallback": (settings.ENVIRONMENT == "production" and backend_name == "in_memory_fallback"),
         "alert_fail_closed": (backend_name == "unavailable_fail_closed"),
+        "alert_fail_closed_unavailable": (backend_name == "unavailable_fail_closed"),
     }
 
 
