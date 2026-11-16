@@ -39,6 +39,28 @@ graph TD
 
 ---
 
+## Data Sources, System Taxonomy & Regulatory Governance (Release Gate v6.0.5 Standard)
+
+PostcodeLink strictly differentiates between four tiers of postcode data and enforces clear data governance in compliance with the [NIPOST Terms of Service](https://www.postcode.gov.ng/terms):
+
+### 1. Data Source Taxonomy
+| Data Source Tier | Scope & Format | Intended Usage | Provenance Attributes |
+| :--- | :--- | :--- | :--- |
+| **Authoritative Live NIPOST Cloud Gateway** | Live FMCIDE/NIPOST national digital postcode registry. | Live verification of authoritative existence; returns building-level accuracy. | `dataset_version: "2026.1"`, `fallback_used: false` |
+| **NIPOST 11-Character National Digital Postcode** | 5-component building-level standard (e.g. `FC-02-A09-DB-09`: State, LGA, District, Sub-district, Building Unit). | Granular parcel routing and building-level last-mile navigation. | Standard NIPOST format |
+| **Legacy 6-Digit Postal Codes** | Traditional regional sorting codes (e.g. `100001` Lagos Island, `900001` Garki Abuja). | Macro dispatch, courier sorting hubs, and legacy e-commerce forms. | Regional routing |
+| **PostcodeLink Local Reference Database** | Pre-seeded local SQLite/PostgreSQL sample dataset of major Nigerian commercial centers. | Local automated testing, sub-millisecond offline dev, and resilient circuit-breaker fallback. | `dataset_version: "2024.2"`, `fallback_used: true`, `fallback_reason` declared |
+
+> [!IMPORTANT]
+> **No Conflation of Local Data with Official Verification**: Local reference data is strictly tagged as demonstration and fallback data. In strict verification mode (`strict=true`), local fallback is disabled; unverified postcodes return HTTP 503 rather than asserting local demonstration data as government truth.
+
+### 2. NIPOST Terms of Service & Commercial Usage Policy
+- **Software Service Model**: PostcodeLink provides address disambiguation, algorithmic landmark cleansing, and last-mile delivery tracking software. It does not claim ownership of the national postal directory, nor does it engage in unauthorized wholesale resale or bulk redistribution of raw government databases.
+- **Operational Caching Limits**: Stored lookup metadata is restricted to operational verification audit logs and merchant delivery records. Commercial API consumers are prohibited from building independent derivative national postal databases without a direct commercial agreement with NIPOST.
+- **Enterprise Licensing Notice**: Production deployments requiring high-volume directory synchronization or deep government registry integrations must obtain written authorization directly from NIPOST ([https://www.postcode.gov.ng](https://www.postcode.gov.ng)).
+
+---
+
 ## Architecture & Security Hardening (Release Gate v6.0 Production Standard)
 
 Following the production-readiness review of Release Gate v5.9, Release Gate v6.0 introduces permanent audit retention, fail-closed live carrier verification, commercial API quota metering, and requeue lifecycle integrity:

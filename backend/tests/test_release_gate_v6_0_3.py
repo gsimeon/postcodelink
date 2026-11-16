@@ -171,7 +171,9 @@ def test_nipost_lookup_exception_logs_only_error_category(caplog):
     [
         ({"status": "NOT_FOUND"}, "NOT_FOUND"),
         ({"status": "INVALID"}, "INVALID_INPUT"),
-        ({"valid": False}, "INVALID_INPUT"),
+        ({"status": "INVALID_FORMAT"}, "INVALID_INPUT"),
+        ({"error_code": "VALIDATION_ERROR"}, "INVALID_INPUT"),
+        ({"valid": False}, "NOT_FOUND"),
         ({"found": False}, "NOT_FOUND"),
         ({"matches": []}, "NOT_FOUND"),
     ],
@@ -235,3 +237,62 @@ def test_rate_limiter_health_endpoint_omits_redis_username_password_and_query(mo
     rendered = str(status)
     for secret in ("operator", "secret-password", "/4", "ssl=true"):
         assert secret not in rendered
+
+
+def test_nipost_404_strict_machine_readable_discrimination_all_six_scenarios():
+    """Verify all 6 release-blocking 404 scenarios specified in v6.0.5 review:
+    1. Generic gateway 404 -> UNAVAILABLE
+    2. HTML reverse-proxy 404 -> UNAVAILABLE
+    3. Explicit documented postcode-not-found code -> NOT_FOUND
+    4. Unrelated resource-not-found message -> UNAVAILABLE
+    5. Malformed JSON -> UNAVAILABLE
+    6. Response referring to a different postcode -> UNAVAILABLE
+    """
+    import httpx
+    from backend.app.services.nipost_client import NIPOSTLookupStatus
+
+    # 1. Generic gateway 404
+    c1 = NIPOSTClient(base_url="https://api.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"detail": "Not Found"})
+    ))
+    assert c1.lookup_postcode("100001").status == NIPOSTLookupStatus.UNAVAILABLE
+
+    # 2. HTML reverse-proxy 404
+    c2 = NIPOSTClient(base_url="https://api.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, text="<html><body>404 Not Found nginx/1.24.0</body></html>", headers={"content-type": "text/html"})
+    ))
+    assert c2.lookup_postcode("100001").status == NIPOSTLookupStatus.UNAVAILABLE
+
+    # 3. Explicit documented postcode-not-found code with matching postcode
+    c3 = NIPOSTClient(base_url="https://api.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"error_code": "POSTCODE_NOT_FOUND", "postcode": "100001"})
+    ))
+    res3 = c3.lookup_postcode("100001")
+    assert res3.status == NIPOSTLookupStatus.NOT_FOUND
+    assert res3.http_status == 404
+
+    # 3b. Explicit documented status code
+    c3b = NIPOSTClient(base_url="https://api.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"status": "NOT_FOUND", "postcode": "100001"})
+    ))
+    assert c3b.lookup_postcode("100001").status == NIPOSTLookupStatus.NOT_FOUND
+
+    # 4. Unrelated resource-not-found message
+    c4 = NIPOSTClient(base_url="https://api.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"detail": "User not found", "error": "Resource not found"})
+    ))
+    assert c4.lookup_postcode("100001").status == NIPOSTLookupStatus.UNAVAILABLE
+
+    # 5. Malformed JSON
+    c5 = NIPOSTClient(base_url="https://api.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, text="{malformed: json, unclosed", headers={"content-type": "application/json"})
+    ))
+    assert c5.lookup_postcode("100001").status == NIPOSTLookupStatus.UNAVAILABLE
+
+    # 6. Response referring to a different postcode
+    c6 = NIPOSTClient(base_url="https://api.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"error_code": "POSTCODE_NOT_FOUND", "postcode": "999999"})
+    ))
+    # Requested 100001, but response echoed 999999 -> rejected as UNAVAILABLE
+    assert c6.lookup_postcode("100001").status == NIPOSTLookupStatus.UNAVAILABLE
+

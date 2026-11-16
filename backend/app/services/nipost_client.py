@@ -106,23 +106,18 @@ class NIPOSTClient:
         if not isinstance(data, dict):
             return NIPOSTLookupStatus.INVALID_RESPONSE, None, "NIPOST API returned non-dict JSON response."
 
-        # Check explicit negative validity
+        # Check explicit machine-readable status/error codes
         status_str = str(data.get("status", "")).strip().upper()
-        error_code = str(data.get("error_code") or data.get("code") or "").strip().upper()
-        detail_str = str(data.get("detail") or data.get("message") or data.get("error") or "").lower()
+        error_code = str(data.get("error_code") or data.get("error") or data.get("code") or "").strip().upper()
 
-        # 1. Explicit invalid input / format classification
+        # 1. Explicit machine-readable invalid input classification (malformed syntax/format)
         if (
             status_str in ("INVALID_INPUT", "INVALID_FORMAT", "BAD_REQUEST", "MALFORMED_CODE", "INVALID")
-            or error_code in ("INVALID_INPUT", "INVALID_FORMAT", "INVALID_CODE", "VALIDATION_ERROR")
-            or "invalid postcode format" in detail_str
-            or "code must be" in detail_str
-            or "invalid input" in detail_str
-            or (data.get("valid") is False and not any(kw in detail_str for kw in ("not found", "does not exist")) and error_code != "POSTCODE_NOT_FOUND")
+            or error_code in ("INVALID_INPUT", "INVALID_FORMAT", "INVALID_CODE", "VALIDATION_ERROR", "BAD_REQUEST")
         ):
-            return NIPOSTLookupStatus.INVALID_INPUT, data, f"Postcode '{clean_code}' has invalid format or rejected syntax: {detail_str or 'invalid input'}."
+            return NIPOSTLookupStatus.INVALID_INPUT, data, f"Postcode '{clean_code}' has invalid format or rejected syntax."
 
-        # 2. Explicit authoritative non-existence check
+        # 2. Authoritative non-existence check: well-formed query that was checked by the Validator and absent
         if (
             data.get("valid") is False
             or status_str in ("NOT_FOUND", "POSTCODE_NOT_FOUND")
@@ -260,8 +255,10 @@ class NIPOSTClient:
                 elif resp.status_code == 404:
                     # Critical security & routing check:
                     # Differentiate authoritative postcode non-existence from route / endpoint 404.
-                    # Generic {"detail": "Not Found"}, {"message": "Not Found"}, or HTML proxy 404
-                    # are NOT authoritative and must be classified as UNAVAILABLE (route error).
+                    # Strict specification: ONLY explicit machine-readable provider error codes
+                    # echoing the queried postcode confirm directory non-existence.
+                    # All unrecognised payloads, generic gateway messages, HTML proxies,
+                    # malformed JSON, and mismatched postcode references are classified as UNAVAILABLE.
                     is_authoritative_not_found = False
                     content_type = resp.headers.get("content-type", "").lower()
 
@@ -269,45 +266,31 @@ class NIPOSTClient:
                         try:
                             data = resp.json()
                             if isinstance(data, dict):
-                                err_raw = data.get("error_code") or data.get("code") or ""
-                                if not err_raw and str(data.get("error", "")).strip().lower() in ("postcode_not_found", "not_found"):
-                                    err_raw = str(data.get("error"))
-                                err_code = str(err_raw).strip().upper()
+                                err_code = str(data.get("error_code") or data.get("error") or data.get("code") or "").strip().upper()
                                 status_val = str(data.get("status", "")).strip().upper()
-                                detail = str(data.get("detail", "")).strip()
-                                message = str(data.get("message", "")).strip()
-                                err_field = str(data.get("error", "")).strip().lower()
-                                detail_lower = detail.lower()
-                                message_lower = message.lower()
-                                err_combined = (detail_lower + " " + message_lower + " " + err_field).strip()
 
-                                # Reject generic 404 messages from routers or reverse proxies
-                                is_generic_404 = (
-                                    detail_lower in ("not found", "resource not found", "route not found", "postcode route not found", "postcode invalid", "")
-                                    and message_lower in ("not found", "resource not found", "route not found", "postcode invalid", "")
-                                    and err_field in ("postcode lookup failed", "")
-                                    and not (err_code in ("POSTCODE_NOT_FOUND", "NOT_FOUND", "ERR_POSTCODE_NOT_FOUND"))
-                                    and status_val not in ("NOT_FOUND", "POSTCODE_NOT_FOUND")
-                                    and not (data.get("valid") is False and (data.get("postcode") or data.get("code")))
+                                # Validate echoed postcode if present in payload (prevents accepting responses for different postcodes)
+                                echoed_code = str(data.get("postcode") or data.get("code") or "").strip().upper()
+                                postcode_matches = True
+                                if echoed_code:
+                                    norm_req = clean_code.replace("-", "").replace(" ", "")
+                                    norm_echoed = echoed_code.replace("-", "").replace(" ", "")
+                                    postcode_matches = (norm_req == norm_echoed)
+
+                                # Explicit machine-readable error code required (no prose substring heuristics)
+                                is_doc_code = (
+                                    err_code in ("POSTCODE_NOT_FOUND", "NOT_FOUND", "ERR_POSTCODE_NOT_FOUND")
+                                    or status_val in ("NOT_FOUND", "POSTCODE_NOT_FOUND")
                                 )
 
-                                if not is_generic_404:
-                                    # Must contain documented NIPOST error code or explicit postcode-level search result
-                                    if (
-                                        err_code in ("POSTCODE_NOT_FOUND", "NOT_FOUND", "ERR_POSTCODE_NOT_FOUND")
-                                        or status_val in ("NOT_FOUND", "POSTCODE_NOT_FOUND")
-                                        or (data.get("valid") is False and (data.get("postcode") or data.get("code")) and any(kw in err_combined for kw in ("not_found", "not found", "does not exist")))
-                                        or ("postcode" in detail_lower and "not found" in detail_lower)
-                                        or ("postcode" in message_lower and "not found" in message_lower)
-                                        or "does not exist in official" in detail_lower
-                                        or "does not exist in official" in message_lower
-                                    ):
-                                        is_authoritative_not_found = True
+                                if is_doc_code and postcode_matches:
+                                    is_authoritative_not_found = True
                         except Exception:
+                            # Malformed JSON or parsing failure -> strictly UNAVAILABLE
                             is_authoritative_not_found = False
 
                     if is_authoritative_not_found:
-                        logger.info(f"NIPOST API: Postcode prefix '{clean_code[:3]}***' confirmed not found in national directory (404).")
+                        logger.info(f"NIPOST API: Postcode prefix '{clean_code[:3]}***' confirmed not found via documented machine-readable code (404).")
                         return NIPOSTLookupResult(
                             status=NIPOSTLookupStatus.NOT_FOUND,
                             http_status=404,
