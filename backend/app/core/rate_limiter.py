@@ -162,8 +162,8 @@ def _get_redis_client():
             )
             client.ping()
             _REDIS_CLIENT = client
-            sanitized_url = _sanitize_redis_url(settings.REDIS_URL)
-            logger.info(f"[RateLimiter] Successfully connected to Redis at {sanitized_url}")
+            safe_endpoint = _safe_redis_endpoint(settings.REDIS_URL)
+            logger.info(f"[RateLimiter] Successfully connected to Redis at {safe_endpoint}")
             return _REDIS_CLIENT
         except Exception as exc:
             err_type = type(exc).__name__
@@ -372,14 +372,14 @@ def get_rate_limiter_status() -> Dict[str, Any]:
         ip_keys = sum(1 for k in _KEY_REQUEST_WINDOWS if k.startswith("ip_"))
         api_keys = total_keys - ip_keys
 
-    sanitized_url = _sanitize_redis_url(settings.REDIS_URL) if settings.REDIS_URL else None
+    safe_endpoint = _safe_redis_endpoint(settings.REDIS_URL) if settings.REDIS_URL else None
 
     return {
         "backend": backend_name,
         "available": backend_name != "unavailable_fail_closed",
         "redis_configured": bool(settings.REDIS_URL),
         "redis_connected": r_client is not None,
-        "redis_endpoint": sanitized_url,
+        "redis_endpoint": safe_endpoint,
         "fail_closed_policy": fail_closed,
         "in_memory_active_keys": total_keys,
         "in_memory_active_ip_buckets": ip_keys,
