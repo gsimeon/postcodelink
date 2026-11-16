@@ -1,15 +1,22 @@
 """Deliveries router with authentication, tenant isolation, and RBAC."""
+import uuid
 import secrets
-from typing import List, Optional
+from pydantic import BaseModel, Field
+from typing import List, Optional, Literal
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Query, status, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
 from backend.app.database import get_db
+from backend.app.config import settings
 from backend.app.models.delivery import Delivery
+from backend.app.models.delivery_event import DeliveryEvent
 from backend.app.models.operator import Operator
 from backend.app.models.profile import Profile
+from backend.app.models.notification_outbox import NotificationOutbox
 from backend.app.models.enums import DeliveryStatus, AppRole
+from backend.app.services.notification_service import NotificationDeliveryStatus, mask_phone
 from backend.app.schemas.delivery import (
     DeliveryCreateRequest,
     DeliveryCreateResponse,
@@ -30,7 +37,12 @@ from backend.app.services.delivery_service import (
     regenerate_tracking_token,
     resend_delivery_pin,
 )
-from backend.app.core.auth_deps import get_current_user, require_roles
+from backend.app.core.auth_deps import (
+    get_current_user,
+    require_roles,
+    get_current_actor,
+    get_authenticated_merchant_or_api_key,
+)
 
 router = APIRouter(prefix="/deliveries", tags=["deliveries"])
 
@@ -38,10 +50,10 @@ router = APIRouter(prefix="/deliveries", tags=["deliveries"])
 @router.post("/", response_model=DeliveryCreateResponse, status_code=status.HTTP_201_CREATED)
 def api_create_delivery(
     request: DeliveryCreateRequest,
-    current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
+    current_user: Profile = Depends(get_authenticated_merchant_or_api_key),
     db: Session = Depends(get_db),
 ):
-    """Create a new delivery record scoped strictly to the authenticated merchant."""
+    """Create a new delivery record scoped strictly to the authenticated merchant (Bearer JWT or x-api-key)."""
     return create_delivery(db, request, current_user)
 
 
@@ -49,7 +61,7 @@ def api_create_delivery(
 def api_bulk_create_deliveries(
     items: List[DeliveryCreateRequest],
     batch_id: Optional[str] = Query(None),
-    current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
+    current_user: Profile = Depends(get_authenticated_merchant_or_api_key),
     db: Session = Depends(get_db),
 ):
     """Batch import delivery orders into the authenticated merchant's account with atomic per-item reporting."""
@@ -109,11 +121,11 @@ def api_list_deliveries(
     search: Optional[str] = Query(None),
     limit: int = Query(50, le=100),
     offset: int = Query(0, ge=0),
-    current_user: Profile = Depends(get_current_user),
+    current_user: Profile = Depends(get_current_actor),
     db: Session = Depends(get_db),
 ):
-    """List deliveries scoped by tenant role (Merchants see their orders; Operators see assigned trips)."""
-    query = db.query(Delivery)
+    """List deliveries scoped by tenant role (Merchants see their orders; Operators see assigned trips; supports x-api-key)."""
+    query = db.query(Delivery).filter(Delivery.is_deleted == False)
 
     # Tenant isolation
     if current_user.role == AppRole.MERCHANT:
@@ -145,11 +157,11 @@ def api_list_deliveries(
 @router.get("/{delivery_id}", response_model=DeliveryResponse)
 def api_get_delivery(
     delivery_id: str,
-    current_user: Profile = Depends(get_current_user),
+    current_user: Profile = Depends(get_current_actor),
     db: Session = Depends(get_db),
 ):
     """Get full details of a delivery (enforcing tenant access permissions)."""
-    delivery = db.query(Delivery).filter(Delivery.id == delivery_id).first()
+    delivery = db.query(Delivery).filter(Delivery.id == delivery_id, Delivery.is_deleted == False).first()
     if not delivery:
         raise HTTPException(status_code=404, detail="Delivery order not found.")
 
@@ -231,8 +243,12 @@ def api_delete_delivery(
     current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
     db: Session = Depends(get_db),
 ):
-    """Delete a delivery order (only permitted for unassigned or cancelled orders by merchant owner/admin)."""
-    delivery = db.query(Delivery).filter(Delivery.id == delivery_id).first()
+    """Soft-delete a delivery order (only permitted for unassigned or cancelled orders by merchant owner/admin).
+    
+    In compliance with permanent regulatory audit trail standards, delivery orders are soft-deleted,
+    marked CANCELLED, and all immutable DeliveryEvent records are permanently preserved.
+    """
+    delivery = db.query(Delivery).filter(Delivery.id == delivery_id, Delivery.is_deleted == False).first()
     if not delivery:
         raise HTTPException(status_code=404, detail="Delivery order not found.")
 
@@ -242,5 +258,226 @@ def api_delete_delivery(
     if delivery.status not in [DeliveryStatus.PENDING, DeliveryStatus.CANCELLED]:
         raise HTTPException(status_code=400, detail="Cannot delete an order that has already been dispatched or delivered.")
 
-    db.delete(delivery)
+    now = datetime.now(timezone.utc)
+    delivery.is_deleted = True
+    delivery.deleted_at = now
+    delivery.status = DeliveryStatus.CANCELLED
+    if delivery.tracking_token:
+        delivery.tracking_token = f"revoked_{delivery.id}_{uuid.uuid4().hex[:12]}"
+
+    # Record immutable audit event
+    actor_role_str = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+    del_event = DeliveryEvent(
+        delivery_id=delivery.id,
+        status=DeliveryStatus.CANCELLED,
+        actor_name=current_user.full_name,
+        actor_role=actor_role_str,
+        note=f"Delivery order soft-deleted and archived by {current_user.email}. Compliance audit records permanently retained.",
+    )
+    db.add(del_event)
     db.commit()
+
+
+# ==============================================================================
+# ==============================================================================
+# Outbox Manual Reconciliation Workflows (Admin Only & Privacy-Hardened)
+# ==============================================================================
+class OutboxReconciliationRequest(BaseModel):
+    resolution: Literal["mark_sent", "requeue", "mark_failed"]
+    reason: str = Field(..., min_length=10, description="Mandatory operator audit reason and resolution evidence.")
+    provider_message_id: Optional[str] = Field(None, description="External provider message ID if confirmed delivered.")
+    evidence_reference: Optional[str] = Field(None, description="External ticket, telco reference, or customer contact note.")
+    evidence_type: Literal["manual_operator_asserted", "provider_telemetry_verified"] = Field(
+        "manual_operator_asserted",
+        description="Distinguishes manually asserted audit justification from provider-verified telemetry evidence.",
+    )
+    reconciliation_request_id: Optional[str] = Field(
+        None,
+        description="Optional client reconciliation tracking ID; auto-generated if omitted.",
+    )
+
+
+@router.get("/outbox/reconciliation", status_code=status.HTTP_200_OK)
+def api_list_outbox_reconciliations(
+    current_user: Profile = Depends(require_roles([AppRole.ADMIN])),
+    db: Session = Depends(get_db),
+):
+    """List all outbox notification items currently in RECONCILIATION_REQUIRED state.
+    
+    Strictly restricted to Admin profiles. Recipient phone numbers are masked to protect customer privacy.
+    """
+    items = (
+        db.query(NotificationOutbox)
+        .filter(NotificationOutbox.status == NotificationDeliveryStatus.RECONCILIATION_REQUIRED)
+        .order_by(NotificationOutbox.updated_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id": it.id,
+            "delivery_id": it.delivery_id,
+            "recipient_phone_masked": mask_phone(it.recipient_phone),
+            "provider": it.provider,
+            "idempotency_key": it.idempotency_key,
+            "provider_message_id": it.provider_message_id,
+            "failure_classification": it.failure_classification,
+            "error_details": it.error_details,
+            "retry_count": it.retry_count,
+            "evidence_type": getattr(it, "evidence_type", None),
+            "reconciliation_request_id": getattr(it, "reconciliation_request_id", None),
+            "created_at": it.created_at,
+            "updated_at": it.updated_at,
+        }
+        for it in items
+    ]
+
+
+@router.post("/outbox/{outbox_id}/reconcile", status_code=status.HTTP_200_OK)
+def api_reconcile_outbox_item(
+    outbox_id: str,
+    req: OutboxReconciliationRequest,
+    current_user: Profile = Depends(require_roles([AppRole.ADMIN])),
+    db: Session = Depends(get_db),
+):
+    """Manual reconciliation workflow: resolve an ambiguous outbox item with mandatory audit reasoning."""
+    item = db.query(NotificationOutbox).filter(NotificationOutbox.id == outbox_id).first()
+    if not item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Outbox notification record not found.")
+
+    if req.resolution == "mark_sent":
+        if not (req.provider_message_id or req.evidence_reference):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Marking an outbox notification as 'mark_sent' requires explicit evidence: provide provider_message_id or evidence_reference.",
+            )
+        if req.evidence_type == "provider_telemetry_verified":
+            if not req.provider_message_id:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Provider-verified resolution requires an authoritative provider_message_id.",
+                )
+            # Contact the configured provider to verify message existence, status, and delivery association
+            from backend.app.services.notification_service import get_notification_provider
+            provider_name = (item.provider or settings.SMS_PROVIDER or "").lower()
+            if provider_name == "simulated" or provider_name not in ["termii", "twilio"]:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        "Simulated notifications cannot be used for 'provider_telemetry_verified' resolution. "
+                        "Evidence from local sandbox providers does not qualify as carrier telemetry. "
+                        "Use 'manual_operator_asserted' with supporting ticket reference, or configure an authoritative carrier (Termii/Twilio)."
+                    ),
+                )
+            active_provider = get_notification_provider(provider_name)
+            telemetry_res = None
+            if active_provider and hasattr(active_provider, "check_message_status"):
+                try:
+                    telemetry_res = active_provider.check_message_status(
+                        idempotency_key=item.idempotency_key or "",
+                        provider_message_id=req.provider_message_id,
+                        recipient_phone=item.recipient_phone,
+                        delivery_id=item.delivery_id,
+                    )
+                except Exception as exc:
+                    logger.warning(f"Provider telemetry verification check exception: {exc}")
+
+            if not telemetry_res or telemetry_res.status != NotificationDeliveryStatus.SENT:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        f"Provider telemetry verification failed: message ID '{req.provider_message_id}' "
+                        f"could not be confirmed as successfully dispatched by provider '{provider_name}'. "
+                        "Verify carrier logs or use 'manual_operator_asserted' with supporting ticket reference."
+                    ),
+                )
+
+    now = datetime.now(timezone.utc)
+    recon_id = req.reconciliation_request_id or f"recon-{uuid.uuid4().hex[:12]}"
+    item.reconciliation_request_id = recon_id
+    item.evidence_type = req.evidence_type
+
+    resolution_audit_desc = (
+        f"Outbox manual reconciliation [{recon_id}]: action='{req.resolution}', "
+        f"evidence_type='{req.evidence_type}', reason='{req.reason}', "
+        f"evidence='{req.evidence_reference or req.provider_message_id}'"
+    )
+
+    if req.resolution == "mark_sent":
+        item.status = NotificationDeliveryStatus.SENT
+        item.provider_message_id = req.provider_message_id or item.provider_message_id or f"MANUAL_RECONCILED_{current_user.id[:8]}"
+        item.status_reconciled_at = now
+        item.sent_at = item.sent_at or now
+        item.failure_classification = "manual_asserted_resolution" if req.evidence_type == "manual_operator_asserted" else "provider_verified_resolution"
+        item.error_details = (
+            f"Manually verified sent by admin {current_user.email} (evidence_type: {req.evidence_type}). "
+            f"Reason: {req.reason}. Evidence: {req.evidence_reference or req.provider_message_id}."
+        )
+        item.locked_at = None
+        item.locked_by = None
+    elif req.resolution == "requeue":
+        if item.status not in [NotificationDeliveryStatus.FAILED, NotificationDeliveryStatus.RECONCILIATION_REQUIRED]:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Cannot requeue notification in active status '{item.status.value}'. Requeue is only permitted for failed or reconciliation-required items.",
+            )
+
+        item.status = NotificationDeliveryStatus.QUEUED
+        item.failure_classification = "manual_requeue_authorized"
+        item.retry_count = 0  # Reset retry counter so exhausted items are eligible for processing
+
+        # Explicit dispatch attempt increment while preserving initial idempotency key in audit history
+        current_attempt = getattr(item, "dispatch_attempt", 1) or 1
+        new_attempt = current_attempt + 1
+        item.dispatch_attempt = new_attempt
+        if not getattr(item, "original_idempotency_key", None):
+            item.original_idempotency_key = item.idempotency_key
+
+        # Preserve the previous provider message ID in attempt history and clear active provider_message_id
+        # so the worker performs a fresh dispatch rather than incorrectly short-circuiting to SENT!
+        if item.provider_message_id:
+            item.last_failed_provider_message_id = item.provider_message_id
+            item.provider_message_id = None
+
+        base_idempotency = (item.original_idempotency_key or item.idempotency_key or f"outbox_{item.id}")[:48]
+        item.idempotency_key = f"{base_idempotency}_att{new_attempt}"
+
+        item.error_details = (
+            f"Supervisor {current_user.email} authorized manual requeue (dispatch_attempt: {new_attempt}, "
+            f"prior_idempotency: {item.original_idempotency_key}, "
+            f"prior_provider_msg_id: {item.last_failed_provider_message_id}). Reason: {req.reason}."
+        )
+        item.next_attempt_at = now
+        item.locked_at = None
+        item.locked_by = None
+    elif req.resolution == "mark_failed":
+        item.status = NotificationDeliveryStatus.FAILED
+        item.failure_classification = "manually_marked_failed"
+        item.error_details = f"Marked permanently failed by admin {current_user.email}. Reason: {req.reason}."
+        item.locked_at = None
+        item.locked_by = None
+
+    # Append immutable audit entry to delivery events
+    deliv = db.query(Delivery).filter(Delivery.id == item.delivery_id).first()
+    if deliv:
+        event = DeliveryEvent(
+            delivery_id=item.delivery_id,
+            status=deliv.status,
+            actor_name=current_user.full_name or current_user.email,
+            actor_role=current_user.role.value,
+            note=f"{resolution_audit_desc}, actor='{current_user.email}'.",
+            occurred_at=now,
+        )
+        db.add(event)
+
+    db.commit()
+    db.refresh(item)
+    return {
+        "id": item.id,
+        "delivery_id": item.delivery_id,
+        "status": item.status.value,
+        "provider_message_id": item.provider_message_id,
+        "error_details": item.error_details,
+        "reconciled_by": current_user.email,
+        "reconciled_at": now.isoformat(),
+        "audit_reason": req.reason,
+    }

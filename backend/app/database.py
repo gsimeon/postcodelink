@@ -1,5 +1,6 @@
 """Database connection and session handling using SQLAlchemy."""
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 from backend.app.config import settings
 
@@ -20,6 +21,13 @@ engine = create_engine(
     echo=False,
     future=True
 )
+
+@event.listens_for(Engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    if type(dbapi_connection).__module__ == "sqlite3":
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

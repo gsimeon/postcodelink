@@ -1,12 +1,12 @@
 """Postcode directory service and Nigerian address cleanser.
 
-NIPOST Reference Provenance:
-- Source: NIPOST (Nigerian Postal Service) Official Digital Postcode Directory
-- Edition: National Pilot Directory Edition
+PostcodeLink Local Reference Provenance:
+- Source: PostcodeLink Demonstration Reference Dataset (independent local reference)
+- Edition: Demonstration & Reference Edition
 - Version: 2024.2
-- Publication Date: 2024-06-01
 - States Covered (11): Lagos, Abuja FCT, Rivers, Oyo, Ogun, Kano, Kaduna, Enugu, Delta, Edo, Anambra
-- Standard: Official 6-digit postal codes (1st digit: Zone, 2nd-3rd digits: Dispatch district, 4th-6th digits: Delivery office)
+- Note: Live official national postcode validation and autofill are provided via the NIPOST API client.
+  Local records are strictly categorized as local_reference and never represented as official government verification.
 """
 import re
 from typing import Optional, List, Dict, Any
@@ -16,18 +16,18 @@ from backend.app.schemas.postcode import CleanseAddressResponse, PostcodeRecordS
 
 DATASET_METADATA = {
     "version": "2024.2",
-    "edition": "National Pilot Directory Edition",
-    "source": "NIPOST (Nigerian Postal Service) Official Digital Postcode Directory",
+    "edition": "Local Demonstration & Reference Edition",
+    "source": "PostcodeLink Local Reference & Demonstration Dataset",
     "publication_date": "2024-06-01",
     "states_covered": [
         "Lagos", "Abuja FCT", "Rivers", "Oyo", "Ogun",
         "Kano", "Kaduna", "Enugu", "Delta", "Edo", "Anambra"
     ],
-    "status": "verified_pilot_dataset",
+    "status": "local_reference",
 }
 
-# Verified multi-state reference registry across all 11 covered Nigerian states
-OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
+# Legacy postal references and demonstration fixtures (multi-state pilot & format demonstration)
+LEGACY_POSTAL_REFERENCES: List[Dict[str, Any]] = [
     # 1. Lagos State (Zone 1)
     {"code": "100001", "area": "Ikeja Central / Alausa", "state": "Lagos", "lga": "Ikeja", "lat": 6.6186, "lng": 3.3570},
     {"code": "100271", "area": "Ikeja GRA", "state": "Lagos", "lga": "Ikeja", "lat": 6.5885, "lng": 3.3556},
@@ -163,7 +163,7 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
         "source_owner": "PostcodeLink",
         "source_type": "locally_collected_reference",
     },
-    # Official National 11-Character 5-Component Digital Postcodes (October 2026 National Standard)
+    # National 11-Character 5-Component Digital Postcode Fixtures (Format Demonstration Reference)
     {
         "code": "FC-02-A09-DB-09",
         "area": "Garki District Area 2",
@@ -173,12 +173,12 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
         "lng": 7.4891,
         "postcode_type": "digital_location",
         "postcode_category": "official_digital_postcode",
-        "verification_status": "official_verified",
+        "verification_status": "local_reference",
         "building_reference": "Federal Commerce House",
-        "provenance": "NIPOST Official Digital Postcode Directory",
+        "provenance": "PostcodeLink National Postcode Format Demonstration Reference",
         "dataset_version": "2026.1",
-        "source_owner": "NIPOST",
-        "source_type": "official_national_directory",
+        "source_owner": "PostcodeLink",
+        "source_type": "demonstration_fixture",
         "national_components": {
             "state": "FC",
             "lga": "02",
@@ -196,12 +196,12 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
         "lng": 3.3541,
         "postcode_type": "digital_location",
         "postcode_category": "official_digital_postcode",
-        "verification_status": "official_verified",
+        "verification_status": "local_reference",
         "building_reference": "Plot 4 Ikeja Commercial Plaza",
-        "provenance": "NIPOST Official Digital Postcode Directory",
+        "provenance": "PostcodeLink National Postcode Format Demonstration Reference",
         "dataset_version": "2026.1",
-        "source_owner": "NIPOST",
-        "source_type": "official_national_directory",
+        "source_owner": "PostcodeLink",
+        "source_type": "demonstration_fixture",
         "national_components": {
             "state": "LA",
             "lga": "01",
@@ -211,6 +211,9 @@ OFFICIAL_POSTCODES: List[Dict[str, Any]] = [
         },
     },
 ]
+
+# Backward-compatible alias for existing imports
+OFFICIAL_POSTCODES = LEGACY_POSTAL_REFERENCES
 
 
 def parse_national_digital_postcode(code: Optional[str]) -> Optional[Dict[str, Any]]:
