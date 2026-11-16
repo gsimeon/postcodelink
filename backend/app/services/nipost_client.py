@@ -97,8 +97,11 @@ class NIPOSTClient:
             return NIPOSTLookupStatus.INVALID_RESPONSE, None, "NIPOST API returned non-dict JSON response."
 
         # Check explicit negative validity
-        if data.get("valid") is False or str(data.get("status", "")).upper() in ("NOT_FOUND", "INVALID") or data.get("found") is False:
-            return NIPOSTLookupStatus.NOT_FOUND, data, f"Postcode '{clean_code}' is invalid or not found in official NIPOST directory."
+        status_value = str(data.get("status", "")).strip().upper()
+        if status_value == "INVALID":
+            return NIPOSTLookupStatus.INVALID_RESPONSE, data, "NIPOST reported an invalid postcode response; non-existence was not confirmed."
+        if data.get("valid") is False or status_value == "NOT_FOUND" or data.get("found") is False:
+            return NIPOSTLookupStatus.NOT_FOUND, data, "NIPOST explicitly reported that the postcode was not found."
 
         # Extract record container
         matches = data.get("matches")
@@ -229,12 +232,12 @@ class NIPOSTClient:
                                 message = str(data.get("message", "")).lower()
                                 error = str(data.get("error", "")).lower()
                                 status_val = str(data.get("status", "")).upper()
-                                if (
-                                    data.get("valid") is False
-                                    or status_val in ("NOT_FOUND", "INVALID")
-                                    or "postcode" in detail or "postcode" in message or "postcode" in error
-                                    or "not found" in detail or "not found" in message
-                                ):
+                                error_code = str(data.get("error_code") or data.get("code") or "").strip().upper()
+                                # A 404 is authoritative only when the provider returns a
+                                # machine-readable postcode-not-found result. Generic prose
+                                # ("Not Found", "postcode invalid", etc.) may be a route or
+                                # gateway error and must not reject a customer address.
+                                if status_val == "NOT_FOUND" or error_code == "POSTCODE_NOT_FOUND":
                                     is_authoritative_not_found = True
                         except Exception:
                             is_authoritative_not_found = False
