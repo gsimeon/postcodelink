@@ -1005,7 +1005,7 @@ def test_commercial_postcode_api_key_mandatory_authentication():
 def test_public_postcode_demo_client_ip_rate_limiting():
     """Verify that unauthenticated callers on public demo endpoints are restricted by IP rate limiting."""
     reset_api_key_rate_limits()
-    test_ip = "192.168.100.55"
+    test_ip = f"192.168.{secrets.randbelow(200) + 10}.{secrets.randbelow(200) + 10}"
     headers = {"x-forwarded-for": test_ip}
 
     # First 15 requests succeed (within limit of 15/min)

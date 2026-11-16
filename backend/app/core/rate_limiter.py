@@ -279,7 +279,7 @@ def reset_api_key_rate_limits() -> None:
     r_client = _get_redis_client()
     if r_client:
         try:
-            keys = r_client.keys("ratelimit:apikey:*")
+            keys = r_client.keys("ratelimit:*")
             if keys:
                 r_client.delete(*keys)
         except Exception:
