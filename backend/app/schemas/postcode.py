@@ -65,7 +65,7 @@ class CleanseAddressResponse(BaseModel):
     postcode_type: str = "conventional_area"  # conventional_area | digital_location
     postcode_category: Optional[str] = "legacy_postal_code"  # legacy_postal_code | official_digital_postcode | local_address_reference
     resolution_level: str = "area_district"  # area_district | building_location
-    postcode_status: str  # verified | unverified | estimated | conflict | invalid
+    postcode_status: str  # verified | local_match | unverified | estimated | conflict | invalid
     verification_status: Optional[str] = "local_reference"
     confidence: float
     # Explicit three-dimension validation

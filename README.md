@@ -46,20 +46,25 @@ graph TD
 
 ---
 
-## Data Sources, System Taxonomy & Regulatory Governance (Release Gate v6.0.7 Standard)
+## Data Sources, System Taxonomy & Regulatory Governance (Release Gate v6.0.8 Standard)
 
 PostcodeLink strictly differentiates between four tiers of postcode data and enforces clear data governance in compliance with the [NIPOST Terms of Service](https://www.postcode.gov.ng/terms):
 
-### 1. Data Source Taxonomy
-| Data Source Tier | Scope & Format | Intended Usage | Provenance Attributes |
+### 1. Three-State Verification Taxonomy
+To prevent fabricated test fixtures or local reference data from being misrepresented as official government verifications, PostcodeLink enforces strict three-state categorization:
+1. **Format Valid (Syntax Level)**: The postcode string adheres to official structural specifications (either the 11-character 5-component `SS-LL-DDD-AA-BB` national digital standard or the 6-digit legacy format). Validated by `is_well_formed_postcode()`.
+2. **Local Reference Match (Reference Level)**: Matched against PostcodeLink's local demonstration registry. Returns `postcode_status: "local_match"` (confidence `0.75`). Demonstration fixtures (e.g. `FC-02-A09-DB-09` and `LA-01-A04-IK-02`) carry `source_type: "demonstration_fixture"` and explicitly log `(unverified with official NIPOST)`.
+3. **Official NIPOST Verified (Authoritative Level)**: Verified in real time against the live official NIPOST digital address directory service. Returns `postcode_status: "verified"` (confidence `0.95+`).
+
+| Data Source Tier | Scope & Format | Verification Status | Provenance Attributes |
 | :--- | :--- | :--- | :--- |
-| **Authoritative Live NIPOST Cloud Gateway** | Live FMCIDE/NIPOST national digital postcode registry. | Live verification of authoritative existence; returns building-level accuracy. | `dataset_version: null` (or provider-supplied version), `fallback_used: false` |
-| **NIPOST 11-Character National Digital Postcode** | 5-component building-level standard (`SS-LL-DDD-AA-BB`: State, LGA, District, Sub-district, Building Unit). | Granular parcel routing and building-level last-mile navigation. | Standard NIPOST format |
-| **Legacy 6-Digit Postal Codes** | Traditional regional sorting codes (e.g. `100001` Lagos Island, `900001` Garki Abuja). | Macro dispatch, courier sorting hubs, and legacy e-commerce forms. | Regional routing |
-| **PostcodeLink Local Reference Database** | Pre-seeded local SQLite/PostgreSQL sample dataset of major Nigerian commercial centers. | Local automated testing, sub-millisecond offline dev, and resilient circuit-breaker fallback. | `dataset_version: "2024.2"`, `fallback_used: true`, `fallback_reason` declared |
+| **Authoritative Live NIPOST Cloud Gateway** | Live FMCIDE/NIPOST national digital postcode registry. | `official_verified` (`postcode_status: "verified"`, confidence 0.95+) | `dataset_version: null` (or provider-supplied), `fallback_used: false` |
+| **NIPOST 11-Character National Digital Postcode** | 5-component building-level standard (`SS-LL-DDD-AA-BB`: State, LGA, District, Area, Building Unit). | Standard NIPOST format | Strict 2-2-3-2-2 width validation, canonical & compact parsing |
+| **Legacy 6-Digit Postal Codes** | Traditional regional sorting codes (e.g. `100001` Lagos Island, `900001` Garki Abuja). | `verified` when in directory | Regional routing |
+| **Demonstration Reference Fixtures** | Sample 11-character format demonstration codes (e.g. `FC-02-A09-DB-09`, `LA-01-A04-IK-02`). | `local_reference` (`postcode_status: "local_match"`, confidence 0.75) | `source_type: "demonstration_fixture"`, `source_owner: "PostcodeLink"` |
 
 > [!IMPORTANT]
-> **No Conflation of Local Data with Official Verification**: Local reference data is strictly tagged as demonstration and fallback data. In strict verification mode (`strict=true`), local fallback is disabled; unverified postcodes return HTTP 503 rather than asserting local demonstration data as government truth.
+> **No Conflation of Local Data with Official Verification**: Local reference data and demonstration fixtures are strictly tagged as demonstration and fallback data. In strict verification mode (`strict=true`), local fallback is disabled; unverified postcodes return HTTP 503 rather than asserting local demonstration data as government truth.
 
 ### 2. NIPOST Terms of Service, Commercial Usage & Official Integration Status
 - **Adapter Verification Status**: The NIPOST integration client in PostcodeLink is structured as an integration adapter pending authorized external contract verification against official National Digital Postcode API references and sandbox credentials. (Note: NIPOST's public e-commerce shipping API documentation describes merchant logistics, not the National Digital Postcode directory service).
@@ -69,7 +74,7 @@ PostcodeLink strictly differentiates between four tiers of postcode data and enf
 
 ---
 
-## Production Cryptographic Key Management & Rotation Policy
+## Production Cryptographic Key Management & Zero-Downtime Rotation Policy
 
 1. **Cryptographic Key Strength & Entropy Guardrails**:
    - Production startup strictly enforces Shannon entropy ($\ge 3.0$ bits/character), character variety (maximum character concentration $\le 25\%$, minimum 10 distinct characters), and rejects repetitive padding (`'a'*32`), predictable sequences (`123456`, `abcdef`), and example templates.
@@ -80,11 +85,22 @@ PostcodeLink strictly differentiates between four tiers of postcode data and enf
      ```
    - In production environments, credentials should be injected from a managed secret provider (e.g. AWS Secrets Manager, HashiCorp Vault, or GCP Secret Manager).
 
-2. **Domain Separation**:
-   - `SECRET_KEY` (JWT signature) and `OUTBOX_ENCRYPTION_KEY` (in-transit message encryption) must be distinct keys.
+2. **Strict Domain Separation**:
+   - `SECRET_KEY`: Dedicated to JWT session token creation and verification. Includes a versioned `kid` (key identifier) header (default: `v1`, `v2`, etc.).
+   - `OUTBOX_ENCRYPTION_KEY`: Dedicated to in-transit message payload encryption (AES-256-GCM). Must be distinct from `SECRET_KEY`.
+   - `OTP_SECRET_KEY`: Dedicated to delivery verification PIN hashing (HMAC-SHA256). Must be distinct from both `SECRET_KEY` and `OUTBOX_ENCRYPTION_KEY`.
 
-3. **Key Rotation Procedures**:
-   - **JWT Secret Rotation**: Update `SECRET_KEY` in your secrets manager and restart API instances. Newly issued access tokens will be signed with the updated key. Existing valid tokens expire naturally per `ACCESS_TOKEN_EXPIRE_MINUTES`.
+3. **Zero-Downtime Key Rotation Procedures**:
+   - **JWT Secret Rotation**:
+     1. Add current active `SECRET_KEY` to `JWT_PREVIOUS_SECRETS`.
+     2. Generate a new secret and assign to `SECRET_KEY`, incrementing `JWT_KEY_ID` (e.g., `v1` $\to$ `v2`).
+     3. Deploy API services. New tokens are signed with the new secret; existing active tokens decode and verify via `JWT_PREVIOUS_SECRETS` until expiration.
+     4. Remove the old secret from `JWT_PREVIOUS_SECRETS` after the access token validity window (`ACCESS_TOKEN_EXPIRE_MINUTES`) has elapsed.
+   - **Delivery PIN / OTP Key Rotation**:
+     1. Add current active `OTP_SECRET_KEY` to `OTP_PREVIOUS_SECRETS`.
+     2. Set `OTP_SECRET_KEY` to the new secret and deploy.
+     3. New deliveries are hashed with the new key; in-flight pending deliveries created under the previous key continue to verify successfully via `OTP_PREVIOUS_SECRETS`.
+     4. Once all in-flight deliveries with previous OTP hashes are finalized, remove the old key from `OTP_PREVIOUS_SECRETS`.
    - **Outbox Key Rotation**: Before rotating `OUTBOX_ENCRYPTION_KEY`, allow pending messages in the transactional outbox to dispatch (`retry_count` settled), or execute the outbox re-encryption script to migrate un-dispatched encrypted payloads to the new key before deleting the old key.
 
 ---

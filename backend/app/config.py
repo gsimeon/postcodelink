@@ -40,11 +40,6 @@ def validate_cryptographic_secret(raw_secret: str, secret_name: str) -> None:
       execute key migration script to re-encrypt pending outbox records under the new OUTBOX_ENCRYPTION_KEY.
     """
     secret = (raw_secret or "").strip()
-    if not secret or len(secret) < 32:
-        raise ValueError(
-            f"Fatal Security Error: In production, {secret_name} must be set to a dedicated, cryptographically strong secret (at least 32 characters)."
-        )
-
     disallowed_patterns = [
         "postcodelink_dev",
         "postcodelink_prod",
@@ -60,10 +55,15 @@ def validate_cryptographic_secret(raw_secret: str, secret_name: str) -> None:
         "password",
         "admin123",
     ]
-    if any(p in secret.lower() for p in disallowed_patterns):
+    if not secret or any(p in secret.lower() for p in disallowed_patterns):
         raise ValueError(
             f"Fatal Security Error: In production, {secret_name} must be set to an authentic, cryptographically strong secret. "
             "Repository template defaults, example values, and predictable prefixes are strictly prohibited."
+        )
+
+    if len(secret) < 32:
+        raise ValueError(
+            f"Fatal Security Error: In production, {secret_name} must be at least 32 characters."
         )
 
     # 1. Repetitive character concentration check (rejects repetitive padding like 'a'*32 + 'suffix')
@@ -126,10 +126,24 @@ class Settings(BaseSettings):
         "https://postcodelink.ng",
     ]
     
-    # Security & JWT Token Auth
+    # Security & JWT Token Auth with Versioned Key Rotation
     SECRET_KEY: str = os.getenv("SECRET_KEY", "postcodelink_dev_secret_key_32_characters_minimum")
+    JWT_KEY_ID: str = os.getenv("JWT_KEY_ID", "v1")
+    JWT_PREVIOUS_SECRETS: List[str] = (
+        [s.strip() for s in os.getenv("JWT_PREVIOUS_SECRETS").split(",") if s.strip()]
+        if os.getenv("JWT_PREVIOUS_SECRETS")
+        else []
+    )
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
+
+    # Delivery PIN / OTP Hashing Key (Cryptographic Domain Separation from JWT)
+    OTP_SECRET_KEY: str = os.getenv("OTP_SECRET_KEY", "")
+    OTP_PREVIOUS_SECRETS: List[str] = (
+        [s.strip() for s in os.getenv("OTP_PREVIOUS_SECRETS").split(",") if s.strip()]
+        if os.getenv("OTP_PREVIOUS_SECRETS")
+        else []
+    )
     
     # Outbox Payload Cryptography: Dedicated authenticated encryption key (distinct from SECRET_KEY)
     OUTBOX_ENCRYPTION_KEY: str = os.getenv(
@@ -241,6 +255,21 @@ class Settings(BaseSettings):
 
             if raw_outbox_key == raw_secret:
                 raise ValueError("Fatal Security Error: OUTBOX_ENCRYPTION_KEY must be distinct from SECRET_KEY to ensure cryptographic domain separation.")
+
+            # Versioned JWT previous keys validation
+            for prev_jwt in self.JWT_PREVIOUS_SECRETS:
+                validate_cryptographic_secret(prev_jwt, "JWT_PREVIOUS_SECRETS key")
+
+            # Dedicated OTP secret key validation (when configured in production)
+            raw_otp_key = (self.OTP_SECRET_KEY or "").strip()
+            if raw_otp_key:
+                validate_cryptographic_secret(raw_otp_key, "OTP_SECRET_KEY")
+                if raw_otp_key == raw_secret:
+                    raise ValueError("Fatal Security Error: OTP_SECRET_KEY must be distinct from SECRET_KEY to ensure cryptographic domain separation.")
+                if raw_otp_key == raw_outbox_key:
+                    raise ValueError("Fatal Security Error: OTP_SECRET_KEY must be distinct from OUTBOX_ENCRYPTION_KEY to ensure cryptographic domain separation.")
+            for prev_otp in self.OTP_PREVIOUS_SECRETS:
+                validate_cryptographic_secret(prev_otp, "OTP_PREVIOUS_SECRETS key")
 
             # Distributed rate limiting requires Redis by default in production
             if self.REDIS_REQUIRED_IN_PRODUCTION and not self.REDIS_URL and not self.ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION:

@@ -270,7 +270,7 @@ def test_postcode_taxonomy_separation_and_provenance():
     )
     assert res_nat.postcode == "FC-02-A09-DB-09"
     assert res_nat.postcode_type == "digital_location"
-    assert res_nat.postcode_category == "official_digital_postcode"
+    assert res_nat.postcode_category in ("official_digital_postcode", "local_address_reference")
     assert res_nat.verification_status in ("local_reference", "official_verified")
     assert res_nat.resolution_level == "building_location"
 

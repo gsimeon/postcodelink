@@ -28,22 +28,44 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         return False
 
 
-def hash_otp(otp: str, salt: Optional[str] = None) -> str:
-    """Hash a delivery OTP using HMAC-SHA256 with server SECRET_KEY."""
-    key = settings.SECRET_KEY.encode("utf-8")
+def get_otp_secret_key() -> str:
+    """Return active secret key for OTP HMAC hashing (enforces domain separation from JWT)."""
+    return (getattr(settings, "OTP_SECRET_KEY", None) or settings.SECRET_KEY).strip()
+
+
+def hash_otp(otp: str, salt: Optional[str] = None, key: Optional[str] = None) -> str:
+    """Hash a delivery OTP using HMAC-SHA256 with dedicated OTP_SECRET_KEY."""
+    raw_key = (key or get_otp_secret_key()).encode("utf-8")
     salt_val = salt or "postcodelink_otp_salt"
     msg = f"{salt_val}:{otp.strip()}".encode("utf-8")
-    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+    return hmac.new(raw_key, msg, hashlib.sha256).hexdigest()
 
 
 def verify_otp_hash(plain_otp: str, stored_hash: str, salt: Optional[str] = None) -> bool:
-    """Constant-time comparison for delivery PIN verification."""
-    computed = hash_otp(plain_otp, salt)
-    return hmac.compare_digest(computed, stored_hash)
+    """Constant-time comparison for delivery PIN verification supporting zero-downtime key rotation.
+    
+    Tries current OTP_SECRET_KEY first; falls back to configured OTP_PREVIOUS_SECRETS to allow
+    in-flight deliveries created before rotation to verify successfully.
+    """
+    if not plain_otp or not stored_hash:
+        return False
+
+    # 1. Test with current active key
+    computed = hash_otp(plain_otp, salt, key=get_otp_secret_key())
+    if hmac.compare_digest(computed, stored_hash):
+        return True
+
+    # 2. Key rotation fallback: test with previous OTP verification keys
+    prev_keys = getattr(settings, "OTP_PREVIOUS_SECRETS", []) or []
+    for prev_key in prev_keys:
+        if prev_key and hmac.compare_digest(hash_otp(plain_otp, salt, key=prev_key), stored_hash):
+            return True
+
+    return False
 
 
 def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
-    """Generate a signed JWT access token."""
+    """Generate a signed JWT access token with key identifier (kid) header."""
     to_encode = data.copy()
     now = datetime.now(timezone.utc)
     if expires_delta:
@@ -51,12 +73,26 @@ def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta]
     else:
         expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire, "iat": now})
-    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+    headers = {"kid": getattr(settings, "JWT_KEY_ID", "v1")}
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM, headers=headers)
 
 
 def decode_access_token(token: str) -> Dict[str, Any]:
-    """Decode and validate a signed JWT access token."""
-    return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+    """Decode and validate a signed JWT access token supporting zero-downtime key rotation.
+    
+    Validates with current SECRET_KEY first; if signature verification fails, tries configured
+    JWT_PREVIOUS_SECRETS during rotation windows.
+    """
+    try:
+        return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+    except jwt.InvalidSignatureError as exc:
+        prev_keys = getattr(settings, "JWT_PREVIOUS_SECRETS", []) or []
+        for prev_key in prev_keys:
+            try:
+                return jwt.decode(token, prev_key, algorithms=[settings.JWT_ALGORITHM])
+            except jwt.InvalidSignatureError:
+                continue
+        raise exc
 
 
 def _derive_aes_key(master_key: str) -> bytes:

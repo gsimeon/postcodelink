@@ -12,6 +12,11 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Tuple
 import httpx
 from backend.app.config import settings
+from backend.app.core.postcode_utils import (
+    parse_digital_postcode_components as core_parse_digital_postcode_components,
+    is_well_formed_postcode as core_is_well_formed_postcode,
+    normalize_postcode as core_normalize_postcode,
+)
 
 logger = logging.getLogger("nipost_client")
 
@@ -93,61 +98,14 @@ class NIPOSTClient:
     @classmethod
     def parse_digital_postcode_components(cls, code: str) -> Optional[Dict[str, str]]:
         """Parse and validate the 5 canonical components of an 11-character Nigerian Digital Postcode:
-        SS-LL-DDD-AA-BB
-        - State (SS): 2 uppercase letters (e.g. 'LA', 'FC', 'KN')
-        - Local Government (LL): 2 alphanumeric characters (e.g. '01', '02', '1A')
-        - District (DDD): 3 alphanumeric characters (e.g. 'A09', 'B12', '100')
-        - Area/Ward (AA): 2 alphanumeric characters (e.g. 'DB', 'EF', '01')
-        - Building/Unit (BB): 2 alphanumeric characters (e.g. '09', '34', '12')
-        
-        Returns a dict of components if valid, or None if malformed.
-        Rejects invalid separator placement, wrong component counts, or wrong component lengths.
+        SS-LL-DDD-AA-BB via shared core utility.
         """
-        if not code or not isinstance(code, str):
-            return None
-        clean = code.strip().upper()
-        if "-" in clean:
-            # Canonical separated format: SS-LL-DDD-AA-BB
-            m = re.match(r"^([A-Z]{2})-([0-9A-Z]{2})-([0-9A-Z]{3})-([0-9A-Z]{2})-([0-9A-Z]{2})$", clean)
-            if not m:
-                return None
-            return {
-                "state": m.group(1),
-                "lga": m.group(2),
-                "district": m.group(3),
-                "area": m.group(4),
-                "building": m.group(5),
-            }
-        else:
-            # Normalized unseparated format: SSLLDDDAABB
-            m = re.match(r"^([A-Z]{2})([0-9A-Z]{2})([0-9A-Z]{3})([0-9A-Z]{2})([0-9A-Z]{2})$", clean)
-            if not m:
-                return None
-            return {
-                "state": m.group(1),
-                "lga": m.group(2),
-                "district": m.group(3),
-                "area": m.group(4),
-                "building": m.group(5),
-            }
+        return core_parse_digital_postcode_components(code)
 
     @classmethod
     def is_well_formed_postcode(cls, code: str) -> bool:
-        """Validate whether a Nigerian postcode string complies with national syntax standards:
-        1. Legacy 6-digit numeric postal code (e.g. '100001', '900001').
-        2. Official 11-character 5-component national digital postcode standard:
-           Canonical: SS-LL-DDD-AA-BB (e.g. 'FC-02-A09-DB-09', 'LA-01-B12-EF-34')
-           Normalized: SSLLDDDAABB (e.g. 'FC02A09DB09', 'LA01B12EF34')
-        Rejects malformed separator placement, incorrect component counts, or invalid lengths.
-        """
-        if not code or not isinstance(code, str):
-            return False
-        clean = code.strip().upper()
-        # 1. Legacy 6-digit numeric code
-        if re.match(r"^\d{6}$", clean):
-            return True
-        # 2. National digital postcode (5 components: SS-LL-DDD-AA-BB)
-        return cls.parse_digital_postcode_components(clean) is not None
+        """Validate whether a Nigerian postcode string complies with national syntax standards via shared core utility."""
+        return core_is_well_formed_postcode(code)
 
     @classmethod
     def _adapt_validator_payload(cls, data: Any, clean_code: str) -> Tuple[NIPOSTLookupStatus, Optional[Dict[str, Any]], Optional[str]]:
