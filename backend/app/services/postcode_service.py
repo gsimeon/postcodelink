@@ -369,6 +369,8 @@ def cleanse_address(
                         "building_reference": getattr(r, "building_reference", None),
                         "provenance": getattr(r, "provenance", "NIPOST 6-Digit Postal Directory (Zone Reference)"),
                         "dataset_version": getattr(r, "dataset_version", "2024.2"),
+                        "source_owner": getattr(r, "source_owner", "PostcodeLink"),
+                        "source_type": getattr(r, "source_type", "local_reference" if getattr(r, "verification_status", "local_reference") != "official_verified" else "official_registry"),
                     }
                     for r in db_records
                 ]
@@ -532,18 +534,22 @@ def cleanse_address(
 
         if address_consistent:
             formatted = f"{clean_addr.rstrip(',')}, {matched_area}, {detected_state} {verified_code}"
-            is_demo = (best_match.get("source_type") == "demonstration_fixture")
-            p_status = "local_match" if is_demo else "verified"
-            conf = 0.75 if is_demo else 0.95
-            disp_conf = 0.75 if is_demo else 0.95
+            
+            # Authoritative verification strictly requires explicit official_verified status
+            record_ver_status = best_match.get("verification_status", "local_reference")
+            is_official = (record_ver_status == "official_verified")
+            
+            p_status = "verified" if is_official else "local_match"
+            conf = 0.95 if is_official else 0.75
+            disp_conf = 0.95 if is_official else 0.75
 
-            if is_demo:
+            if is_official:
                 changes.append(
-                    f"Matched against PostcodeLink local reference registry code {verified_code} for {matched_area}, {detected_state} (unverified with official NIPOST)"
+                    f"Verified against official NIPOST registry code {verified_code} for {matched_area}, {detected_state}"
                 )
             else:
                 changes.append(
-                    f"Verified against NIPOST reference registry code {verified_code} for {matched_area}, {detected_state}"
+                    f"Matched against PostcodeLink local reference registry code {verified_code} for {matched_area}, {detected_state} (unverified with official NIPOST)"
                 )
 
             return CleanseAddressResponse(

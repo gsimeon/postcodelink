@@ -3,7 +3,7 @@ import os
 import math
 import secrets
 from collections import Counter
-from typing import List, Any, Optional
+from typing import List, Any, Optional, Dict
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -134,8 +134,28 @@ class Settings(BaseSettings):
         if os.getenv("JWT_PREVIOUS_SECRETS")
         else []
     )
+    JWT_PREVIOUS_KEYS_MAP: Dict[str, str] = {}
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
+
+    def get_jwt_verification_keys(self) -> Dict[str, str]:
+        """Return complete mapping of key ID (kid) -> secret key for versioned JWT verification."""
+        keys: Dict[str, str] = {}
+        if self.SECRET_KEY:
+            keys[self.JWT_KEY_ID] = self.SECRET_KEY.strip()
+        if self.JWT_PREVIOUS_KEYS_MAP:
+            for kid, sec in self.JWT_PREVIOUS_KEYS_MAP.items():
+                if sec:
+                    keys[kid] = sec.strip()
+        for idx, sec in enumerate(self.JWT_PREVIOUS_SECRETS):
+            if sec:
+                sec_clean = sec.strip()
+                if ":" in sec_clean and len(sec_clean.split(":", 1)[0]) < 16:
+                    k, v = sec_clean.split(":", 1)
+                    keys[k.strip()] = v.strip()
+                else:
+                    keys[f"v_prev_{idx+1}"] = sec_clean
+        return keys
 
     # Delivery PIN / OTP Hashing Key (Cryptographic Domain Separation from JWT)
     OTP_SECRET_KEY: str = os.getenv("OTP_SECRET_KEY", "")
@@ -260,17 +280,6 @@ class Settings(BaseSettings):
             for prev_jwt in self.JWT_PREVIOUS_SECRETS:
                 validate_cryptographic_secret(prev_jwt, "JWT_PREVIOUS_SECRETS key")
 
-            # Dedicated OTP secret key validation (when configured in production)
-            raw_otp_key = (self.OTP_SECRET_KEY or "").strip()
-            if raw_otp_key:
-                validate_cryptographic_secret(raw_otp_key, "OTP_SECRET_KEY")
-                if raw_otp_key == raw_secret:
-                    raise ValueError("Fatal Security Error: OTP_SECRET_KEY must be distinct from SECRET_KEY to ensure cryptographic domain separation.")
-                if raw_otp_key == raw_outbox_key:
-                    raise ValueError("Fatal Security Error: OTP_SECRET_KEY must be distinct from OUTBOX_ENCRYPTION_KEY to ensure cryptographic domain separation.")
-            for prev_otp in self.OTP_PREVIOUS_SECRETS:
-                validate_cryptographic_secret(prev_otp, "OTP_PREVIOUS_SECRETS key")
-
             # Distributed rate limiting requires Redis by default in production
             if self.REDIS_REQUIRED_IN_PRODUCTION and not self.REDIS_URL and not self.ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION:
                 raise ValueError(
@@ -285,6 +294,22 @@ class Settings(BaseSettings):
 
             if self.SEED_DEMO_DATA:
                 raise ValueError("Fatal Security Error: SEED_DEMO_DATA cannot be enabled in production environment.")
+
+            # Dedicated OTP secret key validation (Mandatory in production for domain separation)
+            raw_otp_key = (self.OTP_SECRET_KEY or "").strip()
+            if not raw_otp_key:
+                raise ValueError(
+                    "Fatal Security Error: In production, OTP_SECRET_KEY must be explicitly configured and distinct from SECRET_KEY and OUTBOX_ENCRYPTION_KEY."
+                )
+            validate_cryptographic_secret(raw_otp_key, "OTP_SECRET_KEY")
+            if raw_otp_key == raw_secret:
+                raise ValueError("Fatal Security Error: OTP_SECRET_KEY must be distinct from SECRET_KEY to ensure cryptographic domain separation.")
+            if raw_otp_key == raw_outbox_key:
+                raise ValueError("Fatal Security Error: OTP_SECRET_KEY must be distinct from OUTBOX_ENCRYPTION_KEY to ensure cryptographic domain separation.")
+            for prev_otp in self.OTP_PREVIOUS_SECRETS:
+                validate_cryptographic_secret(prev_otp, "OTP_PREVIOUS_SECRETS key")
+            for prev_kid, prev_key in self.JWT_PREVIOUS_KEYS_MAP.items():
+                validate_cryptographic_secret(prev_key, f"JWT_PREVIOUS_KEYS_MAP key '{prev_kid}'")
 
         return self
 

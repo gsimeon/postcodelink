@@ -46,21 +46,22 @@ graph TD
 
 ---
 
-## Data Sources, System Taxonomy & Regulatory Governance (Release Gate v6.0.8 Standard)
+## Data Sources, System Taxonomy & Regulatory Governance (Release Gate v6.0.9 Standard)
 
 PostcodeLink strictly differentiates between four tiers of postcode data and enforces clear data governance in compliance with the [NIPOST Terms of Service](https://www.postcode.gov.ng/terms):
 
-### 1. Three-State Verification Taxonomy
+### 1. Three-State Verification Taxonomy & Provenance Enforcement
 To prevent fabricated test fixtures or local reference data from being misrepresented as official government verifications, PostcodeLink enforces strict three-state categorization:
 1. **Format Valid (Syntax Level)**: The postcode string adheres to official structural specifications (either the 11-character 5-component `SS-LL-DDD-AA-BB` national digital standard or the 6-digit legacy format). Validated by `is_well_formed_postcode()`.
-2. **Local Reference Match (Reference Level)**: Matched against PostcodeLink's local demonstration registry. Returns `postcode_status: "local_match"` (confidence `0.75`). Demonstration fixtures (e.g. `FC-02-A09-DB-09` and `LA-01-A04-IK-02`) carry `source_type: "demonstration_fixture"` and explicitly log `(unverified with official NIPOST)`.
-3. **Official NIPOST Verified (Authoritative Level)**: Verified in real time against the live official NIPOST digital address directory service. Returns `postcode_status: "verified"` (confidence `0.95+`).
+2. **Local Reference Match (Reference Level)**: Matched against PostcodeLink's local demonstration registry or database directory (`PostcodeDirectory`). Returns `postcode_status: "local_match"` (confidence `0.75`). Demonstration fixtures (e.g. `FC-02-A09-DB-09` and `LA-01-A04-IK-02`) carry `source_type: "demonstration_fixture"` and explicitly log `(unverified with official NIPOST)`. Even database-backed reference entries remain `local_reference` unless authoritatively verified.
+3. **Official NIPOST Verified (Authoritative Level)**: Verified in real time against the live official NIPOST digital address directory service. Returns `postcode_status: "verified"` (confidence `0.95+`). Only live upstream verification confers official verification status.
 
 | Data Source Tier | Scope & Format | Verification Status | Provenance Attributes |
 | :--- | :--- | :--- | :--- |
 | **Authoritative Live NIPOST Cloud Gateway** | Live FMCIDE/NIPOST national digital postcode registry. | `official_verified` (`postcode_status: "verified"`, confidence 0.95+) | `dataset_version: null` (or provider-supplied), `fallback_used: false` |
+| **Database Directory Records** | Seeded reference data in local SQLite/PostgreSQL (`PostcodeDirectory`). | `local_reference` (`postcode_status: "local_match"`, confidence 0.75) | `source_type: "database_directory"`, `source_owner: "NIPOST / PostcodeLink"` |
 | **NIPOST 11-Character National Digital Postcode** | 5-component building-level standard (`SS-LL-DDD-AA-BB`: State, LGA, District, Area, Building Unit). | Standard NIPOST format | Strict 2-2-3-2-2 width validation, canonical & compact parsing |
-| **Legacy 6-Digit Postal Codes** | Traditional regional sorting codes (e.g. `100001` Lagos Island, `900001` Garki Abuja). | `verified` when in directory | Regional routing |
+| **Legacy 6-Digit Postal Codes** | Traditional regional sorting codes (e.g. `100001` Lagos Island, `900001` Garki Abuja). | `local_match` (or `verified` when verified upstream) | Regional routing (`[1-9]\d{5}`) |
 | **Demonstration Reference Fixtures** | Sample 11-character format demonstration codes (e.g. `FC-02-A09-DB-09`, `LA-01-A04-IK-02`). | `local_reference` (`postcode_status: "local_match"`, confidence 0.75) | `source_type: "demonstration_fixture"`, `source_owner: "PostcodeLink"` |
 
 > [!IMPORTANT]
@@ -85,10 +86,10 @@ To prevent fabricated test fixtures or local reference data from being misrepres
      ```
    - In production environments, credentials should be injected from a managed secret provider (e.g. AWS Secrets Manager, HashiCorp Vault, or GCP Secret Manager).
 
-2. **Strict Domain Separation**:
-   - `SECRET_KEY`: Dedicated to JWT session token creation and verification. Includes a versioned `kid` (key identifier) header (default: `v1`, `v2`, etc.).
+2. **Strict Domain Separation & Key Identifier (`kid`) Enforcement**:
+   - `SECRET_KEY`: Dedicated to JWT session token creation and verification. Tokens embed a versioned `kid` header (`v1`, `v2`, etc.). During verification, `decode_access_token()` extracts `kid`, matches it against active or rotated keys (`get_jwt_verification_keys()`), and strictly rejects tokens with unknown or retired key IDs.
    - `OUTBOX_ENCRYPTION_KEY`: Dedicated to in-transit message payload encryption (AES-256-GCM). Must be distinct from `SECRET_KEY`.
-   - `OTP_SECRET_KEY`: Dedicated to delivery verification PIN hashing (HMAC-SHA256). Must be distinct from both `SECRET_KEY` and `OUTBOX_ENCRYPTION_KEY`.
+   - `OTP_SECRET_KEY`: Dedicated to delivery verification PIN hashing (HMAC-SHA256). Strictly **mandatory** in production environments and must be distinct from both `SECRET_KEY` and `OUTBOX_ENCRYPTION_KEY`. In production, falling back to `SECRET_KEY` is completely disabled and triggers a runtime exception.
 
 3. **Zero-Downtime Key Rotation Procedures**:
    - **JWT Secret Rotation**:

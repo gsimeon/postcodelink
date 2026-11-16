@@ -354,6 +354,7 @@ def test_production_config_rejects_example_and_template_secrets():
 
     valid_rand_secret = secrets.token_urlsafe(32)
     valid_rand_outbox = secrets.token_urlsafe(32)
+    valid_rand_otp = secrets.token_urlsafe(32)
 
     base_prod_env = {
         "ENVIRONMENT": "production",
@@ -361,6 +362,7 @@ def test_production_config_rejects_example_and_template_secrets():
         "TERMII_API_KEY": "test_termii_key_123",
         "OUTBOX_WORKER_ENABLED": "true",
         "REDIS_URL": "redis://127.0.0.1:6379/0",
+        "OTP_SECRET_KEY": valid_rand_otp,
     }
 
     # 1. Example secret from .env.example must be rejected
@@ -407,6 +409,7 @@ def test_production_config_rejects_weak_entropy_and_repetitive_secrets():
     import secrets
 
     valid_outbox = secrets.token_urlsafe(32)
+    valid_otp = secrets.token_urlsafe(32)
     base_prod_env = {
         "ENVIRONMENT": "production",
         "SMS_PROVIDER": "termii",
@@ -414,6 +417,7 @@ def test_production_config_rejects_weak_entropy_and_repetitive_secrets():
         "OUTBOX_WORKER_ENABLED": "true",
         "REDIS_URL": "redis://127.0.0.1:6379/0",
         "OUTBOX_ENCRYPTION_KEY": valid_outbox,
+        "OTP_SECRET_KEY": valid_otp,
     }
 
     # Case A: Repetitive character stuffing ('a' * 32 + suffix)

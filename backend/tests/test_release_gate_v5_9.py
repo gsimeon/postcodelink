@@ -282,6 +282,7 @@ def test_production_redis_mandatory_policy_and_fail_closed():
         ENVIRONMENT="production",
         SECRET_KEY="k7J9mP2vL4xR8zN1qT5wY3bC6dF0gH2jM",
         OUTBOX_ENCRYPTION_KEY="wY3bC6dF0gH2jMk7J9mP2vL4xR8zN1qT5",
+        OTP_SECRET_KEY="mP2vL4xR8zN1qT5wY3bC6dF0gH2jMk7J9",
         SMS_PROVIDER="termii",
         TERMII_API_KEY="valid_key",
         OUTBOX_WORKER_ENABLED=True,

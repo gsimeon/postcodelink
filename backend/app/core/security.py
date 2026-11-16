@@ -29,8 +29,19 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 
 def get_otp_secret_key() -> str:
-    """Return active secret key for OTP HMAC hashing (enforces domain separation from JWT)."""
-    return (getattr(settings, "OTP_SECRET_KEY", None) or settings.SECRET_KEY).strip()
+    """Return active secret key for OTP HMAC hashing (enforces domain separation from JWT).
+    
+    In production, OTP_SECRET_KEY must be explicitly set. Fallback to SECRET_KEY is strictly forbidden.
+    """
+    key = (getattr(settings, "OTP_SECRET_KEY", None) or "").strip()
+    if key:
+        return key
+    if getattr(settings, "ENVIRONMENT", "development") == "production":
+        raise RuntimeError(
+            "Fatal Security Error: OTP_SECRET_KEY must be explicitly configured in production. "
+            "Fallback to SECRET_KEY is strictly forbidden in production."
+        )
+    return settings.SECRET_KEY.strip()
 
 
 def hash_otp(otp: str, salt: Optional[str] = None, key: Optional[str] = None) -> str:
@@ -78,16 +89,34 @@ def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta]
 
 
 def decode_access_token(token: str) -> Dict[str, Any]:
-    """Decode and validate a signed JWT access token supporting zero-downtime key rotation.
+    """Decode and validate a signed JWT access token using versioned key selection (kid).
     
-    Validates with current SECRET_KEY first; if signature verification fails, tries configured
-    JWT_PREVIOUS_SECRETS during rotation windows.
+    1. Inspects the unverified JWT header to extract 'kid'.
+    2. If 'kid' is present:
+       - Maps directly to the corresponding key in configured verification keys.
+       - Rejects unknown, retired, or mismatched key identifiers immediately.
+    3. If 'kid' is absent (unversioned legacy token):
+       - Validates against active SECRET_KEY, falling back to JWT_PREVIOUS_SECRETS for backwards compatibility.
     """
+    try:
+        header = jwt.get_unverified_header(token)
+    except Exception as exc:
+        raise jwt.PyJWTError("Malformed JWT header") from exc
+
+    token_kid = header.get("kid")
+    verification_keys = settings.get_jwt_verification_keys()
+
+    if token_kid:
+        if token_kid not in verification_keys:
+            raise jwt.PyJWTError(f"Unknown or retired JWT key identifier: '{token_kid}'")
+        selected_key = verification_keys[token_kid]
+        return jwt.decode(token, selected_key, algorithms=[settings.JWT_ALGORITHM])
+
+    # Legacy unversioned token fallback
     try:
         return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
     except jwt.InvalidSignatureError as exc:
-        prev_keys = getattr(settings, "JWT_PREVIOUS_SECRETS", []) or []
-        for prev_key in prev_keys:
+        for prev_key in getattr(settings, "JWT_PREVIOUS_SECRETS", []) or []:
             try:
                 return jwt.decode(token, prev_key, algorithms=[settings.JWT_ALGORITHM])
             except jwt.InvalidSignatureError:

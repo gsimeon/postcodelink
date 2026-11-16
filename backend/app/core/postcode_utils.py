@@ -31,7 +31,10 @@ TEXT_COMPACT_DIGITAL_PATTERN = re.compile(
 TEXT_LEGACY_3PART_PATTERN = re.compile(
     r"\b([A-Za-z]{3}-[A-Za-z0-9]{3,4}-[A-Za-z0-9]{4,5})\b"
 )
-TEXT_LEGACY_6DIGIT_PATTERN = re.compile(r"\b(\d{6})\b")
+TEXT_LABELLED_6DIGIT_PATTERN = re.compile(
+    r"(?i)\b(?:postcode|postal\s*code|postal|zipcode|zip|p\.?o\.?\s*box|code)\s*[:#-]?\s*([1-9]\d{5})\b"
+)
+TEXT_LEGACY_6DIGIT_PATTERN = re.compile(r"\b([1-9]\d{5})\b")
 
 
 def parse_digital_postcode_components(code: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -174,9 +177,23 @@ def extract_postcode_from_text(text: Optional[str]) -> Tuple[Optional[str], Opti
         if norm:
             return norm, "digital_location", None
 
-    # 4. Priority 4: Legacy 6-digit conventional postal code (e.g. 100001)
+    # 4. Priority 4: Explicitly labelled 6-digit conventional postal code (e.g. 'Postcode: 100001')
+    match_labelled = TEXT_LABELLED_6DIGIT_PATTERN.findall(clean)
+    if match_labelled:
+        unique_labelled = list(dict.fromkeys(match_labelled))
+        if len(unique_labelled) == 1:
+            return unique_labelled[0], "conventional_area", None
+        # Conflicting labelled postal codes in same address -> ambiguous
+        return None, None, None
+
+    # 5. Priority 5: Standalone unlabelled 6-digit conventional code
     match_6digit = TEXT_LEGACY_6DIGIT_PATTERN.findall(clean)
     if match_6digit:
-        return match_6digit[0], "conventional_area", None
+        unique_unlabelled = list(dict.fromkeys(match_6digit))
+        # Ambiguity Guard: If multiple distinct 6-digit numbers exist without a label
+        # (e.g. tracking ref and building number), do not silently select an arbitrary one!
+        if len(unique_unlabelled) == 1:
+            return unique_unlabelled[0], "conventional_area", None
+        return None, None, None
 
     return None, None, None
