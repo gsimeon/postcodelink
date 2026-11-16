@@ -240,8 +240,8 @@ def test_nipost_client_adapter_status_distinction():
     assert res_found.is_found is True
     assert res_found["area"] == "Garki Area 2"
 
-    # 2. NOT_FOUND (404 from NIPOST does not mask with local data)
-    not_found_transport = httpx.MockTransport(lambda req: httpx.Response(404, json={"detail": "Not found"}))
+    # 2. NOT_FOUND (Documented 404 from NIPOST does not mask with local data)
+    not_found_transport = httpx.MockTransport(lambda req: httpx.Response(404, json={"detail": "Postcode not found", "error_code": "POSTCODE_NOT_FOUND"}))
     c_nf = NIPOSTClient(base_url="https://api.nipost.gov.ng", api_key="k", transport=not_found_transport)
     res_nf = c_nf.lookup_postcode("FC-99-Z99-XX-99")
     assert res_nf.status == NIPOSTLookupStatus.NOT_FOUND

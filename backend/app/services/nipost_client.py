@@ -18,6 +18,7 @@ logger = logging.getLogger("nipost_client")
 class NIPOSTLookupStatus(str, Enum):
     FOUND = "FOUND"
     NOT_FOUND = "NOT_FOUND"
+    INVALID_INPUT = "INVALID_INPUT"
     UNAVAILABLE = "UNAVAILABLE"
     UNAUTHORIZED = "UNAUTHORIZED"
     INVALID_RESPONSE = "INVALID_RESPONSE"
@@ -56,6 +57,8 @@ class NIPOSTClient:
         timeout: Optional[float] = None,
         transport: Optional[httpx.BaseTransport] = None,
         lookup_path: Optional[str] = None,
+        auth_scheme: Optional[str] = None,
+        query_param: Optional[str] = None,
     ):
         raw_url = base_url if base_url is not None else (settings.NIPOST_API_BASE_URL or settings.NIPOST_API_URL or "")
         self.base_url = raw_url.strip().rstrip("/")
@@ -63,6 +66,8 @@ class NIPOSTClient:
         self.timeout = timeout or getattr(settings, "NIPOST_TIMEOUT_SECONDS", 5.0)
         self.transport = transport
         self.lookup_path = lookup_path or getattr(settings, "NIPOST_LOOKUP_PATH", "/v1/lookup")
+        self.auth_scheme = (auth_scheme or getattr(settings, "NIPOST_AUTH_SCHEME", "bearer")).lower()
+        self.query_param = query_param or getattr(settings, "NIPOST_QUERY_PARAM", "code")
 
     @property
     def is_configured(self) -> bool:
@@ -75,8 +80,13 @@ class NIPOSTClient:
             "User-Agent": f"PostcodeLink-Nigeria/{settings.VERSION}",
         }
         if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-            headers["x-api-key"] = self.api_key
+            if self.auth_scheme in ("api_key", "api_key_header", "x-api-key"):
+                headers["x-api-key"] = self.api_key
+            elif self.auth_scheme == "both":
+                headers["Authorization"] = f"Bearer {self.api_key}"
+                headers["x-api-key"] = self.api_key
+            else:
+                headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
     @staticmethod
@@ -97,8 +107,28 @@ class NIPOSTClient:
             return NIPOSTLookupStatus.INVALID_RESPONSE, None, "NIPOST API returned non-dict JSON response."
 
         # Check explicit negative validity
-        if data.get("valid") is False or str(data.get("status", "")).upper() in ("NOT_FOUND", "INVALID") or data.get("found") is False:
-            return NIPOSTLookupStatus.NOT_FOUND, data, f"Postcode '{clean_code}' is invalid or not found in official NIPOST directory."
+        status_str = str(data.get("status", "")).strip().upper()
+        error_code = str(data.get("error_code") or data.get("code") or "").strip().upper()
+        detail_str = str(data.get("detail") or data.get("message") or data.get("error") or "").lower()
+
+        # 1. Explicit invalid input / format classification
+        if (
+            status_str in ("INVALID_INPUT", "INVALID_FORMAT", "BAD_REQUEST", "MALFORMED_CODE")
+            or error_code in ("INVALID_INPUT", "INVALID_FORMAT", "INVALID_CODE", "VALIDATION_ERROR")
+            or "invalid postcode format" in detail_str
+            or "code must be" in detail_str
+            or "invalid input" in detail_str
+        ):
+            return NIPOSTLookupStatus.INVALID_INPUT, data, f"Postcode '{clean_code}' has invalid format or rejected syntax: {detail_str or 'invalid input'}."
+
+        # 2. Explicit authoritative non-existence check
+        if (
+            data.get("valid") is False
+            or status_str in ("NOT_FOUND", "POSTCODE_NOT_FOUND")
+            or error_code in ("NOT_FOUND", "POSTCODE_NOT_FOUND", "ERR_POSTCODE_NOT_FOUND")
+            or data.get("found") is False
+        ):
+            return NIPOSTLookupStatus.NOT_FOUND, data, f"Postcode '{clean_code}' is confirmed not found in official NIPOST directory."
 
         # Extract record container
         matches = data.get("matches")
@@ -175,8 +205,11 @@ class NIPOSTClient:
         clean_code = code.strip().upper()
         path = self.lookup_path.strip().lstrip("/")
         url = f"{self.base_url}/{path}"
-        # Provide both standard parameter keys ('code' and 'postcode') for broad upstream API gateway compatibility
-        params = {"code": clean_code, "postcode": clean_code}
+        # Provide verified query parameters (configurable via NIPOST_QUERY_PARAM, default 'code')
+        if self.query_param == "both":
+            params = {"code": clean_code, "postcode": clean_code}
+        else:
+            params = {self.query_param: clean_code}
 
         try:
             with httpx.Client(timeout=self.timeout, transport=self.transport) as client:
@@ -198,6 +231,14 @@ class NIPOSTClient:
                             data=adapted_rec,
                             http_status=200,
                         )
+                    elif status_res == NIPOSTLookupStatus.INVALID_INPUT:
+                        logger.warning(f"NIPOST API: Postcode prefix '{clean_code[:3]}***' rejected as invalid format.")
+                        return NIPOSTLookupResult(
+                            status=NIPOSTLookupStatus.INVALID_INPUT,
+                            http_status=200,
+                            data=data if isinstance(data, dict) else None,
+                            error_message=err_msg or f"Postcode '{clean_code}' has invalid format.",
+                        )
                     elif status_res == NIPOSTLookupStatus.NOT_FOUND:
                         logger.info(f"NIPOST API: Postcode prefix '{clean_code[:3]}***' verified as not found in directory.")
                         return NIPOSTLookupResult(
@@ -217,7 +258,8 @@ class NIPOSTClient:
                 elif resp.status_code == 404:
                     # Critical security & routing check:
                     # Differentiate authoritative postcode non-existence from route / endpoint 404.
-                    # Only treat as NOT_FOUND if the response body is JSON and explicitly confirms a postcode search.
+                    # Generic {"detail": "Not Found"}, {"message": "Not Found"}, or HTML proxy 404
+                    # are NOT authoritative and must be classified as UNAVAILABLE (route error).
                     is_authoritative_not_found = False
                     content_type = resp.headers.get("content-type", "").lower()
 
@@ -225,22 +267,39 @@ class NIPOSTClient:
                         try:
                             data = resp.json()
                             if isinstance(data, dict):
-                                detail = str(data.get("detail", "")).lower()
-                                message = str(data.get("message", "")).lower()
-                                error = str(data.get("error", "")).lower()
+                                err_code = str(data.get("error_code") or data.get("code") or "").upper()
                                 status_val = str(data.get("status", "")).upper()
-                                if (
-                                    data.get("valid") is False
-                                    or status_val in ("NOT_FOUND", "INVALID")
-                                    or "postcode" in detail or "postcode" in message or "postcode" in error
-                                    or "not found" in detail or "not found" in message
-                                ):
-                                    is_authoritative_not_found = True
+                                detail = str(data.get("detail", "")).strip()
+                                message = str(data.get("message", "")).strip()
+                                detail_lower = detail.lower()
+                                message_lower = message.lower()
+
+                                # Reject generic 404 messages from routers or reverse proxies
+                                is_generic_404 = (
+                                    detail_lower in ("not found", "resource not found", "route not found", "")
+                                    and message_lower in ("not found", "resource not found", "route not found", "")
+                                    and not err_code
+                                    and not status_val
+                                    and data.get("valid") is None
+                                )
+
+                                if not is_generic_404:
+                                    # Must contain documented NIPOST error code or explicit postcode-level search result
+                                    if (
+                                        err_code in ("POSTCODE_NOT_FOUND", "NOT_FOUND", "ERR_POSTCODE_NOT_FOUND")
+                                        or status_val in ("NOT_FOUND", "POSTCODE_NOT_FOUND")
+                                        or (data.get("valid") is False and (data.get("postcode") or data.get("code")))
+                                        or ("postcode" in detail_lower and "not found" in detail_lower)
+                                        or ("postcode" in message_lower and "not found" in message_lower)
+                                        or "does not exist in official" in detail_lower
+                                        or "does not exist in official" in message_lower
+                                    ):
+                                        is_authoritative_not_found = True
                         except Exception:
                             is_authoritative_not_found = False
 
                     if is_authoritative_not_found:
-                        logger.info(f"NIPOST API: Postcode prefix '{clean_code[:3]}***' not found in national directory (404).")
+                        logger.info(f"NIPOST API: Postcode prefix '{clean_code[:3]}***' confirmed not found in national directory (404).")
                         return NIPOSTLookupResult(
                             status=NIPOSTLookupStatus.NOT_FOUND,
                             http_status=404,
@@ -256,6 +315,14 @@ class NIPOSTClient:
                             http_status=404,
                             error_message="The official NIPOST verification gateway returned an endpoint routing error (HTTP 404).",
                         )
+
+                elif resp.status_code in (400, 422):
+                    logger.warning(f"NIPOST API validation error ({resp.status_code}) during verification request.")
+                    return NIPOSTLookupResult(
+                        status=NIPOSTLookupStatus.INVALID_INPUT,
+                        http_status=resp.status_code,
+                        error_message=f"The official NIPOST verification gateway rejected postcode format '{clean_code}'.",
+                    )
 
                 elif resp.status_code in (401, 403):
                     logger.error(f"NIPOST API authorization error ({resp.status_code}) during verification request.")

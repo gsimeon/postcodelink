@@ -23,7 +23,7 @@ _CONNECT_BACKOFF_SECONDS: float = 15.0
 
 
 def _sanitize_redis_url(url: Optional[str]) -> str:
-    """Mask credentials in Redis connection URL for secure operational logging."""
+    """Mask credentials and usernames in Redis connection URL for secure operational logging."""
     if not url:
         return "unconfigured"
     try:
@@ -33,14 +33,8 @@ def _sanitize_redis_url(url: Optional[str]) -> str:
         path = parsed.path or "/0"
         scheme = parsed.scheme or "redis"
 
-        if parsed.username and parsed.password:
-            user_auth = f"{parsed.username}:***@"
-        elif parsed.password:
-            user_auth = "***@"
-        elif parsed.username:
-            user_auth = f"{parsed.username}@"
-        else:
-            user_auth = ""
+        # Completely mask user credentials to prevent infrastructure disclosure (ACL username exposure)
+        user_auth = "***:***@" if (parsed.username or parsed.password) else ""
 
         return f"{scheme}://{user_auth}{hostname}{port_str}{path}"
     except Exception:
@@ -162,8 +156,8 @@ def _get_redis_client():
             )
             client.ping()
             _REDIS_CLIENT = client
-            sanitized_url = _sanitize_redis_url(settings.REDIS_URL)
-            logger.info(f"[RateLimiter] Successfully connected to Redis at {sanitized_url}")
+            endpoint = _safe_redis_endpoint(settings.REDIS_URL)
+            logger.info(f"[RateLimiter] Successfully connected to Redis at {endpoint}")
             return _REDIS_CLIENT
         except Exception as exc:
             err_type = type(exc).__name__
@@ -372,14 +366,14 @@ def get_rate_limiter_status() -> Dict[str, Any]:
         ip_keys = sum(1 for k in _KEY_REQUEST_WINDOWS if k.startswith("ip_"))
         api_keys = total_keys - ip_keys
 
-    sanitized_url = _sanitize_redis_url(settings.REDIS_URL) if settings.REDIS_URL else None
+    endpoint = _safe_redis_endpoint(settings.REDIS_URL) if settings.REDIS_URL else None
 
     return {
         "backend": backend_name,
         "available": backend_name != "unavailable_fail_closed",
         "redis_configured": bool(settings.REDIS_URL),
         "redis_connected": r_client is not None,
-        "redis_endpoint": sanitized_url,
+        "redis_endpoint": endpoint,
         "fail_closed_policy": fail_closed,
         "in_memory_active_keys": total_keys,
         "in_memory_active_ip_buckets": ip_keys,

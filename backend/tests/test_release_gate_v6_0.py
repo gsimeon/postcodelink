@@ -1831,8 +1831,9 @@ def test_redis_credential_sanitization_in_success_and_failure_logs():
     # 1. Direct unit verification of _sanitize_redis_url
     sanitized = _sanitize_redis_url(raw_redis_url)
     assert canary_password not in sanitized
-    assert "app_user:***@127.0.0.1:6379/2" in sanitized
-    assert _sanitize_redis_url(f"redis://:{canary_password}@redis.cluster.local:6379/0") == "redis://***@redis.cluster.local:6379/0"
+    assert "app_user" not in sanitized
+    assert "***:***@127.0.0.1:6379/2" in sanitized
+    assert _sanitize_redis_url(f"redis://:{canary_password}@redis.cluster.local:6379/0") == "redis://***:***@redis.cluster.local:6379/0"
     assert _sanitize_redis_url("redis://localhost:6379/0") == "redis://localhost:6379/0"
     assert _sanitize_redis_url(None) == "unconfigured"
 
@@ -1849,7 +1850,8 @@ def test_redis_credential_sanitization_in_success_and_failure_logs():
                         mock_info.assert_called_once()
                         success_log = str(mock_info.call_args[0][0])
                         assert canary_password not in success_log
-                        assert "app_user:***@127.0.0.1:6379/2" in success_log
+                        assert "app_user" not in success_log
+                        assert "redis://127.0.0.1:6379" in success_log
 
     # 3. Connection failure log test
     with patch.object(settings, "REDIS_URL", raw_redis_url):
@@ -1863,6 +1865,7 @@ def test_redis_credential_sanitization_in_success_and_failure_logs():
                         mock_warn.assert_called_once()
                         fail_log = str(mock_warn.call_args[0][0])
                         assert canary_password not in fail_log
+                        assert "app_user" not in fail_log
                         assert "Exception" in fail_log
 
 
@@ -2201,6 +2204,309 @@ def test_in_memory_rate_limiter_hard_bounded_capacity():
                     assert len(rl_mod._KEY_REQUEST_WINDOWS) <= test_cap
 
     reset_api_key_rate_limits()
+
+
+def test_nipost_404_generic_json_and_html_classified_as_unavailable():
+    """Verify that generic 404 responses (JSON {"detail": "Not Found"} or HTML) are strictly classified as UNAVAILABLE route errors, never falsely rejecting valid postcodes as non-existent."""
+    import httpx
+    from backend.app.services.nipost_client import NIPOSTClient, NIPOSTLookupStatus
+
+    # 1. Standard FastAPI / Starlette generic 404: {"detail": "Not Found"}
+    fastapi_404 = httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"detail": "Not Found"}, headers={"content-type": "application/json"})
+    )
+    client_fastapi = NIPOSTClient(base_url="https://api.nipost.test", transport=fastapi_404)
+    res_fastapi = client_fastapi.lookup_postcode("100001")
+    assert res_fastapi.status == NIPOSTLookupStatus.UNAVAILABLE
+    assert res_fastapi.http_status == 404
+    assert "routing error" in res_fastapi.error_message.lower()
+
+    # 2. Generic API gateway message: {"message": "Not Found"}
+    gw_404 = httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"message": "Not Found"}, headers={"content-type": "application/json"})
+    )
+    client_gw = NIPOSTClient(base_url="https://api.nipost.test", transport=gw_404)
+    res_gw = client_gw.lookup_postcode("100001")
+    assert res_gw.status == NIPOSTLookupStatus.UNAVAILABLE
+
+    # 3. Generic resource not found: {"error": "Resource not found"}
+    res_err_404 = httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"error": "Resource not found"}, headers={"content-type": "application/json"})
+    )
+    client_res_err = NIPOSTClient(base_url="https://api.nipost.test", transport=res_err_404)
+    res_rerr = client_res_err.lookup_postcode("100001")
+    assert res_rerr.status == NIPOSTLookupStatus.UNAVAILABLE
+
+    # 4. Empty body 404
+    empty_404 = httpx.MockTransport(
+        lambda req: httpx.Response(404, text="", headers={"content-type": "application/json"})
+    )
+    client_empty = NIPOSTClient(base_url="https://api.nipost.test", transport=empty_404)
+    res_empty = client_empty.lookup_postcode("100001")
+    assert res_empty.status == NIPOSTLookupStatus.UNAVAILABLE
+
+    # 5. Documented NIPOST explicit postcode-not-found schema
+    doc_404 = httpx.MockTransport(
+        lambda req: httpx.Response(
+            404,
+            json={
+                "postcode": "100001",
+                "valid": False,
+                "error_code": "POSTCODE_NOT_FOUND",
+                "message": "Postcode not found in national directory",
+            },
+            headers={"content-type": "application/json"},
+        )
+    )
+    client_doc = NIPOSTClient(base_url="https://api.nipost.test", transport=doc_404)
+    res_doc = client_doc.lookup_postcode("100001")
+    assert res_doc.status == NIPOSTLookupStatus.NOT_FOUND
+    assert res_doc.http_status == 404
+
+
+def test_nipost_invalid_input_separated_from_not_found():
+    """Verify that formatting/syntax errors are classified as INVALID_INPUT, strictly distinct from directory NOT_FOUND."""
+    import httpx
+    from backend.app.services.nipost_client import NIPOSTClient, NIPOSTLookupStatus
+    from backend.app.routers.postcodes import get_nipost_client
+
+    # 1. 200 payload with INVALID_FORMAT status
+    inv_format_transport = httpx.MockTransport(
+        lambda req: httpx.Response(
+            200,
+            json={"status": "INVALID_FORMAT", "message": "Invalid postcode format: must be 6 numeric digits"},
+            headers={"content-type": "application/json"},
+        )
+    )
+    client_inv = NIPOSTClient(base_url="https://api.nipost.test", transport=inv_format_transport)
+    res_inv = client_inv.lookup_postcode("12-ABC")
+    assert res_inv.status == NIPOSTLookupStatus.INVALID_INPUT
+    assert res_inv.status != NIPOSTLookupStatus.NOT_FOUND
+
+    # 2. Upstream 400 Bad Request / 422 Unprocessable Content returns INVALID_INPUT
+    val_err_transport = httpx.MockTransport(
+        lambda req: httpx.Response(422, json={"detail": "Invalid postcode syntax"}, headers={"content-type": "application/json"})
+    )
+    client_val_err = NIPOSTClient(base_url="https://api.nipost.test", transport=val_err_transport)
+    res_val_err = client_val_err.lookup_postcode("INVALID_LEN_999999999")
+    assert res_val_err.status == NIPOSTLookupStatus.INVALID_INPUT
+
+    # 3. Route integration: strict mode raises HTTP 400 Bad Request on INVALID_INPUT
+    app.dependency_overrides[get_nipost_client] = lambda: client_val_err
+    try:
+        strict_resp = client.get("/api/v1/postcodes/lookup?code=INVALID_LEN_999999999&strict=true")
+        assert strict_resp.status_code == 400
+        assert "validation error" in strict_resp.json()["detail"].lower()
+    finally:
+        app.dependency_overrides.pop(get_nipost_client, None)
+
+
+def test_nipost_request_contract_parameter_and_authentication_headers():
+    """Verify that NIPOST client requests use verified contract parameters without spraying dual headers or duplicate keys by default."""
+    import httpx
+    from backend.app.services.nipost_client import NIPOSTClient
+
+    captured_requests = []
+    def spy_transport(req: httpx.Request):
+        captured_requests.append(req)
+        return httpx.Response(
+            200,
+            json={
+                "code": "100001",
+                "area": "Marina",
+                "state": "Lagos",
+                "valid": True,
+            },
+            headers={"content-type": "application/json"},
+        )
+
+    # Default contract: Bearer auth and single 'code' parameter
+    client_default = NIPOSTClient(
+        base_url="https://api.nipost.test",
+        api_key="secret-bearer-token",
+        auth_scheme="bearer",
+        query_param="code",
+        transport=httpx.MockTransport(spy_transport),
+    )
+    client_default.lookup_postcode("100001")
+    assert len(captured_requests) == 1
+    req = captured_requests[0]
+
+    # Verify headers: Bearer authorization only, no redundant x-api-key
+    assert req.headers["Authorization"] == "Bearer secret-bearer-token"
+    assert "x-api-key" not in req.headers
+
+    # Verify query parameters: exact 'code' parameter only, no duplicate 'postcode'
+    query_str = str(req.url.query, "utf-8") if isinstance(req.url.query, bytes) else str(req.url.query)
+    assert "code=100001" in query_str
+    assert "postcode=" not in query_str
+
+    # Alternative contract: 'postcode' param and 'x-api-key' header
+    captured_requests.clear()
+    client_alt = NIPOSTClient(
+        base_url="https://api.nipost.test",
+        api_key="api-key-value",
+        auth_scheme="api_key",
+        query_param="postcode",
+        transport=httpx.MockTransport(spy_transport),
+    )
+    client_alt.lookup_postcode("100001")
+    assert len(captured_requests) == 1
+    req_alt = captured_requests[0]
+    assert req_alt.headers.get("x-api-key") == "api-key-value"
+    assert "Authorization" not in req_alt.headers
+    params_alt = dict(req_alt.url.params)
+    assert "postcode" in params_alt and params_alt["postcode"] == "100001"
+    assert "code" not in params_alt
+
+
+def test_redis_username_never_exposed_in_diagnostics():
+    """Verify that Redis ACL usernames are strictly omitted from logs, safe endpoint representations, and health telemetry."""
+    import logging
+    import backend.app.core.rate_limiter as rl_mod
+    from backend.app.core.rate_limiter import _safe_redis_endpoint, _get_redis_client, get_rate_limiter_status
+
+    sensitive_user = "infra_sec_admin"
+    sensitive_pass = "P@ssw0rd999!SuperSecret"
+    acl_redis_url = f"rediss://{sensitive_user}:{sensitive_pass}@cache-primary.internal.vpc:6380/3?ssl_cert_reqs=required"
+
+    # 1. Verify safe endpoint helper
+    endpoint = _safe_redis_endpoint(acl_redis_url)
+    assert endpoint == "rediss://cache-primary.internal.vpc:6380"
+    assert sensitive_user not in endpoint
+    assert sensitive_pass not in endpoint
+    assert "/3" not in endpoint
+
+    # 2. Verify health telemetry endpoint field
+    with patch.object(settings, "REDIS_URL", acl_redis_url):
+        with patch.object(rl_mod, "_get_redis_client", return_value=MagicMock()):
+            health_status = get_rate_limiter_status()
+            assert health_status["redis_endpoint"] == "rediss://cache-primary.internal.vpc:6380"
+            assert sensitive_user not in str(health_status)
+            assert sensitive_pass not in str(health_status)
+
+    # 3. Verify connection log
+    rl_logger = logging.getLogger("rate_limiter")
+    with patch.object(settings, "REDIS_URL", acl_redis_url):
+        with patch.object(rl_mod, "_REDIS_CLIENT", None):
+            with patch.object(rl_mod, "_LAST_CONNECT_ATTEMPT", 0.0):
+                mock_redis_client = MagicMock()
+                with patch("redis.from_url", return_value=mock_redis_client):
+                    with patch.object(rl_logger, "info") as mock_info:
+                        _get_redis_client()
+                        mock_info.assert_called_once()
+                        success_log = str(mock_info.call_args[0][0])
+                        assert sensitive_user not in success_log
+                        assert sensitive_pass not in success_log
+                        assert "rediss://cache-primary.internal.vpc:6380" in success_log
+
+
+def test_in_memory_rate_limiter_concurrency_at_capacity_boundary():
+    """Verify thread-safety and bounded capacity when multiple threads concurrently insert unique keys at the MAX_IN_MEMORY_KEYS limit."""
+    import threading
+    import backend.app.core.rate_limiter as rl_mod
+    from backend.app.core.rate_limiter import check_client_ip_rate_limit, reset_api_key_rate_limits
+
+    reset_api_key_rate_limits()
+    test_capacity = 40
+    thread_count = 10
+    requests_per_thread = 25
+    exceptions = []
+
+    def worker_task(thread_id: int):
+        try:
+            for req_idx in range(requests_per_thread):
+                unique_ip = f"192.0.2.{thread_id}_{req_idx}"
+                check_client_ip_rate_limit(unique_ip, limit_per_minute=20)
+        except Exception as exc:
+            exceptions.append(exc)
+
+    with patch.object(rl_mod, "MAX_IN_MEMORY_KEYS", test_capacity):
+        with patch.object(rl_mod, "_get_redis_client", return_value=None):
+            with patch.object(settings, "ENVIRONMENT", "development"):
+                threads = [threading.Thread(target=worker_task, args=(i,)) for i in range(thread_count)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+
+    assert exceptions == [], f"Concurrent rate limit operations raised unexpected exceptions: {exceptions}"
+    with rl_mod._LOCK:
+        assert len(rl_mod._KEY_REQUEST_WINDOWS) <= test_capacity
+
+    reset_api_key_rate_limits()
+
+
+def test_commercial_api_quota_atomic_concurrency_reconciliation():
+    """Verify that concurrent requests with an active commercial API key atomically debit quota without double-metering or race-condition over-subscription."""
+    import threading
+    from backend.app.database import SessionLocal
+    from backend.app.models.api_key import ApiKey
+    from backend.app.routers.api_keys import get_api_key_merchant
+
+    # 1. Create merchant and an API key with exactly 5 quota units
+    merchant_email = f"merchant_reconcile_{secrets.token_hex(6)}@example.com"
+    token = get_token(AppRole.MERCHANT, merchant_email)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    res = client.post(
+        "/api/v1/api-keys/",
+        json={"name": "Concurrency Test Key", "monthly_quota": 5},
+        headers=headers,
+    )
+    assert res.status_code == 201
+    key_data = res.json()
+    raw_key = key_data["api_key"]
+    key_id = key_data["id"]
+
+    success_count = 0
+    quota_exhausted_count = 0
+    other_errors = []
+    lock = threading.Lock()
+
+    def concurrent_caller():
+        nonlocal success_count, quota_exhausted_count
+        try:
+            worker_db = SessionLocal()
+            try:
+                get_api_key_merchant(x_api_key=raw_key, db=worker_db)
+                with lock:
+                    success_count += 1
+            except HTTPException as http_exc:
+                if http_exc.status_code == 429:
+                    with lock:
+                        quota_exhausted_count += 1
+                else:
+                    with lock:
+                        other_errors.append(f"HTTP_{http_exc.status_code}_{http_exc.detail}")
+            except Exception as e:
+                with lock:
+                    other_errors.append(str(e))
+            finally:
+                worker_db.close()
+        except Exception as outer_e:
+            with lock:
+                other_errors.append(str(outer_e))
+
+    # Spawn 12 concurrent requests for a quota of 5
+    threads = [threading.Thread(target=concurrent_caller) for _ in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert other_errors == [], f"Unexpected errors during concurrent quota calls: {other_errors}"
+    assert success_count == 5, f"Expected exactly 5 successful quota debits, got {success_count}"
+    assert quota_exhausted_count == 7, f"Expected exactly 7 rejected requests (HTTP 429), got {quota_exhausted_count}"
+
+    # Verify database state has exact period_usage_count == 5
+    verify_db = SessionLocal()
+    try:
+        saved_key = verify_db.query(ApiKey).filter(ApiKey.id == key_id).first()
+        assert saved_key.period_usage_count == 5
+    finally:
+        verify_db.close()
+
 
 
 
