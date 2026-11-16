@@ -226,7 +226,7 @@ def test_zero_knowledge_pin_no_raw_pin_in_api_response():
         )
 
         create_res = client.post("/api/v1/deliveries/", json={
-            "recipient_name": "Zero Knowledge Recipient",
+            "recipient_name": "Encrypted PIN Recipient",
             "recipient_phone": "08055667788",
             "destination_address": "14 Admiralty Way",
             "destination_area": "Lekki Phase 1",
@@ -736,6 +736,7 @@ def test_production_config_secret_guard():
         SMS_PROVIDER="termii",
         TERMII_API_KEY="valid_termii_api_key_test_12345",
         OUTBOX_WORKER_ENABLED=True,
+        REDIS_URL="redis://localhost:6379/0",
     )
     assert valid_prod_settings.ENVIRONMENT == "production"
 
