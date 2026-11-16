@@ -170,8 +170,8 @@ def test_nipost_lookup_exception_logs_only_error_category(caplog):
     "payload,expected_status",
     [
         ({"status": "NOT_FOUND"}, "NOT_FOUND"),
-        ({"status": "INVALID"}, "INVALID_RESPONSE"),
-        ({"valid": False}, "NOT_FOUND"),
+        ({"status": "INVALID"}, "INVALID_INPUT"),
+        ({"valid": False}, "INVALID_INPUT"),
         ({"found": False}, "NOT_FOUND"),
         ({"matches": []}, "NOT_FOUND"),
     ],
