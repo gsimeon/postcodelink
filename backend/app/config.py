@@ -54,17 +54,18 @@ class Settings(BaseSettings):
     NIPOST_API_KEY: str = os.getenv("NIPOST_API_KEY", "")
     NIPOST_TIMEOUT_SECONDS: float = 5.0
 
-    # Trusted Proxies for Rate Limiting & Real IP extraction
-    # Requests from IPs outside TRUSTED_PROXIES have X-Forwarded-For ignored to block spoofing
-    TRUSTED_PROXIES: List[str] = [
-        "127.0.0.1",
-        "::1",
-        "localhost",
-        "testclient",
-        "10.0.0.0/8",
-        "172.16.0.0/12",
-        "192.168.0.0/16",
-    ]
+    # Trusted Reverse Proxies for Real Client IP extraction and rate limiting.
+    # In production, default is strictly empty (direct external connections cannot spoof X-Forwarded-For).
+    # In production, reverse proxies (e.g. Cloudflare, AWS ALB, Nginx) must be explicitly configured
+    # via TRUSTED_PROXIES environment variable (comma-separated list of IP addresses or CIDR blocks).
+    # In development/test mode, only loopback addresses and testclient are permitted.
+    # Note: Broad private subnets (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) are strictly excluded by default
+    # to prevent untrusted internal containers or shared infrastructure from forging client IPs.
+    TRUSTED_PROXIES: List[str] = (
+        [p.strip() for p in os.getenv("TRUSTED_PROXIES").split(",") if p.strip()]
+        if os.getenv("TRUSTED_PROXIES") is not None
+        else (["127.0.0.1", "::1", "localhost", "testclient"] if os.getenv("ENVIRONMENT", "development") != "production" else [])
+    )
 
     # SMS & WhatsApp Out-of-band Dispatch Gateway
     SMS_PROVIDER: str = "simulated"

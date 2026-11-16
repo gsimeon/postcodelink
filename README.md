@@ -65,9 +65,19 @@ Following the production-readiness review of Release Gate v5.9, Release Gate v6.
 ### 5. P2 — Worker Subprocess OS Signal Handling & Crash Recovery
 - **Real OS Subprocess Verification**: Integration tests spawn `backend.app.workers.outbox_worker` as a real OS subprocess, verify heartbeat creation, send termination signals (`SIGTERM`, `SIGINT`, `SIGBREAK`), and confirm graceful exit code 0 with persistent `status="stopped"` and `stop_reason="graceful_shutdown"`.
 
-### 6. P2 — Least-Privilege CI Security Permissions
+### 6. P2 — API Key Lifecycle Validation & Expiration Control (v6.0.1 Hardening)
+- **Resolved Missing Expiry Import**: Fixed `timedelta` import in `api_keys.py`, enabling reliable creation of expiring keys (`expires_in_days`). Verified that expired keys reject requests with HTTP 401.
+- **Strict Pydantic Input Validation**: Enforced non-blank names (`min_length=1, max_length=100`), bounded quotas (`ge=1, le=10_000_000`), and bounded expiry (`ge=1, le=365`), rejecting malformed requests with HTTP 422 rather than silently altering inputs.
+
+### 7. P2 — Trusted Proxy Topology Narrowing & Defense in Depth
+- **Zero-Trust Default Proxy List**: Removed broad private network ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) from default `TRUSTED_PROXIES`. In production, default is empty (`[]`), requiring explicit configuration of reverse proxy IPs or CIDRs via environment variables. Untrusted internal containers or shared infrastructure cannot forge client IPs.
+
+### 8. P2 — Upstream NIPOST Error Sanitization
+- **Information Leakage Prevention**: Connection timeouts, DNS failures, and socket errors caught in `NIPOSTClient` return safe public categories (`UNAVAILABLE`, `UNAUTHORIZED`, `TIMEOUT`) without leaking internal hostnames, ports, or raw exception strings into API responses. Full diagnostic details are retained strictly in server-side logs.
+
+### 9. P2 — Least-Privilege CI Security Permissions & Test Coverage
 - **GitHub Actions Hardening (`.github/workflows/ci.yml`)**: Explicitly configured top-level `permissions: contents: read` adhering to the principle of least privilege.
-- **Comprehensive Dual-DB Test Suite**: 131/131 Pytest security, cryptography, and API integration tests passing (130 passed, 1 skipped) across PostgreSQL 16 and SQLite 3, plus 7/7 Node.js state-machine and OTP verification tests.
+- **Comprehensive Dual-DB Test Suite**: 141/141 Pytest security, cryptography, and API integration tests passing (140 passed, 1 skipped) across PostgreSQL 16 and SQLite 3, plus 7/7 Node.js state-machine and OTP verification tests.
 
 ---
 

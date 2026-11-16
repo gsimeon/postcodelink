@@ -1493,3 +1493,238 @@ def test_nipost_provenance_preserves_upstream_version_or_returns_null():
     finally:
         db.close()
 
+
+# ==============================================================================
+# 17. Release Gate v6.0.1 Corrective Hardening & Scalability Tests
+# ==============================================================================
+
+def test_api_key_creation_with_and_without_expiry_and_expiration_enforcement():
+    """Verify API-key creation with/without expires_in_days (fixing missing timedelta) and expiration enforcement."""
+    db = SessionLocal()
+    try:
+        merchant_email = f"merchant_exp_{secrets.token_hex(6)}@example.com"
+        token = get_token(AppRole.MERCHANT, merchant_email)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # 1. Create a key without expiry — HTTP 201
+        res1 = client.post(
+            "/api/v1/api-keys/",
+            json={"name": "Non-Expiring Key", "monthly_quota": 5000},
+            headers=headers,
+        )
+        assert res1.status_code == 201
+        data1 = res1.json()
+        assert data1["name"] == "Non-Expiring Key"
+        assert data1["expires_at"] is None
+        assert data1["api_key"].startswith("pl_live_")
+
+        # 2. Create a key with 30-day expiry — HTTP 201 (previously raised NameError: timedelta)
+        res2 = client.post(
+            "/api/v1/api-keys/",
+            json={"name": "30-Day Expiring Key", "monthly_quota": 5000, "expires_in_days": 30},
+            headers=headers,
+        )
+        assert res2.status_code == 201
+        data2 = res2.json()
+        assert data2["name"] == "30-Day Expiring Key"
+        assert data2["expires_at"] is not None
+        # Check expires_at is roughly 30 days ahead
+        exp_dt = datetime.fromisoformat(data2["expires_at"].replace("Z", "+00:00"))
+        if exp_dt.tzinfo is None:
+            exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+        now_dt = datetime.now(timezone.utc)
+        diff = (exp_dt - now_dt).total_seconds() / 86400
+        assert 29 <= diff <= 31
+
+        # 3. Authenticate with valid expiring key -> succeeds
+        auth_res = client.get(
+            "/api/v1/postcodes/commercial/lookup?state=Lagos",
+            headers={"x-api-key": data2["api_key"]},
+        )
+        assert auth_res.status_code == 200
+
+        # 4. Authenticate with expired key -> HTTP 401
+        db.query(ApiKey).filter(ApiKey.id == data2["id"]).update(
+            {"expires_at": datetime.now(timezone.utc) - timedelta(days=1)}
+        )
+        db.commit()
+
+        expired_res = client.get(
+            "/api/v1/postcodes/commercial/lookup?state=Lagos",
+            headers={"x-api-key": data2["api_key"]},
+        )
+        assert expired_res.status_code == 401
+        assert "expired" in expired_res.json()["detail"].lower()
+    finally:
+        db.close()
+
+
+def test_api_key_creation_input_validation():
+    """Verify input validation rejecting blank names, negative/zero/excessive quotas, and negative/excessive expiries."""
+    merchant_email = f"merchant_val_{secrets.token_hex(6)}@example.com"
+    token = get_token(AppRole.MERCHANT, merchant_email)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # 1. Blank or whitespace name -> HTTP 422
+    res_blank = client.post(
+        "/api/v1/api-keys/",
+        json={"name": "   ", "monthly_quota": 1000},
+        headers=headers,
+    )
+    assert res_blank.status_code == 422
+
+    # 2. Empty name -> HTTP 422
+    res_empty = client.post(
+        "/api/v1/api-keys/",
+        json={"name": "", "monthly_quota": 1000},
+        headers=headers,
+    )
+    assert res_empty.status_code == 422
+
+    # 3. Zero or negative monthly quota -> HTTP 422
+    res_zero_quota = client.post(
+        "/api/v1/api-keys/",
+        json={"name": "Zero Quota Key", "monthly_quota": 0},
+        headers=headers,
+    )
+    assert res_zero_quota.status_code == 422
+
+    res_neg_quota = client.post(
+        "/api/v1/api-keys/",
+        json={"name": "Negative Quota Key", "monthly_quota": -500},
+        headers=headers,
+    )
+    assert res_neg_quota.status_code == 422
+
+    # 4. Excessive monthly quota (> 10,000,000) -> HTTP 422
+    res_excess_quota = client.post(
+        "/api/v1/api-keys/",
+        json={"name": "Excess Quota Key", "monthly_quota": 20_000_000},
+        headers=headers,
+    )
+    assert res_excess_quota.status_code == 422
+
+    # 5. Negative or zero expires_in_days -> HTTP 422
+    res_neg_exp = client.post(
+        "/api/v1/api-keys/",
+        json={"name": "Negative Expiry Key", "monthly_quota": 1000, "expires_in_days": -1},
+        headers=headers,
+    )
+    assert res_neg_exp.status_code == 422
+
+    res_zero_exp = client.post(
+        "/api/v1/api-keys/",
+        json={"name": "Zero Expiry Key", "monthly_quota": 1000, "expires_in_days": 0},
+        headers=headers,
+    )
+    assert res_zero_exp.status_code == 422
+
+    # 6. Excessive expires_in_days (> 365) -> HTTP 422
+    res_excess_exp = client.post(
+        "/api/v1/api-keys/",
+        json={"name": "Excess Expiry Key", "monthly_quota": 1000, "expires_in_days": 400},
+        headers=headers,
+    )
+    assert res_excess_exp.status_code == 422
+
+
+def test_trusted_proxy_narrowing_and_spoofing_defense():
+    """Verify that private network peers are not trusted by default and only explicitly configured proxies are trusted."""
+    from backend.app.core.network import get_trusted_client_ip
+    from starlette.requests import Request
+
+    # 1. Untrusted private-network peer (e.g. 10.0.0.5 or 192.168.1.100) connecting directly
+    # With default empty/narrow trusted proxies, private network peers cannot spoof IP
+    scope_private = {
+        "type": "http",
+        "client": ("10.0.0.5", 48201),
+        "headers": [(b"x-forwarded-for", b"203.0.113.195")],
+    }
+    req_private = Request(scope_private)
+    assert get_trusted_client_ip(req_private, trusted_proxies=[]) == "10.0.0.5"
+
+    # Also with default production policy (no broad private ranges)
+    scope_192 = {
+        "type": "http",
+        "client": ("192.168.1.100", 48201),
+        "headers": [(b"x-forwarded-for", b"1.1.1.1")],
+    }
+    assert get_trusted_client_ip(Request(scope_192), trusted_proxies=[]) == "192.168.1.100"
+
+    # 2. Configured specific reverse proxy IP (e.g. dedicated ALB or Nginx reverse proxy at 10.0.1.50)
+    scope_configured = {
+        "type": "http",
+        "client": ("10.0.1.50", 48201),
+        "headers": [(b"x-forwarded-for", b"203.0.113.195, 10.0.1.50")],
+    }
+    req_configured = Request(scope_configured)
+    assert get_trusted_client_ip(req_configured, trusted_proxies=["10.0.1.50"]) == "203.0.113.195"
+
+    # 3. Multi-hop chain through configured proxies
+    scope_multi = {
+        "type": "http",
+        "client": ("10.0.1.50", 48201),
+        "headers": [(b"x-forwarded-for", b"198.51.100.77, 10.0.1.99, 10.0.1.50")],
+    }
+    assert get_trusted_client_ip(Request(scope_multi), trusted_proxies=["10.0.1.50", "10.0.1.99"]) == "198.51.100.77"
+
+    # 4. Malformed / injection forwarding headers are safely ignored
+    scope_malformed = {
+        "type": "http",
+        "client": ("10.0.1.50", 48201),
+        "headers": [(b"x-forwarded-for", b"malformed_ip_string, <script>alert(1)</script>, 10.0.1.50")],
+    }
+    assert get_trusted_client_ip(Request(scope_malformed), trusted_proxies=["10.0.1.50"]) == "10.0.1.50"
+
+
+def test_nipost_upstream_error_sanitization_prevents_leakage():
+    """Verify that upstream NIPOST connection exceptions (DNS, timeout, socket) do not leak internal hostnames or details in API responses."""
+    from backend.app.services.nipost_client import NIPOSTClient, NIPOSTLookupStatus
+    import httpx
+
+    # 1. Direct NIPOSTClient test with connection error containing internal hostname
+    client_instance = NIPOSTClient(base_url="https://internal-nipost-cluster.infra.local:9090", timeout=2.0)
+    internal_dns_exc = httpx.ConnectError("[Errno 11001] getaddrinfo failed for internal-nipost-cluster.infra.local:9090")
+
+    with patch("httpx.Client.get", side_effect=internal_dns_exc):
+        res = client_instance.lookup_postcode("100001")
+        assert res.status == NIPOSTLookupStatus.UNAVAILABLE
+        assert res.http_status == 503
+        # Must NOT contain internal hostname or raw exception details
+        assert "internal-nipost-cluster" not in res.error_message
+        assert "infra.local" not in res.error_message
+        assert "Errno" not in res.error_message
+        assert "The official NIPOST verification gateway is temporarily unavailable." in res.error_message
+
+    # 2. Direct NIPOSTClient test with timeout error
+    timeout_exc = httpx.TimeoutException("The read operation timed out on socket 10.0.0.99:9090")
+    with patch("httpx.Client.get", side_effect=timeout_exc):
+        res_timeout = client_instance.lookup_postcode("100001")
+        assert res_timeout.status == NIPOSTLookupStatus.UNAVAILABLE
+        assert res_timeout.http_status == 504
+        assert "10.0.0.99" not in res_timeout.error_message
+        assert "The official NIPOST verification gateway timed out." in res_timeout.error_message
+
+    # 3. API endpoint integration test: ensure public JSON response does not leak internal info
+    with patch.object(NIPOSTClient, "is_configured", True):
+        with patch.object(NIPOSTClient, "lookup_postcode", return_value=res):
+            # Normal lookup endpoint (with fallback)
+            resp = client.get("/api/v1/postcodes/lookup?code=100001")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["fallback_used"] is True
+            assert "internal-nipost" not in str(data)
+            assert "infra.local" not in str(data)
+            assert "Errno" not in str(data)
+            assert data["upstream_error"] == "The official NIPOST verification gateway is temporarily unavailable."
+
+            # Strict lookup endpoint (fails closed)
+            strict_resp = client.get("/api/v1/postcodes/lookup?code=100001&strict=true")
+            assert strict_resp.status_code == 503
+            err_detail = strict_resp.json()["detail"]
+            assert "internal-nipost" not in err_detail
+            assert "infra.local" not in err_detail
+            assert "Errno" not in err_detail
+            assert "The official NIPOST verification gateway is temporarily unavailable." in err_detail
+
+

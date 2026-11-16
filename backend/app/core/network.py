@@ -26,7 +26,7 @@ def get_trusted_client_ip(request: Request, trusted_proxies: Optional[List[str]]
     trusted_list = (
         trusted_proxies
         if trusted_proxies is not None
-        else getattr(settings, "TRUSTED_PROXIES", ["127.0.0.1", "::1", "localhost", "testclient"])
+        else getattr(settings, "TRUSTED_PROXIES", [])
     )
 
     # If direct peer is not in trusted proxies, ignore X-Forwarded-For completely

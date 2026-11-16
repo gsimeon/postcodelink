@@ -1,10 +1,10 @@
 """API Key Management and authentication router."""
 import secrets
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Header
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
 from sqlalchemy import update, case, and_, or_
 
@@ -19,9 +19,32 @@ router = APIRouter(prefix="/api-keys", tags=["api-keys"])
 
 
 class CreateApiKeyRequest(BaseModel):
-    name: str = "Production API Key"
-    monthly_quota: int = 10000
-    expires_in_days: Optional[int] = None
+    name: str = Field(
+        default="Production API Key",
+        min_length=1,
+        max_length=100,
+        description="Descriptive name for the API key (1-100 characters)",
+    )
+    monthly_quota: int = Field(
+        default=10000,
+        ge=1,
+        le=10_000_000,
+        description="Monthly request quota (between 1 and 10,000,000 requests)",
+    )
+    expires_in_days: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=365,
+        description="Expiry duration in days (1 to 365 days)",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name_not_blank(cls, v: str) -> str:
+        clean = v.strip()
+        if not clean:
+            raise ValueError("API key name must not be blank or contain only whitespace.")
+        return clean
 
 
 class ApiKeyResponse(BaseModel):
@@ -141,14 +164,14 @@ def api_create_api_key(
     hashed = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
     now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(days=req.expires_in_days) if req.expires_in_days else None
+    expires_at = now + timedelta(days=req.expires_in_days) if req.expires_in_days is not None else None
 
     key_obj = ApiKey(
         merchant_id=current_user.id,
-        name=req.name.strip(),
+        name=req.name,
         key_prefix=prefix,
         hashed_key=hashed,
-        monthly_quota=max(1, req.monthly_quota),
+        monthly_quota=req.monthly_quota,
         current_period=now.strftime("%Y-%m"),
         period_usage_count=0,
         usage_count=0,

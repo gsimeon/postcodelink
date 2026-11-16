@@ -159,28 +159,28 @@ class NIPOSTClient:
                     return NIPOSTLookupResult(
                         status=NIPOSTLookupStatus.UNAUTHORIZED,
                         http_status=resp.status_code,
-                        error_message="Unauthorized NIPOST API access: verify license and API key.",
+                        error_message="Official NIPOST API authorization failed: verify license credentials.",
                     )
                 else:
                     logger.warning(f"NIPOST API non-200 response ({resp.status_code}) for '{clean_code}': {resp.text}")
                     return NIPOSTLookupResult(
                         status=NIPOSTLookupStatus.UNAVAILABLE,
                         http_status=resp.status_code,
-                        error_message=f"NIPOST API returned HTTP {resp.status_code}.",
+                        error_message="The official NIPOST verification gateway returned an unexpected response.",
                     )
         except httpx.TimeoutException:
             logger.warning(f"NIPOST API timeout after {self.timeout}s looking up '{clean_code}'.")
             return NIPOSTLookupResult(
                 status=NIPOSTLookupStatus.UNAVAILABLE,
                 http_status=504,
-                error_message=f"Upstream NIPOST API timeout after {self.timeout}s.",
+                error_message="The official NIPOST verification gateway timed out.",
             )
         except Exception as exc:
             logger.warning(f"NIPOST API connection error looking up '{clean_code}': {exc}.")
             return NIPOSTLookupResult(
                 status=NIPOSTLookupStatus.UNAVAILABLE,
                 http_status=503,
-                error_message=f"Connection error connecting to upstream NIPOST API: {exc}.",
+                error_message="The official NIPOST verification gateway is temporarily unavailable.",
             )
 
     def validate_address(
