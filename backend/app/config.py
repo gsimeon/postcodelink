@@ -1,9 +1,113 @@
 """Application configuration using Pydantic Settings."""
 import os
+import math
 import secrets
+from collections import Counter
 from typing import List, Any, Optional
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def calculate_shannon_entropy(s: str) -> float:
+    """Calculate Shannon entropy in bits per character."""
+    if not s:
+        return 0.0
+    counts = Counter(s)
+    total = len(s)
+    return -sum((c / total) * math.log2(c / total) for c in counts.values())
+
+
+def validate_cryptographic_secret(raw_secret: str, secret_name: str) -> None:
+    """Validate that a production secret meets cryptographic strength standards:
+    1. Minimum length >= 32 characters.
+    2. No disallowed repository templates, default prefixes, or predictable keywords.
+    3. Maximum character concentration <= 25% (rejects repetitive character stuffing like 'a'*32).
+    4. Minimum unique character diversity (>= 10 unique characters in a 32+ char secret).
+    5. No repeated character runs of 5 or more (e.g. 'aaaaa').
+    6. No simple ascending/descending sequential runs of 6 or more (e.g. '123456', 'abcdef').
+    7. Shannon entropy >= 3.0 bits per character.
+    
+    Production Secret Rotation & Management Policy:
+    - Never hardcode or reuse secrets across environments or functional domains.
+    - Production secrets MUST be generated using cryptographically authentic random generators:
+        python -c "import secrets; print(secrets.token_urlsafe(32))"
+        or: openssl rand -hex 32
+    - Recommended for production: Inject credentials from a managed secret manager
+      (e.g. AWS Secrets Manager, HashiCorp Vault, GCP Secret Manager, or Azure Key Vault).
+    - JWT Secret Rotation: Update SECRET_KEY in secrets manager; new tokens sign with new key,
+      existing tokens expire per ACCESS_TOKEN_EXPIRE_MINUTES.
+    - Outbox Encryption Rotation: Ensure pending messages in outbox are dispatched, or
+      execute key migration script to re-encrypt pending outbox records under the new OUTBOX_ENCRYPTION_KEY.
+    """
+    secret = (raw_secret or "").strip()
+    if not secret or len(secret) < 32:
+        raise ValueError(
+            f"Fatal Security Error: In production, {secret_name} must be set to a dedicated, cryptographically strong secret (at least 32 characters)."
+        )
+
+    disallowed_patterns = [
+        "postcodelink_dev",
+        "postcodelink_prod",
+        "postcodelink_production",
+        "postcodelink_ci",
+        "replace_with_",
+        "generate_secure",
+        "your_secret_key",
+        "super_secure",
+        "example",
+        "changeme",
+        "secret123",
+        "password",
+        "admin123",
+    ]
+    if any(p in secret.lower() for p in disallowed_patterns):
+        raise ValueError(
+            f"Fatal Security Error: In production, {secret_name} must be set to an authentic, cryptographically strong secret. "
+            "Repository template defaults, example values, and predictable prefixes are strictly prohibited."
+        )
+
+    # 1. Repetitive character concentration check (rejects repetitive padding like 'a'*32 + 'suffix')
+    counts = Counter(secret)
+    max_char_count = max(counts.values())
+    if max_char_count / len(secret) > 0.25:
+        raise ValueError(
+            f"Fatal Security Error: In production, {secret_name} has insufficient character variety "
+            f"(single character occurs {max_char_count} times in a {len(secret)}-character secret; maximum allowed concentration is 25%)."
+        )
+
+    # 2. Minimum distinct characters check
+    if len(counts) < 10:
+        raise ValueError(
+            f"Fatal Security Error: In production, {secret_name} has insufficient character diversity "
+            f"({len(counts)} unique characters; minimum required is 10)."
+        )
+
+    # 3. Repeated character run check (e.g. 'aaaaa')
+    for i in range(len(secret) - 4):
+        if len(set(secret[i:i + 5])) == 1:
+            raise ValueError(
+                f"Fatal Security Error: In production, {secret_name} contains repetitive character runs (5 or more identical characters in a row)."
+            )
+
+    # 4. Simple sequential character runs check (e.g. '123456', 'abcdef')
+    lower_s = secret.lower()
+    for i in range(len(lower_s) - 5):
+        chunk = lower_s[i:i + 6]
+        diffs = [ord(chunk[j + 1]) - ord(chunk[j]) for j in range(len(chunk) - 1)]
+        if all(d == 1 for d in diffs) or all(d == -1 for d in diffs):
+            raise ValueError(
+                f"Fatal Security Error: In production, {secret_name} contains predictable sequential character sequences (e.g. '{chunk}')."
+            )
+
+    # 5. Shannon entropy check (minimum 3.0 bits/char)
+    entropy = calculate_shannon_entropy(secret)
+    if entropy < 3.0:
+        raise ValueError(
+            f"Fatal Security Error: In production, {secret_name} has insufficient Shannon entropy "
+            f"({entropy:.2f} bits/character; minimum required is 3.0 bits/character). "
+            "Generate cryptographically authentic secrets using `secrets.token_urlsafe(32)` or `openssl rand -hex 32`."
+        )
+
 
 
 class Settings(BaseSettings):
@@ -107,24 +211,7 @@ class Settings(BaseSettings):
         """Reject startup if running in production with weak secrets, simulated provider, or insecure defaults."""
         if self.ENVIRONMENT == "production":
             raw_secret = (self.SECRET_KEY or "").strip()
-            disallowed_patterns = [
-                "postcodelink_dev",
-                "postcodelink_prod",
-                "postcodelink_production",
-                "postcodelink_ci",
-                "replace_with_",
-                "generate_secure",
-                "your_secret_key",
-                "super_secure",
-                "example",
-                "changeme",
-                "secret123",
-            ]
-            if not raw_secret or len(raw_secret) < 32 or any(p in raw_secret.lower() for p in disallowed_patterns):
-                raise ValueError(
-                    "Fatal Security Error: In production, SECRET_KEY must be set to an authentic, cryptographically strong secret (at least 32 characters). "
-                    "Repository template defaults, example values, and predictable prefixes are strictly prohibited."
-                )
+            validate_cryptographic_secret(raw_secret, "SECRET_KEY")
 
             # Process role validation
             role = (self.PROCESS_ROLE or "").strip().lower()
@@ -150,11 +237,7 @@ class Settings(BaseSettings):
 
             # Dedicated outbox encryption key validation
             raw_outbox_key = (self.OUTBOX_ENCRYPTION_KEY or "").strip()
-            if not raw_outbox_key or len(raw_outbox_key) < 32 or any(p in raw_outbox_key.lower() for p in disallowed_patterns):
-                raise ValueError(
-                    "Fatal Security Error: In production, OUTBOX_ENCRYPTION_KEY must be set to a dedicated, cryptographically strong secret (at least 32 characters). "
-                    "Repository template defaults, example values, and predictable prefixes are strictly prohibited."
-                )
+            validate_cryptographic_secret(raw_outbox_key, "OUTBOX_ENCRYPTION_KEY")
 
             if raw_outbox_key == raw_secret:
                 raise ValueError("Fatal Security Error: OUTBOX_ENCRYPTION_KEY must be distinct from SECRET_KEY to ensure cryptographic domain separation.")

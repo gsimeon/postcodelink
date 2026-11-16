@@ -267,8 +267,8 @@ def test_production_redis_mandatory_policy_and_fail_closed():
     with pytest.raises(ValueError, match="Fatal Production Configuration Error: REDIS_URL must be configured"):
         Settings(
             ENVIRONMENT="production",
-            SECRET_KEY="a" * 35,
-            OUTBOX_ENCRYPTION_KEY="b" * 35,
+            SECRET_KEY="k7J9mP2vL4xR8zN1qT5wY3bC6dF0gH2jM",
+            OUTBOX_ENCRYPTION_KEY="wY3bC6dF0gH2jMk7J9mP2vL4xR8zN1qT5",
             SMS_PROVIDER="termii",
             TERMII_API_KEY="valid_key",
             OUTBOX_WORKER_ENABLED=True,
@@ -280,8 +280,8 @@ def test_production_redis_mandatory_policy_and_fail_closed():
     # 2. Explicit opt-out for single-instance staging/dev bypasses the check
     dev_settings = Settings(
         ENVIRONMENT="production",
-        SECRET_KEY="a" * 35,
-        OUTBOX_ENCRYPTION_KEY="b" * 35,
+        SECRET_KEY="k7J9mP2vL4xR8zN1qT5wY3bC6dF0gH2jM",
+        OUTBOX_ENCRYPTION_KEY="wY3bC6dF0gH2jMk7J9mP2vL4xR8zN1qT5",
         SMS_PROVIDER="termii",
         TERMII_API_KEY="valid_key",
         OUTBOX_WORKER_ENABLED=True,

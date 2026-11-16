@@ -1,8 +1,15 @@
-# PostcodeLink Nigeria — Delivery Operations & National Digital Postcode Platform
+# PostcodeLink — Nigeria's Postcode Intelligence and Address Verification Platform
 
-A modern Next.js 15 delivery operations, out-of-band notification, and national address disambiguation platform tailored for Nigerian e-commerce merchants, last-mile logistics riders, and courier operators.
+A modern address intelligence, national digital postcode verification, and address standardization platform tailored for Nigerian e-commerce merchants, financial institutions, logistics fleets, and enterprise developer integrations.
 
-PostcodeLink bridges the gap between customer addresses (often described with informal landmarks) and official **NIPOST (Nigerian Postal Service)** digital postal codes (both the October 2026 11-character 5-component national digital postcode standard and legacy 6-digit postal codes) to eliminate driver calls ("where you dey?"), avoid missed parcels, and optimize dispatch routes.
+PostcodeLink bridges the gap between unstructured customer addresses (often described using informal landmarks) and official **NIPOST (Nigerian Postal Service)** digital postal codes (both the October 2026 11-character 5-component national digital postcode standard `SS-LL-DDD-AA-BB` and legacy 6-digit postal codes) to eliminate driver disambiguation delays, prevent failed deliveries, improve address hygiene, and power building-level geolocation.
+
+### Core Product Capabilities
+1. **Nigerian Postcode Intelligence & Directory Lookup**: High-performance querying of legacy 6-digit postal codes and 11-character national digital postcodes with decoupled existence validation (`Validator`) and address retrieval (`Autofill`) service contracts.
+2. **Address Verification & Cleansing**: Algorithmic landmark extraction, administrative entity normalization (State, LGA, District, Ward), and structured address standardisation.
+3. **Building-Level Digital Postcode Disambiguation**: Strict structural validation and component decomposition of the 5-component national standard (`SS-LL-DDD-AA-BB`: State, LGA, District, Area, Building Unit).
+4. **Developer API & Enterprise Platform**: REST API with API-key authentication, monthly tiered quota metering, anti-spoofing sliding-window rate limiting, and webhook integration.
+5. **Last-Mile Logistics & Dispatch Module**: Integrated downstream operational module providing merchant dispatch queues, courier fleet assignment, rider manifests, live radar dispatch tracking, and tamper-evident 6-digit PIN Proof-of-Delivery (POD).
 
 ---
 
@@ -39,25 +46,46 @@ graph TD
 
 ---
 
-## Data Sources, System Taxonomy & Regulatory Governance (Release Gate v6.0.5 Standard)
+## Data Sources, System Taxonomy & Regulatory Governance (Release Gate v6.0.7 Standard)
 
 PostcodeLink strictly differentiates between four tiers of postcode data and enforces clear data governance in compliance with the [NIPOST Terms of Service](https://www.postcode.gov.ng/terms):
 
 ### 1. Data Source Taxonomy
 | Data Source Tier | Scope & Format | Intended Usage | Provenance Attributes |
 | :--- | :--- | :--- | :--- |
-| **Authoritative Live NIPOST Cloud Gateway** | Live FMCIDE/NIPOST national digital postcode registry. | Live verification of authoritative existence; returns building-level accuracy. | `dataset_version: "2026.1"`, `fallback_used: false` |
-| **NIPOST 11-Character National Digital Postcode** | 5-component building-level standard (e.g. `FC-02-A09-DB-09`: State, LGA, District, Sub-district, Building Unit). | Granular parcel routing and building-level last-mile navigation. | Standard NIPOST format |
+| **Authoritative Live NIPOST Cloud Gateway** | Live FMCIDE/NIPOST national digital postcode registry. | Live verification of authoritative existence; returns building-level accuracy. | `dataset_version: null` (or provider-supplied version), `fallback_used: false` |
+| **NIPOST 11-Character National Digital Postcode** | 5-component building-level standard (`SS-LL-DDD-AA-BB`: State, LGA, District, Sub-district, Building Unit). | Granular parcel routing and building-level last-mile navigation. | Standard NIPOST format |
 | **Legacy 6-Digit Postal Codes** | Traditional regional sorting codes (e.g. `100001` Lagos Island, `900001` Garki Abuja). | Macro dispatch, courier sorting hubs, and legacy e-commerce forms. | Regional routing |
 | **PostcodeLink Local Reference Database** | Pre-seeded local SQLite/PostgreSQL sample dataset of major Nigerian commercial centers. | Local automated testing, sub-millisecond offline dev, and resilient circuit-breaker fallback. | `dataset_version: "2024.2"`, `fallback_used: true`, `fallback_reason` declared |
 
 > [!IMPORTANT]
 > **No Conflation of Local Data with Official Verification**: Local reference data is strictly tagged as demonstration and fallback data. In strict verification mode (`strict=true`), local fallback is disabled; unverified postcodes return HTTP 503 rather than asserting local demonstration data as government truth.
 
-### 2. NIPOST Terms of Service & Commercial Usage Policy
+### 2. NIPOST Terms of Service, Commercial Usage & Official Integration Status
+- **Adapter Verification Status**: The NIPOST integration client in PostcodeLink is structured as an integration adapter pending authorized external contract verification against official National Digital Postcode API references and sandbox credentials. (Note: NIPOST's public e-commerce shipping API documentation describes merchant logistics, not the National Digital Postcode directory service).
 - **Software Service Model**: PostcodeLink provides address disambiguation, algorithmic landmark cleansing, and last-mile delivery tracking software. It does not claim ownership of the national postal directory, nor does it engage in unauthorized wholesale resale or bulk redistribution of raw government databases.
 - **Operational Caching Limits**: Stored lookup metadata is restricted to operational verification audit logs and merchant delivery records. Commercial API consumers are prohibited from building independent derivative national postal databases without a direct commercial agreement with NIPOST.
-- **Enterprise Licensing Notice**: Production deployments requiring high-volume directory synchronization or deep government registry integrations must obtain written authorization directly from NIPOST ([https://www.postcode.gov.ng](https://www.postcode.gov.ng)).
+- **Enterprise Licensing Notice**: Production deployments requiring high-volume directory synchronization or deep government registry integrations must obtain written authorization and an applicable commercial API data-use agreement directly from NIPOST ([https://www.postcode.gov.ng](https://www.postcode.gov.ng)).
+
+---
+
+## Production Cryptographic Key Management & Rotation Policy
+
+1. **Cryptographic Key Strength & Entropy Guardrails**:
+   - Production startup strictly enforces Shannon entropy ($\ge 3.0$ bits/character), character variety (maximum character concentration $\le 25\%$, minimum 10 distinct characters), and rejects repetitive padding (`'a'*32`), predictable sequences (`123456`, `abcdef`), and example templates.
+   - Production keys MUST be generated using cryptographically authentic random generators:
+     ```bash
+     python -c "import secrets; print(secrets.token_urlsafe(32))"
+     # or: openssl rand -hex 32
+     ```
+   - In production environments, credentials should be injected from a managed secret provider (e.g. AWS Secrets Manager, HashiCorp Vault, or GCP Secret Manager).
+
+2. **Domain Separation**:
+   - `SECRET_KEY` (JWT signature) and `OUTBOX_ENCRYPTION_KEY` (in-transit message encryption) must be distinct keys.
+
+3. **Key Rotation Procedures**:
+   - **JWT Secret Rotation**: Update `SECRET_KEY` in your secrets manager and restart API instances. Newly issued access tokens will be signed with the updated key. Existing valid tokens expire naturally per `ACCESS_TOKEN_EXPIRE_MINUTES`.
+   - **Outbox Key Rotation**: Before rotating `OUTBOX_ENCRYPTION_KEY`, allow pending messages in the transactional outbox to dispatch (`retry_count` settled), or execute the outbox re-encryption script to migrate un-dispatched encrypted payloads to the new key before deleting the old key.
 
 ---
 
@@ -448,7 +476,7 @@ Interactive OpenAPI documentation is live at **`http://127.0.0.1:8000/docs`** an
    # Or: backend/venv/Scripts/python -m backend.app.seed
    ```
 
-3. Run FastAPI automated security & API test suite (184/184 tests passing across PostgreSQL & SQLite):
+3. Run FastAPI automated security & API test suite (188/188 tests passing across PostgreSQL & SQLite):
    ```bash
    npm run backend:test
    # Or: backend/venv/Scripts/python -m pytest backend/tests -v

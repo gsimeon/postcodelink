@@ -90,11 +90,55 @@ class NIPOSTClient:
                 headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
-    @staticmethod
-    def is_well_formed_postcode(code: str) -> bool:
+    @classmethod
+    def parse_digital_postcode_components(cls, code: str) -> Optional[Dict[str, str]]:
+        """Parse and validate the 5 canonical components of an 11-character Nigerian Digital Postcode:
+        SS-LL-DDD-AA-BB
+        - State (SS): 2 uppercase letters (e.g. 'LA', 'FC', 'KN')
+        - Local Government (LL): 2 alphanumeric characters (e.g. '01', '02', '1A')
+        - District (DDD): 3 alphanumeric characters (e.g. 'A09', 'B12', '100')
+        - Area/Ward (AA): 2 alphanumeric characters (e.g. 'DB', 'EF', '01')
+        - Building/Unit (BB): 2 alphanumeric characters (e.g. '09', '34', '12')
+        
+        Returns a dict of components if valid, or None if malformed.
+        Rejects invalid separator placement, wrong component counts, or wrong component lengths.
+        """
+        if not code or not isinstance(code, str):
+            return None
+        clean = code.strip().upper()
+        if "-" in clean:
+            # Canonical separated format: SS-LL-DDD-AA-BB
+            m = re.match(r"^([A-Z]{2})-([0-9A-Z]{2})-([0-9A-Z]{3})-([0-9A-Z]{2})-([0-9A-Z]{2})$", clean)
+            if not m:
+                return None
+            return {
+                "state": m.group(1),
+                "lga": m.group(2),
+                "district": m.group(3),
+                "area": m.group(4),
+                "building": m.group(5),
+            }
+        else:
+            # Normalized unseparated format: SSLLDDDAABB
+            m = re.match(r"^([A-Z]{2})([0-9A-Z]{2})([0-9A-Z]{3})([0-9A-Z]{2})([0-9A-Z]{2})$", clean)
+            if not m:
+                return None
+            return {
+                "state": m.group(1),
+                "lga": m.group(2),
+                "district": m.group(3),
+                "area": m.group(4),
+                "building": m.group(5),
+            }
+
+    @classmethod
+    def is_well_formed_postcode(cls, code: str) -> bool:
         """Validate whether a Nigerian postcode string complies with national syntax standards:
         1. Legacy 6-digit numeric postal code (e.g. '100001', '900001').
-        2. Official 11-character national digital postcode standard (e.g. 'FC-02-A09-DB-09' or 'LA-01-B12-EF-34').
+        2. Official 11-character 5-component national digital postcode standard:
+           Canonical: SS-LL-DDD-AA-BB (e.g. 'FC-02-A09-DB-09', 'LA-01-B12-EF-34')
+           Normalized: SSLLDDDAABB (e.g. 'FC02A09DB09', 'LA01B12EF34')
+        Rejects malformed separator placement, incorrect component counts, or invalid lengths.
         """
         if not code or not isinstance(code, str):
             return False
@@ -102,25 +146,62 @@ class NIPOSTClient:
         # 1. Legacy 6-digit numeric code
         if re.match(r"^\d{6}$", clean):
             return True
-        # 2. National digital postcode (11-character standard with or without standard hyphens)
-        clean_normalized = clean.replace("-", "").replace(" ", "")
-        if len(clean_normalized) == 11 and re.match(r"^[A-Z]{2}[0-9A-Z]{9}$", clean_normalized):
-            return True
-        return False
+        # 2. National digital postcode (5 components: SS-LL-DDD-AA-BB)
+        return cls.parse_digital_postcode_components(clean) is not None
 
     @classmethod
-    def _adapt_nipost_payload(cls, data: Any, clean_code: str) -> Tuple[NIPOSTLookupStatus, Optional[Dict[str, Any]], Optional[str]]:
-        """Adapt diverse official NIPOST response schemas into standardized PostcodeLink dictionary.
+    def _adapt_validator_payload(cls, data: Any, clean_code: str) -> Tuple[NIPOSTLookupStatus, Optional[Dict[str, Any]], Optional[str]]:
+        """Contract adapter for official NIPOST Postcode Validator service.
         
-        Enforces a strict decision sequence:
-        1. Validate submitted postcode syntax. If malformed, classify as INVALID_INPUT regardless of upstream payload.
-        2. Detect explicit provider validation rejections (status/error_code in INVALID_INPUT/BAD_REQUEST/VALIDATION_ERROR).
-        3. For well-formed inputs, interpret documented negative verification responses (valid: false, found: false, status: NOT_FOUND, matches: []) as NOT_FOUND.
-        4. Extract and validate positive record (code match, mandatory fields).
-        5. Ambiguous or undocumented schemas return INVALID_RESPONSE.
+        The Validator service establishes directory existence/validity:
+        - Malformed input -> INVALID_INPUT (HTTP 422)
+        - Well-formed input with valid: false or explicit not-found -> NOT_FOUND (HTTP 404)
+        - Well-formed input with valid: true -> FOUND (HTTP 200)
+        - Ambiguous/undocumented responses -> INVALID_RESPONSE
         """
         if not isinstance(data, dict):
-            return NIPOSTLookupStatus.INVALID_RESPONSE, None, "NIPOST API returned non-dict JSON response."
+            return NIPOSTLookupStatus.INVALID_RESPONSE, None, "NIPOST Validator returned non-dict JSON response."
+
+        status_str = str(data.get("status", "")).strip().upper()
+        error_code = str(data.get("error_code") or data.get("error") or data.get("code") or "").strip().upper()
+
+        is_syntax_valid = cls.is_well_formed_postcode(clean_code)
+        is_explicit_malformed = (
+            status_str in ("INVALID_INPUT", "INVALID_FORMAT", "BAD_REQUEST", "MALFORMED_CODE", "INVALID")
+            or error_code in ("INVALID_INPUT", "INVALID_FORMAT", "INVALID_CODE", "VALIDATION_ERROR", "BAD_REQUEST")
+        )
+
+        if not is_syntax_valid or is_explicit_malformed:
+            return NIPOSTLookupStatus.INVALID_INPUT, data, f"Postcode '{clean_code}' has invalid format or rejected syntax."
+
+        # Documented Validator non-existence
+        if data.get("valid") is False or status_str in ("NOT_FOUND", "POSTCODE_NOT_FOUND") or error_code in ("NOT_FOUND", "POSTCODE_NOT_FOUND"):
+            return NIPOSTLookupStatus.NOT_FOUND, data, f"Postcode '{clean_code}' verified as unassigned in official NIPOST directory."
+
+        # Positive validation
+        if data.get("valid") is True:
+            validated_rec = {
+                "code": clean_code,
+                "valid": True,
+                "dataset_version": data.get("dataset_version"),
+                "service": "validator",
+            }
+            return NIPOSTLookupStatus.FOUND, validated_rec, None
+
+        return NIPOSTLookupStatus.INVALID_RESPONSE, data, "NIPOST Validator returned unrecognized response schema."
+
+    @classmethod
+    def _adapt_autofill_payload(cls, data: Any, clean_code: str) -> Tuple[NIPOSTLookupStatus, Optional[Dict[str, Any]], Optional[str]]:
+        """Contract adapter for official NIPOST Address Autofill / Directory Lookup service.
+        
+        The Autofill service retrieves complete postal address metadata:
+        - Malformed input -> INVALID_INPUT (HTTP 422)
+        - Documented negative response (status: NOT_FOUND, matches: [], found: false) -> NOT_FOUND (HTTP 404)
+        - Positive match with required administrative address attributes -> FOUND (HTTP 200)
+        - Ambiguous/undocumented responses -> INVALID_RESPONSE
+        """
+        if not isinstance(data, dict):
+            return NIPOSTLookupStatus.INVALID_RESPONSE, None, "NIPOST Autofill API returned non-dict JSON response."
 
         status_str = str(data.get("status", "")).strip().upper()
         error_code = str(data.get("error_code") or data.get("error") or data.get("code") or "").strip().upper()
@@ -143,7 +224,7 @@ class NIPOSTClient:
             or data.get("found") is False
             or (isinstance(data.get("matches"), list) and len(data.get("matches")) == 0)
         ):
-            return NIPOSTLookupStatus.NOT_FOUND, data, f"Postcode '{clean_code}' is confirmed not found in official NIPOST directory."
+            return NIPOSTLookupStatus.NOT_FOUND, data, f"Postcode '{clean_code}' does not exist in official NIPOST directory."
 
         # Extract record container
         matches = data.get("matches")
@@ -208,6 +289,29 @@ class NIPOSTClient:
             "valid": True,
         }
         return NIPOSTLookupStatus.FOUND, adapted_record, None
+
+    @classmethod
+    def _adapt_nipost_payload(cls, data: Any, clean_code: str, service: Optional[str] = None) -> Tuple[NIPOSTLookupStatus, Optional[Dict[str, Any]], Optional[str]]:
+        """Adapt diverse official NIPOST response schemas into standardized PostcodeLink dictionary.
+        
+        Dispatches to service contract adapters:
+        - service='validator': uses _adapt_validator_payload (existence verification)
+        - service='autofill': uses _adapt_autofill_payload (address metadata retrieval)
+        - service=None: auto-detects based on schema attributes.
+        """
+        if not isinstance(data, dict):
+            return NIPOSTLookupStatus.INVALID_RESPONSE, None, "NIPOST API returned non-dict JSON response."
+
+        if service == "validator":
+            return cls._adapt_validator_payload(data, clean_code)
+        if service == "autofill":
+            return cls._adapt_autofill_payload(data, clean_code)
+
+        # Auto-detect contract
+        has_address_fields = any(k in data for k in ("area", "district", "state", "matches", "administrative_address"))
+        if "valid" in data and not has_address_fields:
+            return cls._adapt_validator_payload(data, clean_code)
+        return cls._adapt_autofill_payload(data, clean_code)
 
     def lookup_postcode(self, code: str) -> NIPOSTLookupResult:
         """Query official NIPOST API for a 6-digit or 11-character digital postcode with status discrimination."""
@@ -288,14 +392,29 @@ class NIPOSTClient:
                                 status_val = str(data.get("status", "")).strip().upper()
 
                                 # Strict contract: Authoritative 404 MUST explicitly echo the queried postcode
-                                echoed_code = str(data.get("postcode") or data.get("code") or "").strip().upper()
-                                if echoed_code:
-                                    norm_req = clean_code.replace("-", "").replace(" ", "")
-                                    norm_echoed = echoed_code.replace("-", "").replace(" ", "")
-                                    postcode_matches = (norm_req == norm_echoed)
-                                else:
-                                    # Missing echoed postcode reference in 404 is rejected as ambiguous route error (UNAVAILABLE)
+                                p_field = data.get("postcode")
+                                c_field = data.get("code")
+
+                                # If fields are present, validate strict string types (reject int, null, bool, list)
+                                has_invalid_type = False
+                                if p_field is not None and not isinstance(p_field, str):
+                                    has_invalid_type = True
+                                if c_field is not None and not isinstance(c_field, str):
+                                    has_invalid_type = True
+
+                                if has_invalid_type or (p_field is None and c_field is None):
                                     postcode_matches = False
+                                else:
+                                    norm_req = clean_code.replace("-", "").replace(" ", "").upper()
+                                    norm_p = p_field.replace("-", "").replace(" ", "").upper() if isinstance(p_field, str) else None
+                                    norm_c = c_field.replace("-", "").replace(" ", "").upper() if isinstance(c_field, str) else None
+
+                                    # Multiple postcode fields check: if both present, they MUST agree
+                                    if norm_p and norm_c and norm_p != norm_c:
+                                        postcode_matches = False
+                                    else:
+                                        echoed_norm = norm_p or norm_c
+                                        postcode_matches = (norm_req == echoed_norm)
 
                                 # Explicit machine-readable error code required (no prose substring heuristics)
                                 is_doc_code = (
@@ -363,6 +482,63 @@ class NIPOSTClient:
                 http_status=503,
                 error_message="The official NIPOST verification gateway is temporarily unavailable.",
             )
+
+    def validate_postcode(self, code: str) -> NIPOSTLookupResult:
+        """Query official NIPOST Validator service contract to verify directory existence."""
+        if not self.is_configured or not code:
+            return NIPOSTLookupResult(
+                status=NIPOSTLookupStatus.UNAVAILABLE,
+                error_message="NIPOST API base URL is not configured.",
+            )
+
+        clean_code = code.strip().upper()
+        path = getattr(settings, "NIPOST_VALIDATE_PATH", "/v1/validate").strip().lstrip("/")
+        url = f"{self.base_url}/{path}"
+        params = {"code": clean_code}
+
+        try:
+            with httpx.Client(timeout=self.timeout, transport=self.transport) as client:
+                resp = client.get(url, params=params, headers=self._get_headers())
+                if resp.status_code == 200:
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        return NIPOSTLookupResult(
+                            status=NIPOSTLookupStatus.INVALID_RESPONSE,
+                            http_status=200,
+                            error_message="NIPOST Validator returned non-JSON response.",
+                        )
+                    status_res, adapted_rec, err_msg = self._adapt_validator_payload(data, clean_code)
+                    return NIPOSTLookupResult(
+                        status=status_res,
+                        http_status=200,
+                        data=adapted_rec,
+                        error_message=err_msg,
+                    )
+                elif resp.status_code == 404:
+                    return NIPOSTLookupResult(
+                        status=NIPOSTLookupStatus.UNAVAILABLE,
+                        http_status=404,
+                        error_message="NIPOST Validator endpoint not found (HTTP 404).",
+                    )
+                elif resp.status_code in (400, 422):
+                    return NIPOSTLookupResult(
+                        status=NIPOSTLookupStatus.INVALID_INPUT,
+                        http_status=resp.status_code,
+                        error_message=f"NIPOST Validator rejected postcode '{clean_code}'.",
+                    )
+                else:
+                    return NIPOSTLookupResult(
+                        status=NIPOSTLookupStatus.UNAVAILABLE,
+                        http_status=resp.status_code,
+                        error_message=f"NIPOST Validator error HTTP {resp.status_code}.",
+                    )
+        except Exception as exc:
+            return NIPOSTLookupResult(
+                status=NIPOSTLookupStatus.UNAVAILABLE,
+                error_message=f"NIPOST Validator connection failed: {type(exc).__name__}.",
+            )
+
 
     def validate_address(
         self,

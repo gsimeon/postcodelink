@@ -350,9 +350,10 @@ def test_production_config_rejects_example_and_template_secrets():
     """Verify that Settings validator strictly rejects example and template secrets in production mode."""
     from backend.app.config import Settings
     import os
+    import secrets
 
-    valid_rand_secret = "a" * 32 + "x1y2z3_valid_prod_key"
-    valid_rand_outbox = "b" * 32 + "m1n2o3_valid_prod_outbox"
+    valid_rand_secret = secrets.token_urlsafe(32)
+    valid_rand_outbox = secrets.token_urlsafe(32)
 
     base_prod_env = {
         "ENVIRONMENT": "production",
@@ -389,7 +390,7 @@ def test_production_config_rejects_example_and_template_secrets():
         with pytest.raises(ValueError, match="Fatal Security Error"):
             Settings()
 
-    # 4. Valid random secrets are accepted
+    # 4. Valid authentic random secrets are accepted
     with patch.dict(os.environ, {
         **base_prod_env,
         "SECRET_KEY": valid_rand_secret,
@@ -397,5 +398,210 @@ def test_production_config_rejects_example_and_template_secrets():
     }):
         prod_settings = Settings()
         assert prod_settings.SECRET_KEY == valid_rand_secret
+
+
+def test_production_config_rejects_weak_entropy_and_repetitive_secrets():
+    """Verify that production config strictly rejects low entropy, character stuffing, and simple sequences."""
+    from backend.app.config import Settings
+    import os
+    import secrets
+
+    valid_outbox = secrets.token_urlsafe(32)
+    base_prod_env = {
+        "ENVIRONMENT": "production",
+        "SMS_PROVIDER": "termii",
+        "TERMII_API_KEY": "test_termii_key_123",
+        "OUTBOX_WORKER_ENABLED": "true",
+        "REDIS_URL": "redis://127.0.0.1:6379/0",
+        "OUTBOX_ENCRYPTION_KEY": valid_outbox,
+    }
+
+    # Case A: Repetitive character stuffing ('a' * 32 + suffix)
+    with patch.dict(os.environ, {**base_prod_env, "SECRET_KEY": "a" * 32 + "x1y2z3_valid_prod_key"}):
+        with pytest.raises(ValueError, match="insufficient character variety|repetitive character runs"):
+            Settings()
+
+    # Case B: Predictable numeric sequence
+    with patch.dict(os.environ, {**base_prod_env, "SECRET_KEY": "12345678901234567890123456789012"}):
+        with pytest.raises(ValueError, match="predictable sequential character sequences|insufficient character diversity"):
+            Settings()
+
+    # Case C: Predictable alphabetical sequence
+    with patch.dict(os.environ, {**base_prod_env, "SECRET_KEY": "abcdefghijklmnopqrstuvwxyz012345"}):
+        with pytest.raises(ValueError, match="predictable sequential character sequences"):
+            Settings()
+
+    # Case D: Repeated word stuffing
+    with patch.dict(os.environ, {**base_prod_env, "SECRET_KEY": "wordwordwordwordwordwordwordword"}):
+        with pytest.raises(ValueError, match="insufficient character diversity|insufficient character variety"):
+            Settings()
+
+    # Case E: Identical keys (cryptographic domain separation failure)
+    valid_key = secrets.token_urlsafe(32)
+    with patch.dict(os.environ, {**base_prod_env, "SECRET_KEY": valid_key, "OUTBOX_ENCRYPTION_KEY": valid_key}):
+        with pytest.raises(ValueError, match="OUTBOX_ENCRYPTION_KEY must be distinct from SECRET_KEY"):
+            Settings()
+
+    # Case F: Cryptographically strong token_hex and token_urlsafe pass
+    sec_hex = secrets.token_hex(32)
+    out_url = secrets.token_urlsafe(32)
+    with patch.dict(os.environ, {**base_prod_env, "SECRET_KEY": sec_hex, "OUTBOX_ENCRYPTION_KEY": out_url}):
+        s = Settings()
+        assert s.SECRET_KEY == sec_hex
+        assert s.OUTBOX_ENCRYPTION_KEY == out_url
+
+
+def test_digital_postcode_five_component_structure_validation():
+    """Verify validation of 5 canonical components in Nigerian National Digital Postcodes: SS-LL-DDD-AA-BB."""
+    # 1. Canonical separated format: SS-LL-DDD-AA-BB
+    valid_canonical = [
+        "FC-02-A09-DB-09",
+        "LA-01-B12-EF-34",
+        "KN-10-C01-01-99",
+        "OG-05-D88-XY-12",
+        "RV-03-E45-AB-67",
+    ]
+    for code in valid_canonical:
+        components = NIPOSTClient.parse_digital_postcode_components(code)
+        assert components is not None, f"Expected {code} to parse successfully"
+        assert len(components["state"]) == 2 and components["state"].isalpha()
+        assert len(components["lga"]) == 2
+        assert len(components["district"]) == 3
+        assert len(components["area"]) == 2
+        assert len(components["building"]) == 2
+        assert NIPOSTClient.is_well_formed_postcode(code) is True
+
+    # 2. Normalized unseparated format: SSLLDDDAABB (11 chars)
+    valid_normalized = [
+        "FC02A09DB09",
+        "LA01B12EF34",
+        "KN10C010199",
+    ]
+    for code in valid_normalized:
+        components = NIPOSTClient.parse_digital_postcode_components(code)
+        assert components is not None, f"Expected {code} to parse successfully"
+        assert NIPOSTClient.is_well_formed_postcode(code) is True
+
+    # 3. Malformed separator placements & component errors must be rejected
+    malformed_digital_codes = [
+        "FC-02-A09DB09",        # Missing last two separators
+        "FC--02-A09-DB-09",      # Double hyphen
+        "FC-02-A09-DB-09-",      # Trailing hyphen
+        "-FC-02-A09-DB-09",      # Leading hyphen
+        "LA-012-B1-EF-34",       # Component lengths swapped (3 for LGA, 2 for District)
+        "01-02-A09-DB-09",       # Numeric state code (must be 2 letters)
+        "FC-02-A09-DB-009",      # Building component too long (3 chars)
+        "FC-2-A09-DB-09",        # LGA component too short (1 char)
+        "12-ABC",                # Generic malformed
+        "INVALID_LEN_999999999", # Too long
+    ]
+    for bad_code in malformed_digital_codes:
+        assert NIPOSTClient.parse_digital_postcode_components(bad_code) is None, f"Expected {bad_code} to fail parsing"
+        # Note: legacy codes are numeric 6 digits; bad_code should not be well-formed unless 6 digits
+        assert NIPOSTClient.is_well_formed_postcode(bad_code) is False, f"Expected {bad_code} to be rejected"
+
+
+def test_nipost_404_comprehensive_contract_scenarios():
+    """Verify all 7 rigorous contract scenarios for HTTP 404 responses from upstream NIPOST gateway."""
+    import httpx
+    from backend.app.services.nipost_client import NIPOSTLookupStatus
+
+    # Scenario 1: Postcode returned with different case -> Normalize and compare -> NOT_FOUND
+    c1 = NIPOSTClient(base_url="https://api.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"error_code": "POSTCODE_NOT_FOUND", "postcode": "la-01-b12-ef-34"})
+    ))
+    assert c1.lookup_postcode("LA-01-B12-EF-34").status == NIPOSTLookupStatus.NOT_FOUND
+
+    # Scenario 2: Postcode returned with standard separators vs unseparated query -> Normalize and compare -> NOT_FOUND
+    c2 = NIPOSTClient(base_url="https://api.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"error_code": "POSTCODE_NOT_FOUND", "postcode": "LA-01-B12-EF-34"})
+    ))
+    assert c2.lookup_postcode("LA01B12EF34").status == NIPOSTLookupStatus.NOT_FOUND
+
+    # Scenario 3: Multiple postcode fields disagree -> UNAVAILABLE
+    c3 = NIPOSTClient(base_url="https://api.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={
+            "error_code": "POSTCODE_NOT_FOUND",
+            "postcode": "100001",
+            "code": "999999",  # Conflicting codes!
+        })
+    ))
+    assert c3.lookup_postcode("100001").status == NIPOSTLookupStatus.UNAVAILABLE
+
+    # Scenario 4: Echoed postcode is null -> UNAVAILABLE
+    c4 = NIPOSTClient(base_url="https://api.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"error_code": "POSTCODE_NOT_FOUND", "postcode": None})
+    ))
+    assert c4.lookup_postcode("100001").status == NIPOSTLookupStatus.UNAVAILABLE
+
+    # Scenario 5: Echoed postcode has wrong type (int or list) -> UNAVAILABLE
+    c5a = NIPOSTClient(base_url="https://api.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"error_code": "POSTCODE_NOT_FOUND", "postcode": 100001})
+    ))
+    assert c5a.lookup_postcode("100001").status == NIPOSTLookupStatus.UNAVAILABLE
+
+    c5b = NIPOSTClient(base_url="https://api.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"error_code": "POSTCODE_NOT_FOUND", "postcode": ["100001"]})
+    ))
+    assert c5b.lookup_postcode("100001").status == NIPOSTLookupStatus.UNAVAILABLE
+
+    # Scenario 6: Error code is unknown -> UNAVAILABLE
+    c6 = NIPOSTClient(base_url="https://api.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"error_code": "UNKNOWN_CUSTOM_ERROR", "postcode": "100001"})
+    ))
+    assert c6.lookup_postcode("100001").status == NIPOSTLookupStatus.UNAVAILABLE
+
+    # Scenario 7: Response contains nested error object (undocumented schema) -> UNAVAILABLE
+    c7 = NIPOSTClient(base_url="https://api.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"error": {"code": "POSTCODE_NOT_FOUND", "postcode": "100001"}})
+    ))
+    assert c7.lookup_postcode("100001").status == NIPOSTLookupStatus.UNAVAILABLE
+
+
+def test_nipost_separate_validator_and_autofill_adapters():
+    """Verify separate contract adapters for NIPOST Validator (existence) and Autofill (address retrieval)."""
+    import httpx
+    from backend.app.services.nipost_client import NIPOSTLookupStatus
+
+    # 1. Validator Contract: positive existence
+    val_status, val_data, _ = NIPOSTClient._adapt_validator_payload({"valid": True}, "100001")
+    assert val_status == NIPOSTLookupStatus.FOUND
+    assert val_data["valid"] is True
+    assert val_data["service"] == "validator"
+
+    # 2. Validator Contract: absent postcode on well-formed code -> NOT_FOUND
+    val_nf_status, _, _ = NIPOSTClient._adapt_validator_payload({"valid": False}, "100001")
+    assert val_nf_status == NIPOSTLookupStatus.NOT_FOUND
+
+    # 3. Validator Contract: malformed code -> INVALID_INPUT
+    val_inv_status, _, _ = NIPOSTClient._adapt_validator_payload({"valid": False}, "12-ABC")
+    assert val_inv_status == NIPOSTLookupStatus.INVALID_INPUT
+
+    # 4. Autofill Contract: positive address retrieval
+    autofill_payload = {
+        "code": "100001",
+        "area": "Lagos Island",
+        "state": "Lagos",
+        "lga": "Lagos Island",
+        "lat": 6.45,
+        "lng": 3.40,
+    }
+    af_status, af_data, _ = NIPOSTClient._adapt_autofill_payload(autofill_payload, "100001")
+    assert af_status == NIPOSTLookupStatus.FOUND
+    assert af_data["area"] == "Lagos Island"
+    assert af_data["state"] == "Lagos"
+
+    # 5. Autofill Contract: absent record via empty matches list -> NOT_FOUND
+    af_empty_status, _, _ = NIPOSTClient._adapt_autofill_payload({"matches": []}, "100001")
+    assert af_empty_status == NIPOSTLookupStatus.NOT_FOUND
+
+    # 6. Test client validate_postcode() method
+    c_val = NIPOSTClient(base_url="https://api.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json={"valid": True, "code": "100001"})
+    ))
+    res = c_val.validate_postcode("100001")
+    assert res.status == NIPOSTLookupStatus.FOUND
+    assert res.data["valid"] is True
+
 
 
