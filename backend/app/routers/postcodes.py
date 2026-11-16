@@ -123,6 +123,14 @@ def execute_postcode_lookup(
                 upstream_error=err_msg,
             )
         else:
+            # Invalid caller input is not an upstream outage and must not fall back
+            # to local reference data or be reported as a missing postcode.
+            if res.status == NIPOSTLookupStatus.INVALID_INPUT:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=res.error_message or "NIPOST rejected the postcode input.",
+                )
+
             # Upstream error: UNAUTHORIZED, UNAVAILABLE, or INVALID_RESPONSE
             err_msg = res.error_message or getattr(res, "error", None)
             upstream_status = res.status.value
