@@ -18,6 +18,7 @@ logger = logging.getLogger("nipost_client")
 class NIPOSTLookupStatus(str, Enum):
     FOUND = "FOUND"
     NOT_FOUND = "NOT_FOUND"
+    INVALID_INPUT = "INVALID_INPUT"
     UNAVAILABLE = "UNAVAILABLE"
     UNAUTHORIZED = "UNAUTHORIZED"
     INVALID_RESPONSE = "INVALID_RESPONSE"
@@ -98,9 +99,9 @@ class NIPOSTClient:
 
         # Check explicit negative validity
         status_value = str(data.get("status", "")).strip().upper()
-        if status_value == "INVALID":
-            return NIPOSTLookupStatus.INVALID_RESPONSE, data, "NIPOST reported an invalid postcode response; non-existence was not confirmed."
-        if data.get("valid") is False or status_value == "NOT_FOUND" or data.get("found") is False:
+        if status_value == "INVALID" or data.get("valid") is False:
+            return NIPOSTLookupStatus.INVALID_INPUT, data, "NIPOST rejected the postcode input; non-existence was not confirmed."
+        if status_value == "NOT_FOUND" or data.get("found") is False:
             return NIPOSTLookupStatus.NOT_FOUND, data, "NIPOST explicitly reported that the postcode was not found."
 
         # Extract record container
