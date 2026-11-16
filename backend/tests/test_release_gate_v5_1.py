@@ -2,7 +2,7 @@
 
 Verifies:
 1. Real notification provider dispatch from outbox worker (Termii & Twilio HTTP calls).
-2. Zero-knowledge PIN hash rotation on worker dispatch.
+2. Cryptographic PIN hash rotation on worker dispatch.
 3. Outbox worker expired lease recovery.
 4. Digital postcode strict verification vs format recognition (NIPOST building-level directory).
 5. Canonical digital postcode format normalization, case tolerance, and resolution levels.
@@ -198,9 +198,9 @@ def test_outbox_worker_real_provider_twilio_dispatch():
 
 
 # ==============================================================================
-# 2. Zero-Knowledge PIN Hash Rotation on Outbox Worker Dispatch
+# 2. Cryptographic PIN Hash Rotation on Outbox Worker Dispatch
 # ==============================================================================
-def test_outbox_worker_zero_knowledge_pin_rotation_on_dispatch():
+def test_outbox_worker_cryptographic_pin_rotation_on_dispatch():
     """Verify that worker dispatch generates a fresh PIN and securely updates delivery.otp_hash without persisting plaintext."""
     db = SessionLocal()
     try:

@@ -1,6 +1,6 @@
 """FastAPI Authentication and Role-Based Authorization Dependencies."""
 from typing import List, Optional
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 import jwt
@@ -21,7 +21,7 @@ def get_current_user(
     if not credentials or not credentials.credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required. Please provide a valid Bearer token.",
+            detail="Authentication required. Please provide a valid Bearer token or 'x-api-key' header.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -69,4 +69,37 @@ def require_roles(allowed_roles: List[AppRole]):
             )
         return current_user
     return role_checker
+
+
+def get_current_actor(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_bearer),
+    db: Session = Depends(get_db),
+) -> Profile:
+    """Unified actor dependency: authenticates via 'x-api-key' or Bearer JWT token."""
+    x_api_key = request.headers.get("x-api-key")
+    if x_api_key:
+        from backend.app.routers.api_keys import get_api_key_merchant
+        return get_api_key_merchant(x_api_key=x_api_key, db=db)
+    return get_current_user(credentials=credentials, db=db)
+
+
+def get_authenticated_merchant_or_api_key(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_bearer),
+    db: Session = Depends(get_db),
+) -> Profile:
+    """Unified merchant dependency: accepts 'x-api-key' (metered) or merchant/admin Bearer JWT.
+    
+    Used by integration endpoints (deliveries, postcode cleansing, analytics) to authenticate
+    external e-commerce platforms and automated logistics software with atomic monthly quota tracking.
+    """
+    actor = get_current_actor(request=request, credentials=credentials, db=db)
+    if actor.role not in [AppRole.MERCHANT, AppRole.ADMIN]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access forbidden: User with role '{actor.role.value}' cannot perform merchant operations.",
+        )
+    return actor
+
 
