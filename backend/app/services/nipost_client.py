@@ -6,6 +6,7 @@ Provides resilient integration with official NIPOST national postcode endpoints:
 - Resilient fallback to local reference dataset on API outage or timeout
 """
 import logging
+import re
 from enum import Enum
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Tuple
@@ -90,34 +91,51 @@ class NIPOSTClient:
         return headers
 
     @staticmethod
-    def _adapt_nipost_payload(data: Any, clean_code: str) -> Tuple[NIPOSTLookupStatus, Optional[Dict[str, Any]], Optional[str]]:
+    def is_well_formed_postcode(code: str) -> bool:
+        """Validate whether a Nigerian postcode string complies with national syntax standards:
+        1. Legacy 6-digit numeric postal code (e.g. '100001', '900001').
+        2. Official 11-character national digital postcode standard (e.g. 'FC-02-A09-DB-09' or 'LA-01-B12-EF-34').
+        """
+        if not code or not isinstance(code, str):
+            return False
+        clean = code.strip().upper()
+        # 1. Legacy 6-digit numeric code
+        if re.match(r"^\d{6}$", clean):
+            return True
+        # 2. National digital postcode (11-character standard with or without standard hyphens)
+        clean_normalized = clean.replace("-", "").replace(" ", "")
+        if len(clean_normalized) == 11 and re.match(r"^[A-Z]{2}[0-9A-Z]{9}$", clean_normalized):
+            return True
+        return False
+
+    @classmethod
+    def _adapt_nipost_payload(cls, data: Any, clean_code: str) -> Tuple[NIPOSTLookupStatus, Optional[Dict[str, Any]], Optional[str]]:
         """Adapt diverse official NIPOST response schemas into standardized PostcodeLink dictionary.
         
-        Supports:
-        1. Official NIPOST developer lookup schema (/v1/lookup):
-           {"postcode": "...", "valid": true, "administrative_address": {"state": "...", "lga": "...", "district": "..."}, "recent_house_address": "..."}
-        2. PostcodeLink direct gateway schema:
-           {"code": "...", "area": "...", "state": "...", "lga": "...", "lat": ..., "lng": ...}
-        3. Match array schema:
-           {"matches": [{"code": "...", "area": "...", "state": "..."}]}
-        4. Official invalid/not found response schema:
-           {"valid": false, "postcode": "...", "message": "..."} or {"status": "NOT_FOUND"} or {"matches": []}
+        Enforces a strict decision sequence:
+        1. Validate submitted postcode syntax. If malformed, classify as INVALID_INPUT regardless of upstream payload.
+        2. Detect explicit provider validation rejections (status/error_code in INVALID_INPUT/BAD_REQUEST/VALIDATION_ERROR).
+        3. For well-formed inputs, interpret documented negative verification responses (valid: false, found: false, status: NOT_FOUND, matches: []) as NOT_FOUND.
+        4. Extract and validate positive record (code match, mandatory fields).
+        5. Ambiguous or undocumented schemas return INVALID_RESPONSE.
         """
         if not isinstance(data, dict):
             return NIPOSTLookupStatus.INVALID_RESPONSE, None, "NIPOST API returned non-dict JSON response."
 
-        # Check explicit machine-readable status/error codes
         status_str = str(data.get("status", "")).strip().upper()
         error_code = str(data.get("error_code") or data.get("error") or data.get("code") or "").strip().upper()
 
-        # 1. Explicit machine-readable invalid input classification (malformed syntax/format)
-        if (
+        # Step 1: Input Syntax Validation
+        is_syntax_valid = cls.is_well_formed_postcode(clean_code)
+        is_explicit_malformed = (
             status_str in ("INVALID_INPUT", "INVALID_FORMAT", "BAD_REQUEST", "MALFORMED_CODE", "INVALID")
             or error_code in ("INVALID_INPUT", "INVALID_FORMAT", "INVALID_CODE", "VALIDATION_ERROR", "BAD_REQUEST")
-        ):
+        )
+
+        if not is_syntax_valid or is_explicit_malformed:
             return NIPOSTLookupStatus.INVALID_INPUT, data, f"Postcode '{clean_code}' has invalid format or rejected syntax."
 
-        # 2. Authoritative non-existence check: well-formed query that was checked by the Validator and absent
+        # Step 2: Authoritative Directory Non-Existence (well-formed query)
         if (
             data.get("valid") is False
             or status_str in ("NOT_FOUND", "POSTCODE_NOT_FOUND")
@@ -269,13 +287,15 @@ class NIPOSTClient:
                                 err_code = str(data.get("error_code") or data.get("error") or data.get("code") or "").strip().upper()
                                 status_val = str(data.get("status", "")).strip().upper()
 
-                                # Validate echoed postcode if present in payload (prevents accepting responses for different postcodes)
+                                # Strict contract: Authoritative 404 MUST explicitly echo the queried postcode
                                 echoed_code = str(data.get("postcode") or data.get("code") or "").strip().upper()
-                                postcode_matches = True
                                 if echoed_code:
                                     norm_req = clean_code.replace("-", "").replace(" ", "")
                                     norm_echoed = echoed_code.replace("-", "").replace(" ", "")
                                     postcode_matches = (norm_req == norm_echoed)
+                                else:
+                                    # Missing echoed postcode reference in 404 is rejected as ambiguous route error (UNAVAILABLE)
+                                    postcode_matches = False
 
                                 # Explicit machine-readable error code required (no prose substring heuristics)
                                 is_doc_code = (

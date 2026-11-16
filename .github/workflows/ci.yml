@@ -99,8 +99,8 @@ jobs:
           node-version: 22
           cache: "npm"
 
-      - name: Install NPM Dependencies
-        run: npm install
+      - name: Install NPM Dependencies (Reproducible CI)
+        run: npm ci
 
       - name: Run Frontend State Machine & Security Tests
         run: npm test

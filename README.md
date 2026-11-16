@@ -411,7 +411,8 @@ Interactive OpenAPI documentation is live at **`http://127.0.0.1:8000/docs`** an
 
 1. Install dependencies:
    ```bash
-   npm install
+   npm ci
+   # Or: npm install
    ```
 
 2. Setup environment variables:
@@ -442,12 +443,12 @@ Interactive OpenAPI documentation is live at **`http://127.0.0.1:8000/docs`** an
    # Run Alembic migrations
    python -m alembic upgrade head
    
-   # Seed official Nigerian postcodes and initial profiles
+   # Seed local reference demonstration postcodes and initial operational profiles
    npm run backend:seed
    # Or: backend/venv/Scripts/python -m backend.app.seed
    ```
 
-3. Run FastAPI automated security & API test suite (150/150 tests passing across PostgreSQL & SQLite):
+3. Run FastAPI automated security & API test suite (184/184 tests passing across PostgreSQL & SQLite):
    ```bash
    npm run backend:test
    # Or: backend/venv/Scripts/python -m pytest backend/tests -v

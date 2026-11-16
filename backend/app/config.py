@@ -106,9 +106,25 @@ class Settings(BaseSettings):
     def validate_production_security(self):
         """Reject startup if running in production with weak secrets, simulated provider, or insecure defaults."""
         if self.ENVIRONMENT == "production":
-            raw_secret = self.SECRET_KEY
-            if not raw_secret or len(raw_secret) < 32 or raw_secret.startswith("postcodelink_dev"):
-                raise ValueError("Fatal Security Error: In production, SECRET_KEY must be set to a strong secret (at least 32 characters).")
+            raw_secret = (self.SECRET_KEY or "").strip()
+            disallowed_patterns = [
+                "postcodelink_dev",
+                "postcodelink_prod",
+                "postcodelink_production",
+                "postcodelink_ci",
+                "replace_with_",
+                "generate_secure",
+                "your_secret_key",
+                "super_secure",
+                "example",
+                "changeme",
+                "secret123",
+            ]
+            if not raw_secret or len(raw_secret) < 32 or any(p in raw_secret.lower() for p in disallowed_patterns):
+                raise ValueError(
+                    "Fatal Security Error: In production, SECRET_KEY must be set to an authentic, cryptographically strong secret (at least 32 characters). "
+                    "Repository template defaults, example values, and predictable prefixes are strictly prohibited."
+                )
 
             # Process role validation
             role = (self.PROCESS_ROLE or "").strip().lower()
@@ -133,9 +149,12 @@ class Settings(BaseSettings):
                 raise ValueError("Fatal Production Configuration Error: OUTBOX_WORKER_ENABLED must be true in production to ensure durable delivery notification dispatch.")
 
             # Dedicated outbox encryption key validation
-            raw_outbox_key = self.OUTBOX_ENCRYPTION_KEY
-            if not raw_outbox_key or len(raw_outbox_key) < 32 or raw_outbox_key.startswith("postcodelink_dev"):
-                raise ValueError("Fatal Security Error: In production, OUTBOX_ENCRYPTION_KEY must be set to a dedicated strong secret (at least 32 characters).")
+            raw_outbox_key = (self.OUTBOX_ENCRYPTION_KEY or "").strip()
+            if not raw_outbox_key or len(raw_outbox_key) < 32 or any(p in raw_outbox_key.lower() for p in disallowed_patterns):
+                raise ValueError(
+                    "Fatal Security Error: In production, OUTBOX_ENCRYPTION_KEY must be set to a dedicated, cryptographically strong secret (at least 32 characters). "
+                    "Repository template defaults, example values, and predictable prefixes are strictly prohibited."
+                )
 
             if raw_outbox_key == raw_secret:
                 raise ValueError("Fatal Security Error: OUTBOX_ENCRYPTION_KEY must be distinct from SECRET_KEY to ensure cryptographic domain separation.")

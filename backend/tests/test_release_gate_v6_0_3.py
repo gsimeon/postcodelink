@@ -213,8 +213,8 @@ def test_explicit_nipost_postcode_not_found_404_is_not_found():
     response = MagicMock()
     response.status_code = 404
     response.headers = {"content-type": "application/json"}
-    response.json.return_value = {"status": "NOT_FOUND"}
-    response.text = '{"status":"NOT_FOUND"}'
+    response.json.return_value = {"status": "NOT_FOUND", "postcode": "100001"}
+    response.text = '{"status":"NOT_FOUND","postcode":"100001"}'
 
     with patch("httpx.Client.get", return_value=response):
         result = client.lookup_postcode("100001")
@@ -295,4 +295,107 @@ def test_nipost_404_strict_machine_readable_discrimination_all_six_scenarios():
     ))
     # Requested 100001, but response echoed 999999 -> rejected as UNAVAILABLE
     assert c6.lookup_postcode("100001").status == NIPOSTLookupStatus.UNAVAILABLE
+
+
+def test_nipost_404_echoed_postcode_matching_missing_and_mismatched():
+    """Verify exact behavior for matching, missing, and mismatched echoed postcodes in 404 responses."""
+    import httpx
+    from backend.app.services.nipost_client import NIPOSTLookupStatus
+
+    # Case A: Matching echoed postcode -> NOT_FOUND
+    c_match = NIPOSTClient(base_url="https://api.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"status": "NOT_FOUND", "postcode": "100001"})
+    ))
+    assert c_match.lookup_postcode("100001").status == NIPOSTLookupStatus.NOT_FOUND
+
+    # Case B: Missing echoed postcode -> UNAVAILABLE (cannot verify negative result is for queried postcode)
+    c_missing = NIPOSTClient(base_url="https://api.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"status": "NOT_FOUND"})
+    ))
+    assert c_missing.lookup_postcode("100001").status == NIPOSTLookupStatus.UNAVAILABLE
+
+    # Case C: Mismatched echoed postcode -> UNAVAILABLE
+    c_mismatch = NIPOSTClient(base_url="https://api.test", transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"status": "NOT_FOUND", "postcode": "999999"})
+    ))
+    assert c_mismatch.lookup_postcode("100001").status == NIPOSTLookupStatus.UNAVAILABLE
+
+
+def test_nipost_valid_false_distinguishes_malformed_from_absent_input():
+    """Verify decision sequence: malformed input returning valid:false is INVALID_INPUT; well-formed input returning valid:false is NOT_FOUND."""
+    from backend.app.services.nipost_client import NIPOSTLookupStatus
+
+    # 1. Malformed input (syntax invalid) returning 200 {"valid": False}
+    # Must NOT be classified as NOT_FOUND
+    malformed_inputs = ["12-ABC", "INVALID_LEN_999999999", "12345", "xyz!@#", "1234567"]
+    for bad_code in malformed_inputs:
+        status, _, _ = NIPOSTClient._adapt_nipost_payload({"valid": False}, bad_code)
+        assert status == NIPOSTLookupStatus.INVALID_INPUT, f"Expected INVALID_INPUT for bad code {bad_code}, got {status}"
+
+    # 2. Well-formed input returning 200 {"valid": False} -> NOT_FOUND
+    well_formed_codes = ["100001", "900001", "FC-02-A09-DB-09", "LA-01-B12-EF-34"]
+    for good_code in well_formed_codes:
+        status, _, _ = NIPOSTClient._adapt_nipost_payload({"valid": False}, good_code)
+        assert status == NIPOSTLookupStatus.NOT_FOUND, f"Expected NOT_FOUND for well-formed absent code {good_code}, got {status}"
+
+    # 3. Ambiguous non-dict or unrecognised payload -> INVALID_RESPONSE
+    status_str, _, _ = NIPOSTClient._adapt_nipost_payload("not_a_dict", "100001")
+    assert status_str == NIPOSTLookupStatus.INVALID_RESPONSE
+
+    status_empty, _, _ = NIPOSTClient._adapt_nipost_payload({"unknown_schema": True}, "100001")
+    assert status_empty == NIPOSTLookupStatus.INVALID_RESPONSE
+
+
+def test_production_config_rejects_example_and_template_secrets():
+    """Verify that Settings validator strictly rejects example and template secrets in production mode."""
+    from backend.app.config import Settings
+    import os
+
+    valid_rand_secret = "a" * 32 + "x1y2z3_valid_prod_key"
+    valid_rand_outbox = "b" * 32 + "m1n2o3_valid_prod_outbox"
+
+    base_prod_env = {
+        "ENVIRONMENT": "production",
+        "SMS_PROVIDER": "termii",
+        "TERMII_API_KEY": "test_termii_key_123",
+        "OUTBOX_WORKER_ENABLED": "true",
+        "REDIS_URL": "redis://127.0.0.1:6379/0",
+    }
+
+    # 1. Example secret from .env.example must be rejected
+    with patch.dict(os.environ, {
+        **base_prod_env,
+        "SECRET_KEY": "postcodelink_production_secret_key_minimum_32_chars_super_secure!",
+        "OUTBOX_ENCRYPTION_KEY": valid_rand_outbox,
+    }):
+        with pytest.raises(ValueError, match="Fatal Security Error"):
+            Settings()
+
+    # 2. Example outbox key from .env.example must be rejected
+    with patch.dict(os.environ, {
+        **base_prod_env,
+        "SECRET_KEY": valid_rand_secret,
+        "OUTBOX_ENCRYPTION_KEY": "postcodelink_prod_outbox_key_minimum_32_chars_super_secure!",
+    }):
+        with pytest.raises(ValueError, match="Fatal Security Error"):
+            Settings()
+
+    # 3. Placeholder values must be rejected
+    with patch.dict(os.environ, {
+        **base_prod_env,
+        "SECRET_KEY": "REPLACE_WITH_GENERATED_SECRET_KEY_MIN_32_CHARS_DO_NOT_USE_EXAMPLE",
+        "OUTBOX_ENCRYPTION_KEY": valid_rand_outbox,
+    }):
+        with pytest.raises(ValueError, match="Fatal Security Error"):
+            Settings()
+
+    # 4. Valid random secrets are accepted
+    with patch.dict(os.environ, {
+        **base_prod_env,
+        "SECRET_KEY": valid_rand_secret,
+        "OUTBOX_ENCRYPTION_KEY": valid_rand_outbox,
+    }):
+        prod_settings = Settings()
+        assert prod_settings.SECRET_KEY == valid_rand_secret
+
 
