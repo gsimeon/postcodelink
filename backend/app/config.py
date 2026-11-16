@@ -52,24 +52,29 @@ class Settings(BaseSettings):
     NIPOST_API_BASE_URL: str = os.getenv("NIPOST_API_BASE_URL", os.getenv("NIPOST_API_URL", ""))
     NIPOST_API_URL: str = os.getenv("NIPOST_API_URL", os.getenv("NIPOST_API_BASE_URL", ""))
     NIPOST_API_KEY: str = os.getenv("NIPOST_API_KEY", "")
+    NIPOST_LOOKUP_PATH: str = os.getenv("NIPOST_LOOKUP_PATH", "/v1/lookup")
+    NIPOST_AUTH_SCHEME: str = os.getenv("NIPOST_AUTH_SCHEME", "bearer")  # "bearer", "api_key", or "none"
+    NIPOST_QUERY_PARAM: str = os.getenv("NIPOST_QUERY_PARAM", "code")  # "code", "postcode", or "both"
     NIPOST_TIMEOUT_SECONDS: float = 5.0
 
-    # Trusted Proxies for Rate Limiting & Real IP extraction
-    # Requests from IPs outside TRUSTED_PROXIES have X-Forwarded-For ignored to block spoofing
-    TRUSTED_PROXIES: List[str] = [
-        "127.0.0.1",
-        "::1",
-        "localhost",
-        "testclient",
-        "10.0.0.0/8",
-        "172.16.0.0/12",
-        "192.168.0.0/16",
-    ]
+    # Trusted Reverse Proxies for Real Client IP extraction and rate limiting.
+    # In production, default is strictly empty (direct external connections cannot spoof X-Forwarded-For).
+    # In production, reverse proxies (e.g. Cloudflare, AWS ALB, Nginx) must be explicitly configured
+    # via TRUSTED_PROXIES environment variable (comma-separated list of IP addresses or CIDR blocks).
+    # In development/test mode, only loopback addresses and testclient are permitted.
+    # Note: Broad private subnets (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) are strictly excluded by default
+    # to prevent untrusted internal containers or shared infrastructure from forging client IPs.
+    TRUSTED_PROXIES: List[str] = (
+        [p.strip() for p in os.getenv("TRUSTED_PROXIES").split(",") if p.strip()]
+        if os.getenv("TRUSTED_PROXIES") is not None
+        else (["127.0.0.1", "::1", "localhost", "testclient"] if os.getenv("ENVIRONMENT", "development") != "production" else [])
+    )
 
     # SMS & WhatsApp Out-of-band Dispatch Gateway
     SMS_PROVIDER: str = "simulated"
     TERMII_API_KEY: str = ""
     TERMII_SENDER_ID: str = "PostcodeLnk"
+    TERMII_BASE_URL: str = os.getenv("TERMII_BASE_URL", "https://api.ng.termii.com")
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_FROM_NUMBER: str = ""
@@ -78,6 +83,14 @@ class Settings(BaseSettings):
     OUTBOX_WORKER_ENABLED: bool = False
     OUTBOX_WORKER_INTERVAL_SECONDS: int = 5
     OUTBOX_LEASE_TIMEOUT_MINUTES: int = 5
+    OUTBOX_WORKER_HEARTBEAT_THRESHOLD_SECONDS: int = 120
+
+    # Redis Cache & Distributed Rate Limiting
+    REDIS_URL: Optional[str] = os.getenv("REDIS_URL", None)
+    REDIS_REQUIRED_IN_PRODUCTION: bool = True
+    RATE_LIMIT_REDIS_FAIL_CLOSED: bool = True
+    ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION: bool = os.getenv("ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION", "false").lower() in ["true", "1"]
+    PUBLIC_DEMO_RATE_LIMIT_PER_MINUTE: int = int(os.getenv("PUBLIC_DEMO_RATE_LIMIT_PER_MINUTE", "15"))
 
     @model_validator(mode="before")
     @classmethod
@@ -93,9 +106,25 @@ class Settings(BaseSettings):
     def validate_production_security(self):
         """Reject startup if running in production with weak secrets, simulated provider, or insecure defaults."""
         if self.ENVIRONMENT == "production":
-            raw_secret = self.SECRET_KEY
-            if not raw_secret or len(raw_secret) < 32 or raw_secret.startswith("postcodelink_dev"):
-                raise ValueError("Fatal Security Error: In production, SECRET_KEY must be set to a strong secret (at least 32 characters).")
+            raw_secret = (self.SECRET_KEY or "").strip()
+            disallowed_patterns = [
+                "postcodelink_dev",
+                "postcodelink_prod",
+                "postcodelink_production",
+                "postcodelink_ci",
+                "replace_with_",
+                "generate_secure",
+                "your_secret_key",
+                "super_secure",
+                "example",
+                "changeme",
+                "secret123",
+            ]
+            if not raw_secret or len(raw_secret) < 32 or any(p in raw_secret.lower() for p in disallowed_patterns):
+                raise ValueError(
+                    "Fatal Security Error: In production, SECRET_KEY must be set to an authentic, cryptographically strong secret (at least 32 characters). "
+                    "Repository template defaults, example values, and predictable prefixes are strictly prohibited."
+                )
 
             # Process role validation
             role = (self.PROCESS_ROLE or "").strip().lower()
@@ -120,12 +149,23 @@ class Settings(BaseSettings):
                 raise ValueError("Fatal Production Configuration Error: OUTBOX_WORKER_ENABLED must be true in production to ensure durable delivery notification dispatch.")
 
             # Dedicated outbox encryption key validation
-            raw_outbox_key = self.OUTBOX_ENCRYPTION_KEY
-            if not raw_outbox_key or len(raw_outbox_key) < 32 or raw_outbox_key.startswith("postcodelink_dev"):
-                raise ValueError("Fatal Security Error: In production, OUTBOX_ENCRYPTION_KEY must be set to a dedicated strong secret (at least 32 characters).")
+            raw_outbox_key = (self.OUTBOX_ENCRYPTION_KEY or "").strip()
+            if not raw_outbox_key or len(raw_outbox_key) < 32 or any(p in raw_outbox_key.lower() for p in disallowed_patterns):
+                raise ValueError(
+                    "Fatal Security Error: In production, OUTBOX_ENCRYPTION_KEY must be set to a dedicated, cryptographically strong secret (at least 32 characters). "
+                    "Repository template defaults, example values, and predictable prefixes are strictly prohibited."
+                )
 
             if raw_outbox_key == raw_secret:
                 raise ValueError("Fatal Security Error: OUTBOX_ENCRYPTION_KEY must be distinct from SECRET_KEY to ensure cryptographic domain separation.")
+
+            # Distributed rate limiting requires Redis by default in production
+            if self.REDIS_REQUIRED_IN_PRODUCTION and not self.REDIS_URL and not self.ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION:
+                raise ValueError(
+                    "Fatal Production Configuration Error: REDIS_URL must be configured in production "
+                    "for distributed rate limiting. Set ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION=true only "
+                    "if explicitly running an isolated single-instance development or staging deployment."
+                )
 
             # Demo account seeding is strictly forbidden in production
             if self.SEED_DEMO_ACCOUNTS:

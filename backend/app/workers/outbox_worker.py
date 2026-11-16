@@ -46,6 +46,18 @@ async def run_outbox_worker_loop(
                 break
             await asyncio.sleep(1)
 
+    # Clean termination: record stopped status in persistent worker_heartbeats
+    def _record_shutdown():
+        db = SessionLocal()
+        try:
+            from backend.app.services.delivery_service import record_worker_shutdown
+            record_worker_shutdown(db, worker_id=worker_id, reason="graceful_shutdown")
+        except Exception as e:
+            logger.warning(f"Error during worker shutdown recording: {e}")
+        finally:
+            db.close()
+
+    await asyncio.to_thread(_record_shutdown)
     logger.info("Notification Outbox Worker loop stopped cleanly.")
 
 
@@ -72,7 +84,11 @@ def main():
         logger.info(f"Received termination signal ({sig}). Stopping outbox worker loop...")
         stop_event.set()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    signals = [signal.SIGINT, signal.SIGTERM]
+    if hasattr(signal, "SIGBREAK"):
+        signals.append(signal.SIGBREAK)
+
+    for sig in signals:
         try:
             signal.signal(sig, _handle_signal)
         except Exception:

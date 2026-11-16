@@ -13,7 +13,7 @@ from backend.app.schemas.operator import (
     OperatorResponse,
     OperatorDirectoryResponse,
 )
-from backend.app.core.auth_deps import get_current_user, require_roles
+from backend.app.core.auth_deps import get_current_actor, get_current_user, require_roles
 
 router = APIRouter(prefix="/operators", tags=["operators"])
 
@@ -21,7 +21,8 @@ router = APIRouter(prefix="/operators", tags=["operators"])
 @router.get("/", response_model=Union[List[OperatorResponse], List[OperatorDirectoryResponse]])
 def api_list_operators(
     available_only: bool = Query(False),
-    current_user: Profile = Depends(get_current_user),
+    service_area: Optional[str] = Query(None),
+    current_user: Profile = Depends(get_current_actor),
     db: Session = Depends(get_db)
 ):
     """List logistics operators.
@@ -35,6 +36,13 @@ def api_list_operators(
 
     operators = query.order_by(Operator.completed_deliveries.desc()).all()
 
+    if service_area:
+        target_area = service_area.strip().lower()
+        operators = [
+            op for op in operators
+            if op.service_areas and any(target_area in (area or "").lower() for area in op.service_areas)
+        ]
+
     if current_user.role == AppRole.ADMIN:
         return operators
 
@@ -47,7 +55,7 @@ def api_list_operators(
             service_areas=op.service_areas or [],
             is_available=op.is_available,
             rating=op.rating,
-            has_capacity=(op.active_deliveries_count < 15),
+            has_capacity=(op.active_deliveries_count < (op.max_active_deliveries or 15)),
         )
         for op in operators
     ]
@@ -80,7 +88,7 @@ def api_create_operator(
 @router.get("/{operator_id}", response_model=Union[OperatorResponse, OperatorDirectoryResponse])
 def api_get_operator(
     operator_id: str,
-    current_user: Profile = Depends(get_current_user),
+    current_user: Profile = Depends(get_current_actor),
     db: Session = Depends(get_db)
 ):
     """Get single operator details. Full details for Admin or fleet owner; directory view for merchants."""
@@ -98,7 +106,7 @@ def api_get_operator(
         service_areas=op.service_areas or [],
         is_available=op.is_available,
         rating=op.rating,
-        has_capacity=(op.active_deliveries_count < 15),
+        has_capacity=(op.active_deliveries_count < (op.max_active_deliveries or 15)),
     )
 
 
