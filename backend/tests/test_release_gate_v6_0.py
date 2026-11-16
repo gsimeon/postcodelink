@@ -1090,30 +1090,64 @@ def test_migration_downgrade_restores_audit_triggers_and_upgrade_lifecycle():
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         try:
             # Insert using raw SQL because v5.9 schema does not have v6.0 columns (is_deleted, deleted_at)
-            db.execute(text(f"""
-            INSERT INTO deliveries (
-                id, tracking_token, recipient_name, recipient_phone,
-                destination_address, destination_area, destination_state,
-                postcode_input, postcode_status, package_description,
-                fee, status, otp_hash, otp_attempts, otp_max_attempts,
-                pod_verified, version, created_at, updated_at
+            db.execute(
+                text("""
+                INSERT INTO deliveries (
+                    id, tracking_token, recipient_name, recipient_phone,
+                    destination_address, destination_area, destination_state,
+                    postcode_input, postcode_status, package_description,
+                    fee, status, otp_hash, otp_attempts, otp_max_attempts,
+                    pod_verified, version, created_at, updated_at
+                )
+                VALUES (
+                    :id, :tracking_token, :recipient_name, :recipient_phone,
+                    :destination_address, :destination_area, :destination_state,
+                    :postcode_input, :postcode_status, :package_description,
+                    :fee, :status, :otp_hash, :otp_attempts, :otp_max_attempts,
+                    :pod_verified, :version, :created_at, :updated_at
+                )
+                """),
+                {
+                    "id": deliv_id,
+                    "tracking_token": tok_id,
+                    "recipient_name": "Migr Recipient",
+                    "recipient_phone": "+2348011223344",
+                    "destination_address": "55 Migr St",
+                    "destination_area": "Ikeja",
+                    "destination_state": "Lagos",
+                    "postcode_input": "100271",
+                    "postcode_status": "UNVERIFIED",
+                    "package_description": "Migr Package",
+                    "fee": 2500.0,
+                    "status": "PENDING",
+                    "otp_hash": "hash123",
+                    "otp_attempts": 0,
+                    "otp_max_attempts": 3,
+                    "pod_verified": False,
+                    "version": 1,
+                    "created_at": datetime.now(timezone.utc),
+                    "updated_at": datetime.now(timezone.utc),
+                },
             )
-            VALUES (
-                '{deliv_id}', '{tok_id}', 'Migr Recipient', '+2348011223344',
-                '55 Migr St', 'Ikeja', 'Lagos',
-                '100271', 'UNVERIFIED', 'Migr Package',
-                2500.0, 'PENDING', 'hash123', 0, 3,
-                0, 1, '{now_iso}', '{now_iso}'
+            db.execute(
+                text("""
+                INSERT INTO delivery_events (
+                    id, delivery_id, status, actor_name, actor_role, note, occurred_at
+                )
+                VALUES (
+                    :id, :delivery_id, :status, :actor_name, :actor_role, :note, :occurred_at
+                )
+                """),
+                {
+                    "id": f"evt_{deliv_id}",
+                    "delivery_id": deliv_id,
+                    "status": "PENDING",
+                    "actor_name": "Migration Tester",
+                    "actor_role": "admin",
+                    "note": "Testing v5.9 audit trigger",
+                    "occurred_at": datetime.now(timezone.utc),
+                },
             )
-            """))
-            db.execute(text(f"""
-            INSERT INTO delivery_events (
-                id, delivery_id, status, actor_name, actor_role, note, occurred_at
-            )
-            VALUES (
-                'evt_{deliv_id}', '{deliv_id}', 'PENDING', 'Migration Tester', 'admin', 'Testing v5.9 audit trigger', '{now_iso}'
-            )
-            """))
             db.commit()
 
             # Direct SQL UPDATE must still be blocked by restored v5.9 trigger
