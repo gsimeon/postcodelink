@@ -120,9 +120,23 @@ class Settings(BaseSettings):
                 "changeme",
                 "secret123",
             ]
-            if not raw_secret or len(raw_secret) < 32 or any(p in raw_secret.lower() for p in disallowed_patterns):
+            # A length check and blacklist alone accept predictable values (for example,
+            # a long run of one character). Require a generated-token-sized value and
+            # reject obvious low-diversity patterns. This is a policy guard, not an
+            # entropy estimator: production secrets must be generated with a CSPRNG.
+            def weak_secret(value: str) -> bool:
+                lowered = value.lower()
+                repeated_block = any(value == value[:size] * (len(value) // size) + value[: len(value) % size] for size in range(1, min(33, len(value) // 2 + 1)))
+                return (
+                    len(value) < 43
+                    or len(set(value)) < 16
+                    or repeated_block
+                    or any(pattern in lowered for pattern in disallowed_patterns)
+                )
+
+            if weak_secret(raw_secret):
                 raise ValueError(
-                    "Fatal Security Error: In production, SECRET_KEY must be set to an authentic, cryptographically strong secret (at least 32 characters). "
+                    "Fatal Security Error: In production, SECRET_KEY must be set to an authentic, cryptographically strong secret (at least 43 characters). "
                     "Repository template defaults, example values, and predictable prefixes are strictly prohibited."
                 )
 
@@ -150,9 +164,9 @@ class Settings(BaseSettings):
 
             # Dedicated outbox encryption key validation
             raw_outbox_key = (self.OUTBOX_ENCRYPTION_KEY or "").strip()
-            if not raw_outbox_key or len(raw_outbox_key) < 32 or any(p in raw_outbox_key.lower() for p in disallowed_patterns):
+            if weak_secret(raw_outbox_key):
                 raise ValueError(
-                    "Fatal Security Error: In production, OUTBOX_ENCRYPTION_KEY must be set to a dedicated, cryptographically strong secret (at least 32 characters). "
+                    "Fatal Security Error: In production, OUTBOX_ENCRYPTION_KEY must be set to a dedicated, cryptographically strong secret (at least 43 characters). "
                     "Repository template defaults, example values, and predictable prefixes are strictly prohibited."
                 )
 
