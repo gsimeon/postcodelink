@@ -1728,3 +1728,91 @@ def test_nipost_upstream_error_sanitization_prevents_leakage():
             assert "The official NIPOST verification gateway is temporarily unavailable." in err_detail
 
 
+# ==============================================================================
+# 18. Release Gate v6.0.2 Public IP Rate Limiter & Proxy Hardening Tests
+# ==============================================================================
+
+def test_client_ip_rate_limiter_production_fail_closed_and_recovery():
+    """Verify that check_client_ip_rate_limit enforces fail-closed HTTP 503 in production when Redis fails, allows dev/single-instance fallback, and recovers."""
+    from backend.app.core.rate_limiter import check_client_ip_rate_limit
+    from fastapi import HTTPException
+    import backend.app.core.rate_limiter as rl_mod
+
+    # 1. Production with Redis unavailable & fail-closed enabled -> HTTP 503
+    with patch.object(settings, "ENVIRONMENT", "production"):
+        with patch.object(settings, "RATE_LIMIT_REDIS_FAIL_CLOSED", True):
+            with patch.object(settings, "ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION", False):
+                with patch.object(rl_mod, "_get_redis_client", return_value=None):
+                    with pytest.raises(HTTPException) as exc_info:
+                        check_client_ip_rate_limit("198.51.100.99", limit_per_minute=10)
+                    assert exc_info.value.status_code == 503
+                    assert "temporarily unavailable" in exc_info.value.detail.lower()
+
+    # 2. Production with explicit single-instance opt-out (ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION=True) -> succeeds with in-memory fallback
+    with patch.object(settings, "ENVIRONMENT", "production"):
+        with patch.object(settings, "RATE_LIMIT_REDIS_FAIL_CLOSED", True):
+            with patch.object(settings, "ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION", True):
+                with patch.object(rl_mod, "_get_redis_client", return_value=None):
+                    check_client_ip_rate_limit("198.51.100.99", limit_per_minute=10)
+
+    # 3. Development environment with Redis unavailable -> succeeds with in-memory fallback
+    with patch.object(settings, "ENVIRONMENT", "development"):
+        with patch.object(rl_mod, "_get_redis_client", return_value=None):
+            check_client_ip_rate_limit("198.51.100.99", limit_per_minute=10)
+
+    # 4. Redis recovery: when Redis is available, shared Redis limiting resumes
+    mock_redis = MagicMock()
+    mock_redis.eval.return_value = [1, 1, 0]
+    with patch.object(settings, "ENVIRONMENT", "production"):
+        with patch.object(rl_mod, "_get_redis_client", return_value=mock_redis):
+            check_client_ip_rate_limit("198.51.100.99", limit_per_minute=10)
+            mock_redis.eval.assert_called_once()
+
+
+def test_proxy_chain_all_trusted_falls_back_to_direct_peer():
+    """Verify that when every address in X-Forwarded-For is a trusted proxy, get_trusted_client_ip falls back to direct_ip."""
+    from backend.app.core.network import get_trusted_client_ip
+    from starlette.requests import Request
+
+    trusted_proxies = ["10.0.1.50", "10.0.1.99"]
+
+    # Direct peer is a trusted proxy, and X-Forwarded-For contains only trusted proxies
+    scope_all_trusted = {
+        "type": "http",
+        "client": ("10.0.1.50", 48201),
+        "headers": [(b"x-forwarded-for", b"10.0.1.99, 10.0.1.50")],
+    }
+    req = Request(scope_all_trusted)
+    # Must NOT return 10.0.1.99; must fall back to direct peer 10.0.1.50
+    assert get_trusted_client_ip(req, trusted_proxies=trusted_proxies) == "10.0.1.50"
+
+
+def test_nipost_address_and_autofill_logging_masks_sensitive_data():
+    """Verify that address validation and autofill methods do not log customer addresses or raw exceptions when timeouts or errors occur."""
+    from backend.app.services.nipost_client import NIPOSTClient
+    import logging
+
+    client_instance = NIPOSTClient(base_url="https://nipost-test.ng", api_key="test_key", timeout=1.0)
+
+    with patch("httpx.Client.post", side_effect=Exception("Internal upstream exception details")):
+        with patch.object(logging.getLogger("nipost_client"), "warning") as mock_warn:
+            res = client_instance.validate_address("Plot 99 Sensitive Street, Victoria Island, Lagos", "Lagos", "Victoria Island")
+            assert res is None
+            mock_warn.assert_called_once()
+            log_msg = str(mock_warn.call_args[0][0])
+            assert "Plot 99" not in log_msg
+            assert "Sensitive Street" not in log_msg
+            assert "Internal upstream exception details" not in log_msg
+            assert "connection error during address validation" in log_msg.lower()
+
+    with patch("httpx.Client.get", side_effect=Exception("Internal autofill socket failure")):
+        with patch.object(logging.getLogger("nipost_client"), "warning") as mock_warn_autofill:
+            res_auto = client_instance.autofill_postcode("Victoria Island", "Lagos")
+            assert res_auto is None
+            mock_warn_autofill.assert_called_once()
+            log_msg_auto = str(mock_warn_autofill.call_args[0][0])
+            assert "Internal autofill socket failure" not in log_msg_auto
+            assert "postcode autofill query" in log_msg_auto.lower()
+
+
+

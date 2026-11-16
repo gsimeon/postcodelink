@@ -236,7 +236,20 @@ def check_client_ip_rate_limit(client_ip: str, limit_per_minute: int = 15) -> No
             logger.warning(f"[RateLimiter ALERT] Redis Lua IP rate limit operation failed: {exc}")
             _handle_redis_failure()
 
+    # Fail-closed policy enforcement in production
+    # In multi-instance production: strictly fail closed with HTTP 503 unless explicit single-instance opt-out is enabled
+    allow_in_memory = getattr(settings, "ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION", False)
+    fail_closed = getattr(settings, "RATE_LIMIT_REDIS_FAIL_CLOSED", True)
+    if settings.ENVIRONMENT == "production" and fail_closed and not allow_in_memory:
+        logger.error("[RateLimiter CRITICAL] Redis is unavailable for IP rate limiting and RATE_LIMIT_REDIS_FAIL_CLOSED is enabled. Failing closed.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Distributed rate limiter service is temporarily unavailable. Fail-closed policy in effect.",
+        )
+
     # In-memory sliding window fallback
+    if settings.ENVIRONMENT == "production":
+        logger.warning("[RateLimiter ALERT] Production API is operating on process-local in-memory rate limiter fallback for IP limiting.")
     global _LAST_CLEANUP_TIME
     with _LOCK:
         ip_key = f"ip_{client_ip}"

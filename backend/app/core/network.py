@@ -45,11 +45,5 @@ def get_trusted_client_ip(request: Request, trusted_proxies: Optional[List[str]]
                     return ip
                 except ValueError:
                     pass
-        if ips:
-            try:
-                ipaddress.ip_address(ips[0])
-                return ips[0]
-            except ValueError:
-                pass
 
     return direct_ip

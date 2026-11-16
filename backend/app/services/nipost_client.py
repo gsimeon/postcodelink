@@ -208,13 +208,13 @@ class NIPOSTClient:
                 elif resp.status_code == 404:
                     return None
                 else:
-                    logger.warning(f"NIPOST API address validation returned status {resp.status_code}: {resp.text}")
+                    logger.warning(f"NIPOST API address validation returned status {resp.status_code}.")
                     return None
         except httpx.TimeoutException:
-            logger.warning(f"NIPOST API timeout during address validation for '{address[:30]}...'. Falling back to local cleanser.")
+            logger.warning(f"NIPOST API timeout during address validation (timeout={self.timeout}s). Falling back to local cleanser.")
             return None
-        except Exception as exc:
-            logger.warning(f"NIPOST API error during address validation: {exc}.")
+        except Exception:
+            logger.warning("NIPOST API connection error during address validation. Falling back to local cleanser.")
             return None
 
     def autofill_postcode(self, area: str, state: str) -> Optional[str]:
@@ -232,8 +232,8 @@ class NIPOSTClient:
                     data = resp.json()
                     return data.get("postcode") or data.get("code")
                 return None
-        except Exception as exc:
-            logger.warning(f"NIPOST API autofill error for '{area}, {state}': {exc}")
+        except Exception:
+            logger.warning("NIPOST API connection error during postcode autofill query.")
             return None
 
 

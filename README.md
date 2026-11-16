@@ -71,13 +71,18 @@ Following the production-readiness review of Release Gate v5.9, Release Gate v6.
 
 ### 7. P2 — Trusted Proxy Topology Narrowing & Defense in Depth
 - **Zero-Trust Default Proxy List**: Removed broad private network ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) from default `TRUSTED_PROXIES`. In production, default is empty (`[]`), requiring explicit configuration of reverse proxy IPs or CIDRs via environment variables. Untrusted internal containers or shared infrastructure cannot forge client IPs.
+- **All-Trusted Proxy Chain Fallback**: When all parsed hops in `X-Forwarded-For` match configured trusted proxies, `get_trusted_client_ip()` safely falls back to the immediate peer connection IP (`direct_ip`) rather than returning an internal proxy IP.
 
-### 8. P2 — Upstream NIPOST Error Sanitization
-- **Information Leakage Prevention**: Connection timeouts, DNS failures, and socket errors caught in `NIPOSTClient` return safe public categories (`UNAVAILABLE`, `UNAUTHORIZED`, `TIMEOUT`) without leaking internal hostnames, ports, or raw exception strings into API responses. Full diagnostic details are retained strictly in server-side logs.
+### 8. P2 — Upstream NIPOST Error Sanitization & Diagnostic Log Protection
+- **Information Leakage Prevention**: Connection timeouts, DNS failures, and socket errors caught in `NIPOSTClient` return safe public categories (`UNAVAILABLE`, `UNAUTHORIZED`, `TIMEOUT`) without leaking internal hostnames, ports, or raw exception strings into API responses.
+- **Log Masking**: Address validation and autofill queries omit sensitive customer address text, response bodies, and raw exceptions from server logs, logging only status codes and operational diagnostics.
 
-### 9. P2 — Least-Privilege CI Security Permissions & Test Coverage
+### 9. P2 — Public IP Distributed Rate Limiting Production Fail-Closed Policy (v6.0.2)
+- **Production Consistency**: `check_client_ip_rate_limit()` now enforces the exact same distributed fail-closed policy as `check_api_key_rate_limit()`. If Redis is unavailable in production, public demo requests fail closed with HTTP 503, eliminating multi-instance memory fallback bypasses. Process-local in-memory fallback is permitted strictly in development or when `ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION=true` is explicitly configured.
+
+### 10. P2 — Least-Privilege CI Security Permissions & Test Coverage
 - **GitHub Actions Hardening (`.github/workflows/ci.yml`)**: Explicitly configured top-level `permissions: contents: read` adhering to the principle of least privilege.
-- **Comprehensive Dual-DB Test Suite**: 141/141 Pytest security, cryptography, and API integration tests passing (140 passed, 1 skipped) across PostgreSQL 16 and SQLite 3, plus 7/7 Node.js state-machine and OTP verification tests.
+- **Comprehensive Dual-DB Test Suite**: 144/144 Pytest security, cryptography, and API integration tests passing (143 passed, 1 skipped) across PostgreSQL 16 and SQLite 3, plus 7/7 Node.js state-machine and OTP verification tests.
 
 ---
 
