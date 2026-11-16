@@ -8,7 +8,7 @@ Provides resilient integration with official NIPOST national postcode endpoints:
 import logging
 from enum import Enum
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import httpx
 from backend.app.config import settings
 
@@ -55,12 +55,14 @@ class NIPOSTClient:
         api_key: Optional[str] = None,
         timeout: Optional[float] = None,
         transport: Optional[httpx.BaseTransport] = None,
+        lookup_path: Optional[str] = None,
     ):
         raw_url = base_url if base_url is not None else (settings.NIPOST_API_BASE_URL or settings.NIPOST_API_URL or "")
         self.base_url = raw_url.strip().rstrip("/")
         self.api_key = (api_key if api_key is not None else settings.NIPOST_API_KEY).strip()
         self.timeout = timeout or getattr(settings, "NIPOST_TIMEOUT_SECONDS", 5.0)
         self.transport = transport
+        self.lookup_path = lookup_path or getattr(settings, "NIPOST_LOOKUP_PATH", "/v1/lookup")
 
     @property
     def is_configured(self) -> bool:
@@ -77,6 +79,91 @@ class NIPOSTClient:
             headers["x-api-key"] = self.api_key
         return headers
 
+    @staticmethod
+    def _adapt_nipost_payload(data: Any, clean_code: str) -> Tuple[NIPOSTLookupStatus, Optional[Dict[str, Any]], Optional[str]]:
+        """Adapt diverse official NIPOST response schemas into standardized PostcodeLink dictionary.
+        
+        Supports:
+        1. Official NIPOST developer lookup schema (/v1/lookup):
+           {"postcode": "...", "valid": true, "administrative_address": {"state": "...", "lga": "...", "district": "..."}, "recent_house_address": "..."}
+        2. PostcodeLink direct gateway schema:
+           {"code": "...", "area": "...", "state": "...", "lga": "...", "lat": ..., "lng": ...}
+        3. Match array schema:
+           {"matches": [{"code": "...", "area": "...", "state": "..."}]}
+        4. Official invalid/not found response schema:
+           {"valid": false, "postcode": "...", "message": "..."} or {"status": "NOT_FOUND"} or {"matches": []}
+        """
+        if not isinstance(data, dict):
+            return NIPOSTLookupStatus.INVALID_RESPONSE, None, "NIPOST API returned non-dict JSON response."
+
+        # Check explicit negative validity
+        if data.get("valid") is False or str(data.get("status", "")).upper() in ("NOT_FOUND", "INVALID") or data.get("found") is False:
+            return NIPOSTLookupStatus.NOT_FOUND, data, f"Postcode '{clean_code}' is invalid or not found in official NIPOST directory."
+
+        # Extract record container
+        matches = data.get("matches")
+        if isinstance(matches, list):
+            if len(matches) == 0:
+                return NIPOSTLookupStatus.NOT_FOUND, data, f"Postcode '{clean_code}' does not exist in official directory."
+            match_record = matches[0]
+        else:
+            match_record = data
+
+        if not isinstance(match_record, dict):
+            return NIPOSTLookupStatus.INVALID_RESPONSE, None, "Response payload missing postcode record."
+
+        # Extract code (official: postcode, gateway: code)
+        ret_code = str(match_record.get("code") or match_record.get("postcode") or "").strip().upper()
+
+        # Extract state, area, lga
+        ret_state = str(match_record.get("state") or "").strip()
+        ret_area = str(match_record.get("area") or match_record.get("district") or "").strip()
+        ret_lga = str(match_record.get("lga") or "").strip()
+        building_ref = match_record.get("building_reference") or match_record.get("recent_house_address") or match_record.get("street")
+
+        # Parse nested administrative_address if state or area missing
+        admin_addr = match_record.get("administrative_address")
+        if isinstance(admin_addr, dict):
+            ret_state = ret_state or str(admin_addr.get("state") or "").strip()
+            ret_area = ret_area or str(admin_addr.get("district") or admin_addr.get("area") or "").strip()
+            ret_lga = ret_lga or str(admin_addr.get("lga") or "").strip()
+        elif isinstance(admin_addr, str) and (not ret_state or not ret_area):
+            parts = [p.strip() for p in admin_addr.split(",") if p.strip()]
+            if len(parts) >= 2:
+                ret_area = ret_area or parts[0]
+                ret_state = ret_state or parts[-1]
+                if len(parts) >= 3:
+                    ret_lga = ret_lga or parts[1]
+
+        # Mandatory fields check
+        if not ret_code or not ret_area or not ret_state:
+            return NIPOSTLookupStatus.INVALID_RESPONSE, match_record, "Response record missing mandatory fields (code/postcode, area/district, state)."
+
+        # Code match verification (normalized comparison)
+        norm_req = clean_code.replace("-", "").replace(" ", "")
+        norm_ret = ret_code.replace("-", "").replace(" ", "")
+        if norm_req != norm_ret:
+            return NIPOSTLookupStatus.INVALID_RESPONSE, match_record, f"Returned postcode '{ret_code}' does not match requested code '{clean_code}'."
+
+        dataset_ver = match_record.get("dataset_version") or data.get("dataset_version")
+        postcode_type = match_record.get("postcode_type") or ("digital_location" if len(clean_code.replace("-", "")) > 6 else "conventional_area")
+
+        adapted_record = {
+            "code": ret_code,
+            "area": ret_area,
+            "state": ret_state,
+            "lga": ret_lga or None,
+            "lat": match_record.get("lat") or match_record.get("latitude"),
+            "lng": match_record.get("lng") or match_record.get("longitude"),
+            "building_reference": str(building_ref).strip() if building_ref else None,
+            "recent_house_address": str(building_ref).strip() if building_ref else None,
+            "administrative_address": admin_addr if isinstance(admin_addr, dict) else None,
+            "dataset_version": dataset_ver,
+            "postcode_type": postcode_type,
+            "valid": True,
+        }
+        return NIPOSTLookupStatus.FOUND, adapted_record, None
+
     def lookup_postcode(self, code: str) -> NIPOSTLookupResult:
         """Query official NIPOST API for a 6-digit or 11-character digital postcode with status discrimination."""
         if not self.is_configured or not code:
@@ -86,8 +173,10 @@ class NIPOSTClient:
             )
 
         clean_code = code.strip().upper()
-        url = f"{self.base_url}/api/v1/postcodes/lookup"
-        params = {"code": clean_code}
+        path = self.lookup_path.strip().lstrip("/")
+        url = f"{self.base_url}/{path}"
+        # Provide both standard parameter keys ('code' and 'postcode') for broad upstream API gateway compatibility
+        params = {"code": clean_code, "postcode": clean_code}
 
         try:
             with httpx.Client(timeout=self.timeout, transport=self.transport) as client:
@@ -101,82 +190,96 @@ class NIPOSTClient:
                             http_status=200,
                             error_message="NIPOST API returned non-JSON response.",
                         )
-                    match_record = None
-                    if isinstance(data, dict):
-                        matches = data.get("matches")
-                        if isinstance(matches, list) and len(matches) > 0:
-                            match_record = matches[0]
-                        elif "code" in data:
-                            match_record = data
 
-                    if not match_record or not isinstance(match_record, dict):
+                    status_res, adapted_rec, err_msg = self._adapt_nipost_payload(data, clean_code)
+                    if status_res == NIPOSTLookupStatus.FOUND:
                         return NIPOSTLookupResult(
-                            status=NIPOSTLookupStatus.INVALID_RESPONSE,
+                            status=NIPOSTLookupStatus.FOUND,
+                            data=adapted_rec,
+                            http_status=200,
+                        )
+                    elif status_res == NIPOSTLookupStatus.NOT_FOUND:
+                        logger.info(f"NIPOST API: Postcode prefix '{clean_code[:3]}***' verified as not found in directory.")
+                        return NIPOSTLookupResult(
+                            status=NIPOSTLookupStatus.NOT_FOUND,
                             http_status=200,
                             data=data if isinstance(data, dict) else None,
-                            error_message="Response payload missing postcode record.",
+                            error_message=err_msg or f"Postcode '{clean_code}' does not exist in official NIPOST directory.",
                         )
-
-                    # Strict Schema Validation: must include code, area, and state
-                    ret_code = str(match_record.get("code", "")).strip().upper()
-                    ret_area = str(match_record.get("area", "")).strip()
-                    ret_state = str(match_record.get("state", "")).strip()
-
-                    if not ret_code or not ret_area or not ret_state:
+                    else:
                         return NIPOSTLookupResult(
-                            status=NIPOSTLookupStatus.INVALID_RESPONSE,
+                            status=status_res,
                             http_status=200,
-                            data=match_record,
-                            error_message="Response record missing mandatory fields (code, area, state).",
+                            data=adapted_rec or (data if isinstance(data, dict) else None),
+                            error_message=err_msg,
                         )
-
-                    # Verify returned code matches requested code (normalized comparison)
-                    norm_req = clean_code.replace("-", "").replace(" ", "")
-                    norm_ret = ret_code.replace("-", "").replace(" ", "")
-                    if norm_req != norm_ret:
-                        return NIPOSTLookupResult(
-                            status=NIPOSTLookupStatus.INVALID_RESPONSE,
-                            http_status=200,
-                            data=match_record,
-                            error_message=f"Returned postcode '{ret_code}' does not match requested code '{clean_code}'.",
-                        )
-
-                    return NIPOSTLookupResult(
-                        status=NIPOSTLookupStatus.FOUND,
-                        data=match_record,
-                        http_status=200,
-                    )
 
                 elif resp.status_code == 404:
-                    logger.info(f"NIPOST API: Postcode '{clean_code}' not found (404).")
-                    return NIPOSTLookupResult(
-                        status=NIPOSTLookupStatus.NOT_FOUND,
-                        http_status=404,
-                        error_message=f"Postcode '{clean_code}' does not exist in official NIPOST directory.",
-                    )
+                    # Critical security & routing check:
+                    # Differentiate authoritative postcode non-existence from route / endpoint 404.
+                    # Only treat as NOT_FOUND if the response body is JSON and explicitly confirms a postcode search.
+                    is_authoritative_not_found = False
+                    content_type = resp.headers.get("content-type", "").lower()
+
+                    if "application/json" in content_type or (resp.text and resp.text.strip().startswith("{")):
+                        try:
+                            data = resp.json()
+                            if isinstance(data, dict):
+                                detail = str(data.get("detail", "")).lower()
+                                message = str(data.get("message", "")).lower()
+                                error = str(data.get("error", "")).lower()
+                                status_val = str(data.get("status", "")).upper()
+                                if (
+                                    data.get("valid") is False
+                                    or status_val in ("NOT_FOUND", "INVALID")
+                                    or "postcode" in detail or "postcode" in message or "postcode" in error
+                                    or "not found" in detail or "not found" in message
+                                ):
+                                    is_authoritative_not_found = True
+                        except Exception:
+                            is_authoritative_not_found = False
+
+                    if is_authoritative_not_found:
+                        logger.info(f"NIPOST API: Postcode prefix '{clean_code[:3]}***' not found in national directory (404).")
+                        return NIPOSTLookupResult(
+                            status=NIPOSTLookupStatus.NOT_FOUND,
+                            http_status=404,
+                            error_message=f"Postcode '{clean_code}' does not exist in official NIPOST directory.",
+                        )
+                    else:
+                        logger.warning(
+                            f"NIPOST API endpoint routing error (HTTP 404) for prefix '{clean_code[:3]}***'. "
+                            "Upstream endpoint path may be invalid or reverse proxy returned route 404."
+                        )
+                        return NIPOSTLookupResult(
+                            status=NIPOSTLookupStatus.UNAVAILABLE,
+                            http_status=404,
+                            error_message="The official NIPOST verification gateway returned an endpoint routing error (HTTP 404).",
+                        )
+
                 elif resp.status_code in (401, 403):
-                    logger.error(f"NIPOST API authorization error ({resp.status_code}) querying '{clean_code}'.")
+                    logger.error(f"NIPOST API authorization error ({resp.status_code}) during verification request.")
                     return NIPOSTLookupResult(
                         status=NIPOSTLookupStatus.UNAUTHORIZED,
                         http_status=resp.status_code,
                         error_message="Official NIPOST API authorization failed: verify license credentials.",
                     )
                 else:
-                    logger.warning(f"NIPOST API non-200 response ({resp.status_code}) for '{clean_code}': {resp.text}")
+                    logger.warning(f"NIPOST API non-200 response ({resp.status_code}) during verification request.")
                     return NIPOSTLookupResult(
                         status=NIPOSTLookupStatus.UNAVAILABLE,
                         http_status=resp.status_code,
                         error_message="The official NIPOST verification gateway returned an unexpected response.",
                     )
         except httpx.TimeoutException:
-            logger.warning(f"NIPOST API timeout after {self.timeout}s looking up '{clean_code}'.")
+            logger.warning(f"NIPOST API timeout after {self.timeout}s during verification request.")
             return NIPOSTLookupResult(
                 status=NIPOSTLookupStatus.UNAVAILABLE,
                 http_status=504,
                 error_message="The official NIPOST verification gateway timed out.",
             )
         except Exception as exc:
-            logger.warning(f"NIPOST API connection error looking up '{clean_code}': {exc}.")
+            logger.warning(f"NIPOST API connection error during verification request ({type(exc).__name__}).")
             return NIPOSTLookupResult(
                 status=NIPOSTLookupStatus.UNAVAILABLE,
                 http_status=503,

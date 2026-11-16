@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     NIPOST_API_BASE_URL: str = os.getenv("NIPOST_API_BASE_URL", os.getenv("NIPOST_API_URL", ""))
     NIPOST_API_URL: str = os.getenv("NIPOST_API_URL", os.getenv("NIPOST_API_BASE_URL", ""))
     NIPOST_API_KEY: str = os.getenv("NIPOST_API_KEY", "")
+    NIPOST_LOOKUP_PATH: str = os.getenv("NIPOST_LOOKUP_PATH", "/v1/lookup")
     NIPOST_TIMEOUT_SECONDS: float = 5.0
 
     # Trusted Reverse Proxies for Real Client IP extraction and rate limiting.

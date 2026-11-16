@@ -82,7 +82,7 @@ def execute_postcode_lookup(
                 lng=live_res.get("lng"),
                 postcode_type=live_res.get("postcode_type", "digital_location" if len(code.replace("-", "")) > 6 else "conventional_area"),
                 postcode_category="official_digital_postcode" if len(code.replace("-", "")) > 6 else "legacy_postal_code",
-                building_reference=live_res.get("building_reference"),
+                building_reference=live_res.get("building_reference") or live_res.get("recent_house_address"),
                 verification_status="official_verified",
                 provenance="NIPOST Official National Directory (Live API)",
                 dataset_version=upstream_version,

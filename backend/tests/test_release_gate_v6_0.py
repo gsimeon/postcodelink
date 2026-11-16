@@ -1815,4 +1815,330 @@ def test_nipost_address_and_autofill_logging_masks_sensitive_data():
             assert "postcode autofill query" in log_msg_auto.lower()
 
 
+# ==============================================================================
+# 19. Release Gate v6.0.3 Redis Log Sanitization, NIPOST Official Contract & Rate Limiter Health Tests
+# ==============================================================================
+
+def test_redis_credential_sanitization_in_success_and_failure_logs():
+    """Verify that Redis credentials (username, password) are strictly masked and never appear in application logs under connection success or failure."""
+    import logging
+    from backend.app.core.rate_limiter import _sanitize_redis_url, _get_redis_client
+    import backend.app.core.rate_limiter as rl_mod
+
+    canary_password = "CanarySecretP@ssword123!"
+    raw_redis_url = f"redis://app_user:{canary_password}@127.0.0.1:6379/2"
+
+    # 1. Direct unit verification of _sanitize_redis_url
+    sanitized = _sanitize_redis_url(raw_redis_url)
+    assert canary_password not in sanitized
+    assert "app_user:***@127.0.0.1:6379/2" in sanitized
+    assert _sanitize_redis_url(f"redis://:{canary_password}@redis.cluster.local:6379/0") == "redis://***@redis.cluster.local:6379/0"
+    assert _sanitize_redis_url("redis://localhost:6379/0") == "redis://localhost:6379/0"
+    assert _sanitize_redis_url(None) == "unconfigured"
+
+    # 2. Connection success log test
+    rl_logger = logging.getLogger("rate_limiter")
+    with patch.object(settings, "REDIS_URL", raw_redis_url):
+        with patch.object(rl_mod, "_REDIS_CLIENT", None):
+            with patch.object(rl_mod, "_LAST_CONNECT_ATTEMPT", 0.0):
+                mock_client = MagicMock()
+                with patch("redis.from_url", return_value=mock_client):
+                    with patch.object(rl_logger, "info") as mock_info:
+                        client_res = _get_redis_client()
+                        assert client_res is mock_client
+                        mock_info.assert_called_once()
+                        success_log = str(mock_info.call_args[0][0])
+                        assert canary_password not in success_log
+                        assert "app_user:***@127.0.0.1:6379/2" in success_log
+
+    # 3. Connection failure log test
+    with patch.object(settings, "REDIS_URL", raw_redis_url):
+        with patch.object(rl_mod, "_REDIS_CLIENT", None):
+            with patch.object(rl_mod, "_LAST_CONNECT_ATTEMPT", 0.0):
+                err_with_secret = Exception(f"Connection refused to {raw_redis_url}")
+                with patch("redis.from_url", side_effect=err_with_secret):
+                    with patch.object(rl_logger, "warning") as mock_warn:
+                        client_fail = _get_redis_client()
+                        assert client_fail is None
+                        mock_warn.assert_called_once()
+                        fail_log = str(mock_warn.call_args[0][0])
+                        assert canary_password not in fail_log
+                        assert "app_user:***@127.0.0.1:6379/2" in fail_log
+
+
+def test_nipost_official_contract_adapter_and_graded_lookup():
+    """Verify that NIPOSTClient correctly adapts the official NIPOST developer lookup schema (/v1/lookup)."""
+    import httpx
+    from backend.app.services.nipost_client import NIPOSTClient, NIPOSTLookupStatus
+
+    # 1. Official schema: /v1/lookup with valid=True, administrative_address object, recent_house_address
+    captured_requests = []
+    def official_lookup_handler(req: httpx.Request):
+        captured_requests.append(req)
+        return httpx.Response(
+            200,
+            json={
+                "postcode": "100001",
+                "valid": True,
+                "administrative_address": {
+                    "state": "Lagos",
+                    "lga": "Lagos Island",
+                    "district": "Marina",
+                    "area": "Marina",
+                },
+                "recent_house_address": "12 Broad Street, Marina",
+                "dataset_version": "2026.1",
+            },
+            headers={"content-type": "application/json"}
+        )
+
+    client_official = NIPOSTClient(
+        base_url="https://api.nipost.gov.ng",
+        api_key="nipost_official_key",
+        lookup_path="/v1/lookup",
+        transport=httpx.MockTransport(official_lookup_handler),
+    )
+
+    res = client_official.lookup_postcode("100001")
+    assert res.status == NIPOSTLookupStatus.FOUND
+    assert res.is_found is True
+    assert res["code"] == "100001"
+    assert res["area"] == "Marina"
+    assert res["state"] == "Lagos"
+    assert res["lga"] == "Lagos Island"
+    assert res["building_reference"] == "12 Broad Street, Marina"
+    assert res["recent_house_address"] == "12 Broad Street, Marina"
+    assert res["dataset_version"] == "2026.1"
+
+    # Verify request path and query parameters
+    assert len(captured_requests) == 1
+    req = captured_requests[0]
+    assert req.url.path == "/v1/lookup"
+    assert "postcode=100001" in str(req.url) or "code=100001" in str(req.url)
+
+    # 2. Official schema: valid=False (authoritative not found)
+    def official_invalid_handler(req: httpx.Request):
+        return httpx.Response(
+            200,
+            json={
+                "postcode": "999999",
+                "valid": False,
+                "message": "Postcode not found in national directory",
+                "dataset_version": "2026.1",
+            },
+            headers={"content-type": "application/json"}
+        )
+
+    client_invalid = NIPOSTClient(
+        base_url="https://api.nipost.gov.ng",
+        api_key="nipost_official_key",
+        lookup_path="/v1/lookup",
+        transport=httpx.MockTransport(official_invalid_handler),
+    )
+    res_invalid = client_invalid.lookup_postcode("999999")
+    assert res_invalid.status == NIPOSTLookupStatus.NOT_FOUND
+    assert res_invalid.is_found is False
+
+    # 3. String-based administrative_address parsing fallback
+    def flat_admin_handler(req: httpx.Request):
+        return httpx.Response(
+            200,
+            json={
+                "postcode": "FC-02-A09-DB-09",
+                "valid": True,
+                "administrative_address": "Garki Area 2, Municipal, Abuja (FCT)",
+                "recent_house_address": "Federal Commerce House",
+            },
+            headers={"content-type": "application/json"}
+        )
+
+    client_flat = NIPOSTClient(
+        base_url="https://api.nipost.gov.ng",
+        lookup_path="/v1/lookup",
+        transport=httpx.MockTransport(flat_admin_handler),
+    )
+    res_flat = client_flat.lookup_postcode("FC-02-A09-DB-09")
+    assert res_flat.status == NIPOSTLookupStatus.FOUND
+    assert res_flat["area"] == "Garki Area 2"
+    assert res_flat["state"] == "Abuja (FCT)"
+    assert res_flat["lga"] == "Municipal"
+    assert res_flat["building_reference"] == "Federal Commerce House"
+
+
+def test_nipost_route_404_vs_authoritative_not_found_discrimination():
+    """Verify that an HTTP 404 from an invalid endpoint route / reverse proxy cannot be mistaken for genuine postcode non-existence."""
+    import httpx
+    from backend.app.services.nipost_client import NIPOSTClient, NIPOSTLookupStatus
+    from backend.app.routers.postcodes import get_nipost_client
+
+    # 1. Reverse proxy / nginx HTML 404 (route error)
+    html_404_transport = httpx.MockTransport(
+        lambda req: httpx.Response(
+            404,
+            text="<html><head><title>404 Not Found</title></head><body><h1>404 Not Found</h1>nginx/1.24.0</body></html>",
+            headers={"content-type": "text/html"},
+        )
+    )
+    client_route_err = NIPOSTClient(
+        base_url="https://misconfigured-nipost.gateway.internal",
+        lookup_path="/invalid/route/lookup",
+        transport=html_404_transport,
+    )
+
+    res_route = client_route_err.lookup_postcode("100001")
+    # Must NOT be classified as NOT_FOUND (postcode does not exist)
+    assert res_route.status == NIPOSTLookupStatus.UNAVAILABLE
+    assert res_route.http_status == 404
+    assert "routing error" in res_route.error_message.lower()
+
+    # Route-level verification: in strict mode, routing 404 returns HTTP 503, NOT not_found
+    app.dependency_overrides[get_nipost_client] = lambda: client_route_err
+    try:
+        strict_resp = client.get("/api/v1/postcodes/lookup?code=100001&strict=true")
+        assert strict_resp.status_code == 503
+        assert "routing error" in strict_resp.json()["detail"].lower()
+
+        # In non-strict mode, falls back to local reference data (provenance indicates fallback)
+        non_strict_resp = client.get("/api/v1/postcodes/lookup?code=100001")
+        assert non_strict_resp.status_code == 200
+        data = non_strict_resp.json()
+        assert data["fallback_used"] is True
+        assert "routing error" in data["fallback_reason"].lower()
+    finally:
+        app.dependency_overrides.pop(get_nipost_client, None)
+
+    # 2. Authoritative JSON 404 with confirmed postcode search payload
+    confirmed_404_transport = httpx.MockTransport(
+        lambda req: httpx.Response(
+            404,
+            json={"postcode": "999999", "valid": False, "error": "postcode_not_found"},
+            headers={"content-type": "application/json"},
+        )
+    )
+    client_confirmed_404 = NIPOSTClient(
+        base_url="https://api.nipost.gov.ng",
+        transport=confirmed_404_transport,
+    )
+    res_confirmed = client_confirmed_404.lookup_postcode("999999")
+    assert res_confirmed.status == NIPOSTLookupStatus.NOT_FOUND
+    assert res_confirmed.http_status == 404
+
+
+def test_nipost_lookup_logging_omits_response_body_and_raw_exception():
+    """Verify that lookup_postcode logs do not expose upstream response bodies, internal exceptions, or full postcodes."""
+    import logging
+    import httpx
+    from backend.app.services.nipost_client import NIPOSTClient
+
+    nipost_logger = logging.getLogger("nipost_client")
+
+    # 1. Non-200 response with sensitive internal payload
+    sensitive_body = "Internal Trace: SELECT * FROM sensitive_customer_data WHERE code='100001'"
+    bad_resp_transport = httpx.MockTransport(
+        lambda req: httpx.Response(
+            500,
+            text=sensitive_body,
+            headers={"content-type": "text/plain"},
+        )
+    )
+    client_500 = NIPOSTClient(
+        base_url="https://api.nipost.gov.ng",
+        transport=bad_resp_transport,
+    )
+
+    with patch.object(nipost_logger, "warning") as mock_warn:
+        res = client_500.lookup_postcode("100001")
+        assert res.http_status == 500
+        mock_warn.assert_called_once()
+        log_msg = str(mock_warn.call_args[0][0])
+        assert sensitive_body not in log_msg
+        assert "sensitive_customer_data" not in log_msg
+        assert "non-200 response (500)" in log_msg
+
+    # 2. Connection exception with internal network details
+    internal_socket_error = httpx.ConnectError("Socket error connecting to 10.240.12.88:9999 [Errno 111]")
+    client_err = NIPOSTClient(base_url="https://internal-nipost.node:9999")
+    with patch("httpx.Client.get", side_effect=internal_socket_error):
+        with patch.object(nipost_logger, "warning") as mock_warn_conn:
+            res_conn = client_err.lookup_postcode("100001")
+            assert res_conn.http_status == 503
+            mock_warn_conn.assert_called_once()
+            conn_log = str(mock_warn_conn.call_args[0][0])
+            assert "10.240.12.88" not in conn_log
+            assert "Errno 111" not in conn_log
+            assert "ConnectError" in conn_log
+
+
+def test_in_memory_public_ip_rate_limiter_cleans_expired_entries():
+    """Verify that in-memory fallback rate limiting cleans up expired IP entries and enforces bounded memory."""
+    import backend.app.core.rate_limiter as rl_mod
+    from backend.app.core.rate_limiter import (
+        check_client_ip_rate_limit,
+        get_rate_limiter_status,
+        reset_api_key_rate_limits,
+    )
+
+    reset_api_key_rate_limits()
+
+    # Simulate 50 unique client IPs calling the endpoint at t = 1000.0
+    simulated_now = 1000.0
+    with patch.object(rl_mod, "_get_redis_client", return_value=None):
+        with patch("time.time", return_value=simulated_now):
+            for i in range(50):
+                check_client_ip_rate_limit(f"192.0.2.{i}", limit_per_minute=10)
+
+        status_initial = get_rate_limiter_status()
+        assert status_initial["in_memory_active_ip_buckets"] == 50
+
+        # Advance time by 65 seconds (all timestamps in window are now expired)
+        future_time = simulated_now + 65.0
+        with patch("time.time", return_value=future_time):
+            with rl_mod._LOCK:
+                rl_mod._cleanup_expired_in_memory_windows(future_time, window_seconds=60.0, force=True)
+
+            status_cleaned = get_rate_limiter_status()
+            assert status_cleaned["in_memory_active_ip_buckets"] == 0
+            assert status_cleaned["in_memory_active_keys"] == 0
+
+
+def test_rate_limiter_health_status_distinguishes_fail_closed_from_in_memory():
+    """Verify that get_rate_limiter_status and /health/rate-limiter accurately distinguish redis, unavailable_fail_closed, and in_memory_fallback."""
+    import backend.app.core.rate_limiter as rl_mod
+    from backend.app.core.rate_limiter import get_rate_limiter_status
+
+    # 1. Connected to Redis
+    mock_redis = MagicMock()
+    with patch.object(rl_mod, "_get_redis_client", return_value=mock_redis):
+        status_redis = get_rate_limiter_status()
+        assert status_redis["backend"] == "redis"
+        assert status_redis["redis_connected"] is True
+        assert status_redis["alert_fail_closed"] is False
+
+    # 2. Production with Redis unavailable & fail-closed enabled -> unavailable_fail_closed
+    with patch.object(settings, "ENVIRONMENT", "production"):
+        with patch.object(settings, "RATE_LIMIT_REDIS_FAIL_CLOSED", True):
+            with patch.object(settings, "ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION", False):
+                with patch.object(rl_mod, "_get_redis_client", return_value=None):
+                    status_fc = get_rate_limiter_status()
+                    assert status_fc["backend"] == "unavailable_fail_closed"
+                    assert status_fc["redis_connected"] is False
+                    assert status_fc["alert_fail_closed"] is True
+                    assert status_fc["alert_in_memory_fallback"] is False
+
+                    # Endpoint verification
+                    resp = client.get("/health/rate-limiter")
+                    assert resp.status_code == 200
+                    data = resp.json()
+                    assert data["backend"] == "unavailable_fail_closed"
+                    assert data["alert_fail_closed"] is True
+
+    # 3. Development with Redis unavailable -> in_memory_fallback
+    with patch.object(settings, "ENVIRONMENT", "development"):
+        with patch.object(rl_mod, "_get_redis_client", return_value=None):
+            status_dev = get_rate_limiter_status()
+            assert status_dev["backend"] == "in_memory_fallback"
+            assert status_dev["alert_fail_closed"] is False
+
+
+
 

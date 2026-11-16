@@ -3,6 +3,7 @@ import time
 import secrets
 import logging
 import threading
+import urllib.parse
 from typing import Dict, List, Optional, Tuple, Any
 from fastapi import HTTPException, status
 from backend.app.config import settings
@@ -12,9 +13,70 @@ logger = logging.getLogger("rate_limiter")
 _LOCK = threading.Lock()
 _KEY_REQUEST_WINDOWS: Dict[str, List[float]] = {}
 _LAST_CLEANUP_TIME: float = time.time()
+MAX_IN_MEMORY_KEYS: int = 10000
+CLEANUP_INTERVAL_SECONDS: float = 60.0
+
 _REDIS_CLIENT = None
 _LAST_CONNECT_ATTEMPT: float = 0.0
 _CONNECT_BACKOFF_SECONDS: float = 15.0
+
+
+def _sanitize_redis_url(url: Optional[str]) -> str:
+    """Mask credentials in Redis connection URL for secure operational logging."""
+    if not url:
+        return "unconfigured"
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        hostname = parsed.hostname or "unknown-host"
+        port_str = f":{parsed.port}" if parsed.port else ""
+        path = parsed.path or "/0"
+        scheme = parsed.scheme or "redis"
+
+        if parsed.username and parsed.password:
+            user_auth = f"{parsed.username}:***@"
+        elif parsed.password:
+            user_auth = "***@"
+        elif parsed.username:
+            user_auth = f"{parsed.username}@"
+        else:
+            user_auth = ""
+
+        return f"{scheme}://{user_auth}{hostname}{port_str}{path}"
+    except Exception:
+        return "redis://***:***@redacted"
+
+
+def _cleanup_expired_in_memory_windows(now: float, window_seconds: float = 60.0, force: bool = False) -> None:
+    """Evict expired request timestamps and prune empty/stale in-memory rate limiting keys.
+    
+    Must be called with _LOCK held.
+    Ensures memory footprint remains bounded even under high volume of unique client IPs.
+    """
+    global _LAST_CLEANUP_TIME
+    if not force and (now - _LAST_CLEANUP_TIME < CLEANUP_INTERVAL_SECONDS) and len(_KEY_REQUEST_WINDOWS) < MAX_IN_MEMORY_KEYS:
+        return
+
+    _LAST_CLEANUP_TIME = now
+    stale_keys = []
+    for k, entries in list(_KEY_REQUEST_WINDOWS.items()):
+        valid_entries = [t for t in entries if now - t < window_seconds]
+        if valid_entries:
+            _KEY_REQUEST_WINDOWS[k] = valid_entries
+        else:
+            stale_keys.append(k)
+
+    for k in stale_keys:
+        _KEY_REQUEST_WINDOWS.pop(k, None)
+
+    # Enforce hard capacity bound under sustained traffic spikes
+    if len(_KEY_REQUEST_WINDOWS) > MAX_IN_MEMORY_KEYS:
+        excess = len(_KEY_REQUEST_WINDOWS) - MAX_IN_MEMORY_KEYS
+        sorted_keys = sorted(
+            _KEY_REQUEST_WINDOWS.keys(),
+            key=lambda k: _KEY_REQUEST_WINDOWS[k][-1] if _KEY_REQUEST_WINDOWS[k] else 0.0
+        )
+        for k in sorted_keys[:excess]:
+            _KEY_REQUEST_WINDOWS.pop(k, None)
 
 # Redis Lua Script for atomic sliding-window rate limiting
 # Guarantees atomic count-and-add: rejected requests are NEVER added to the sorted set
@@ -81,11 +143,14 @@ def _get_redis_client():
             )
             client.ping()
             _REDIS_CLIENT = client
-            logger.info(f"[RateLimiter] Successfully connected to Redis at {settings.REDIS_URL}")
+            sanitized_url = _sanitize_redis_url(settings.REDIS_URL)
+            logger.info(f"[RateLimiter] Successfully connected to Redis at {sanitized_url}")
             return _REDIS_CLIENT
         except Exception as exc:
+            sanitized_url = _sanitize_redis_url(settings.REDIS_URL)
+            err_type = type(exc).__name__
             logger.warning(
-                f"[RateLimiter ALERT] Redis connection attempt failed ({exc}). "
+                f"[RateLimiter ALERT] Redis connection attempt to {sanitized_url} failed ({err_type}). "
                 f"Retrying after {_CONNECT_BACKOFF_SECONDS}s backoff."
             )
             _REDIS_CLIENT = None
@@ -164,17 +229,8 @@ def check_api_key_rate_limit(key_id: str, limit_per_minute: int = 60) -> None:
     if settings.ENVIRONMENT == "production":
         logger.warning("[RateLimiter ALERT] Production API is operating on process-local in-memory rate limiter fallback.")
 
-    global _LAST_CLEANUP_TIME
     with _LOCK:
-        # Periodic eviction of stale keys every 120s to prevent memory accumulation
-        if now - _LAST_CLEANUP_TIME > 120.0:
-            stale_keys = [
-                k for k, entries in _KEY_REQUEST_WINDOWS.items()
-                if not entries or (now - entries[-1]) > 300.0
-            ]
-            for k in stale_keys:
-                del _KEY_REQUEST_WINDOWS[k]
-            _LAST_CLEANUP_TIME = now
+        _cleanup_expired_in_memory_windows(now, window_seconds)
 
         history = _KEY_REQUEST_WINDOWS.get(key_id, [])
         active_entries = [t for t in history if now - t < window_seconds]
@@ -250,8 +306,8 @@ def check_client_ip_rate_limit(client_ip: str, limit_per_minute: int = 15) -> No
     # In-memory sliding window fallback
     if settings.ENVIRONMENT == "production":
         logger.warning("[RateLimiter ALERT] Production API is operating on process-local in-memory rate limiter fallback for IP limiting.")
-    global _LAST_CLEANUP_TIME
     with _LOCK:
+        _cleanup_expired_in_memory_windows(now, window_seconds)
         ip_key = f"ip_{client_ip}"
         history = _KEY_REQUEST_WINDOWS.get(ip_key, [])
         active_entries = [t for t in history if now - t < window_seconds]
@@ -271,16 +327,42 @@ def check_client_ip_rate_limit(client_ip: str, limit_per_minute: int = 15) -> No
 
 
 def get_rate_limiter_status() -> Dict[str, Any]:
-    """Inspect current rate limiter backend, operational connection state, and alerts."""
+    """Inspect current rate limiter backend, operational connection state, and alerts.
+    
+    Reports three distinct operational backend states:
+    - 'redis': Connected to distributed Redis cluster
+    - 'in_memory_fallback': Operating on local in-memory fallback (dev/test or explicit single-instance mode)
+    - 'unavailable_fail_closed': Redis unavailable in production with fail-closed policy (rejecting with HTTP 503)
+    """
     r_client = _get_redis_client()
-    backend_name = "redis" if r_client is not None else "in_memory_fallback"
+    fail_closed = getattr(settings, "RATE_LIMIT_REDIS_FAIL_CLOSED", True)
+    allow_in_memory = getattr(settings, "ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION", False)
+
+    if r_client is not None:
+        backend_name = "redis"
+    elif settings.ENVIRONMENT == "production" and fail_closed and not allow_in_memory:
+        backend_name = "unavailable_fail_closed"
+    else:
+        backend_name = "in_memory_fallback"
+
+    with _LOCK:
+        total_keys = len(_KEY_REQUEST_WINDOWS)
+        ip_keys = sum(1 for k in _KEY_REQUEST_WINDOWS if k.startswith("ip_"))
+        api_keys = total_keys - ip_keys
+
+    sanitized_url = _sanitize_redis_url(settings.REDIS_URL) if settings.REDIS_URL else None
+
     return {
         "backend": backend_name,
         "redis_configured": bool(settings.REDIS_URL),
         "redis_connected": r_client is not None,
-        "fail_closed_policy": getattr(settings, "RATE_LIMIT_REDIS_FAIL_CLOSED", False),
-        "in_memory_active_keys": len(_KEY_REQUEST_WINDOWS),
-        "alert_in_memory_fallback": (settings.ENVIRONMENT == "production" and backend_name != "redis"),
+        "redis_endpoint": sanitized_url,
+        "fail_closed_policy": fail_closed,
+        "in_memory_active_keys": total_keys,
+        "in_memory_active_ip_buckets": ip_keys,
+        "in_memory_active_api_key_buckets": api_keys,
+        "alert_in_memory_fallback": (settings.ENVIRONMENT == "production" and backend_name == "in_memory_fallback"),
+        "alert_fail_closed": (backend_name == "unavailable_fail_closed"),
     }
 
 

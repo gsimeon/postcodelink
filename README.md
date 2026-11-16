@@ -167,9 +167,17 @@ Following the comprehensive production-readiness review of Release Gate v5.7, th
 - **Continuous Integration (`.github/workflows/ci.yml`)**:
   - Spin up `postgres:16` and `redis:7` service containers with health checks.
   - Run Alembic migrations and database seeding against PostgreSQL 16.
-  - Run 103/103 Pytest security, cryptography, and API integration tests against PostgreSQL and Redis.
+  - Run 150/150 Pytest security, cryptography, and API integration tests against PostgreSQL and Redis.
   - Run 7/7 Node.js state-machine and 6-digit OTP security tests.
   - Compile production Next.js 15 build with 0 errors.
+
+### 9. P1 & P2 — Release Gate v6.0.3 Operational Security & NIPOST Contract Integrity
+- **Redis Credential Masking in Logs**: Connection URLs are strictly sanitized using `_sanitize_redis_url()` across startup, connection success, runtime failovers, and `/health/rate-limiter` telemetry (`redis://user:***@host:port/db`). Plaintext passwords and user credentials can never appear in application logs or monitoring dashboards.
+- **NIPOST Official Contract Adapter**: Supports official NIPOST developer lookup schema (`/v1/lookup`) with graded fields (`postcode`, `valid`, `administrative_address` object, `recent_house_address`) alongside PostcodeLink gateway schema.
+- **Endpoint Route 404 vs Postcode Non-existence Discrimination**: Prevents misconfigured reverse proxies or bad gateway paths returning HTML 404 from falsely reporting that a valid Nigerian postcode does not exist. Only authoritative JSON responses with explicit validity failure are classified as `NOT_FOUND`.
+- **NIPOST Diagnostic Log Sanitization**: Response bodies (`resp.text`), raw exception strings (`exc`), and sensitive query parameters are completely omitted from logs in `lookup_postcode()`, `validate_address()`, and `autofill_postcode()`.
+- **Bounded In-Memory Public IP Rate Limiting**: Periodic cleanup (`_cleanup_expired_in_memory_windows`) purges expired IP buckets every 60s and enforces a hard bound (`MAX_IN_MEMORY_KEYS = 10,000`), preventing memory exhaustion under sustained traffic.
+- **Tri-State Rate Limiter Health Telemetry**: `/health/rate-limiter` reports three distinct states: `"redis"` (connected cluster), `"unavailable_fail_closed"` (production Redis down with fail-closed HTTP 503), and `"in_memory_fallback"` (local fallback active).
 
 ### 5. P2 — Configurable Operator Capacity & Service Area Routing
 - **Configurable Fleet Limits**: Respects each logistics operator's configured `max_active_deliveries` limit across operator directories, dispatch assignments, and capacity indicators (`has_capacity = active_deliveries_count < max_active_deliveries`).
@@ -417,7 +425,7 @@ Interactive OpenAPI documentation is live at **`http://127.0.0.1:8000/docs`** an
    # Or: backend/venv/Scripts/python -m backend.app.seed
    ```
 
-3. Run FastAPI automated security & API test suite (131/131 tests passing):
+3. Run FastAPI automated security & API test suite (150/150 tests passing across PostgreSQL & SQLite):
    ```bash
    npm run backend:test
    # Or: backend/venv/Scripts/python -m pytest backend/tests -v
