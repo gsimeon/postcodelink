@@ -126,7 +126,7 @@ class Settings(BaseSettings):
             # entropy estimator: production secrets must be generated with a CSPRNG.
             def weak_secret(value: str) -> bool:
                 lowered = value.lower()
-                repeated_block = any(value == value[:size] * (len(value) // size) + value[: len(value) % size] for size in range(1, 9))
+                repeated_block = any(value == value[:size] * (len(value) // size) + value[: len(value) % size] for size in range(1, min(33, len(value) // 2 + 1)))
                 return (
                     len(value) < 43
                     or len(set(value)) < 16
