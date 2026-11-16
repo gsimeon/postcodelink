@@ -102,11 +102,12 @@ class NIPOSTClient:
         # 1. Legacy 6-digit numeric code
         if re.match(r"^\d{6}$", clean):
             return True
-        # 2. National digital postcode (11-character standard with or without standard hyphens)
-        clean_normalized = clean.replace("-", "").replace(" ", "")
-        if len(clean_normalized) == 11 and re.match(r"^[A-Z]{2}[0-9A-Z]{9}$", clean_normalized):
-            return True
-        return False
+        # 2. National digital postcode: five components with exact widths
+        # (2-2-3-2-2). Accept the canonical hyphenated form or the compact
+        # 11-character form; reject arbitrary separators and embedded whitespace.
+        canonical = r"^[A-Z]{2}-[0-9A-Z]{2}-[0-9A-Z]{3}-[0-9A-Z]{2}-[0-9A-Z]{2}$"
+        compact = r"^[A-Z]{2}[0-9A-Z]{9}$"
+        return bool(re.fullmatch(canonical, clean) or re.fullmatch(compact, clean))
 
     @classmethod
     def _adapt_nipost_payload(cls, data: Any, clean_code: str) -> Tuple[NIPOSTLookupStatus, Optional[Dict[str, Any]], Optional[str]]:
