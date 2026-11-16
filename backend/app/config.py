@@ -136,7 +136,7 @@ class Settings(BaseSettings):
 
             if weak_secret(raw_secret):
                 raise ValueError(
-                    "Fatal Security Error: In production, SECRET_KEY must be set to an authentic, cryptographically strong secret (at least 32 characters). "
+                    "Fatal Security Error: In production, SECRET_KEY must be set to an authentic, cryptographically strong secret (at least 43 characters). "
                     "Repository template defaults, example values, and predictable prefixes are strictly prohibited."
                 )
 
@@ -166,7 +166,7 @@ class Settings(BaseSettings):
             raw_outbox_key = (self.OUTBOX_ENCRYPTION_KEY or "").strip()
             if weak_secret(raw_outbox_key):
                 raise ValueError(
-                    "Fatal Security Error: In production, OUTBOX_ENCRYPTION_KEY must be set to a dedicated, cryptographically strong secret (at least 32 characters). "
+                    "Fatal Security Error: In production, OUTBOX_ENCRYPTION_KEY must be set to a dedicated, cryptographically strong secret (at least 43 characters). "
                     "Repository template defaults, example values, and predictable prefixes are strictly prohibited."
                 )
 
