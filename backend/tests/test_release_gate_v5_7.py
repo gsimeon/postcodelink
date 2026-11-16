@@ -1,6 +1,7 @@
 """Release Gate v5.7: Operational Security, Distributed Reliability & Acceptance Tests."""
 import uuid
 import time
+import secrets
 import pytest
 from datetime import datetime, timezone, timedelta
 from fastapi.testclient import TestClient
@@ -289,9 +290,11 @@ def test_manual_reconciliation_requires_evidence_and_records_audit_event():
     admin_headers = {"Authorization": f"Bearer {admin_token}"}
 
     db = SessionLocal()
+    deliv_id = f"PL-AUDIT-TEST-{secrets.token_hex(4)}"
+    token_str = f"token_audit_test_{secrets.token_hex(16)}"
     try:
         delivery = Delivery(
-            id="PL-AUDIT-TEST-01",
+            id=deliv_id,
             recipient_phone="+2348011223344",
             recipient_name="Audit Delivery",
             destination_state="Lagos",
@@ -301,7 +304,7 @@ def test_manual_reconciliation_requires_evidence_and_records_audit_event():
             postcode_input="100271",
             status=DeliveryStatus.OUT_FOR_DELIVERY,
             otp_hash=hash_otp("123456"),
-            tracking_token="token_audit_test_12345678901234567890",
+            tracking_token=token_str,
         )
         db.add(delivery)
         db.commit()
@@ -312,7 +315,7 @@ def test_manual_reconciliation_requires_evidence_and_records_audit_event():
             recipient_phone=delivery.recipient_phone,
             recipient_name=delivery.recipient_name,
             status=NotificationDeliveryStatus.RECONCILIATION_REQUIRED,
-            idempotency_key="recon_audit_key_01",
+            idempotency_key=f"recon_audit_key_{secrets.token_hex(4)}",
             retry_count=2,
             delivery_version=1,
         )
@@ -360,9 +363,10 @@ def test_manual_reconciliation_requires_evidence_and_records_audit_event():
         assert "Verified carrier dispatch log" in event.note
         assert event.actor_role == "admin"
     finally:
-        db.query(NotificationOutbox).filter(NotificationOutbox.delivery_id == "PL-AUDIT-TEST-01").delete()
-        db.query(Delivery).filter(Delivery.id == "PL-AUDIT-TEST-01").delete()
-        db.query(DeliveryEvent).filter(DeliveryEvent.delivery_id == "PL-AUDIT-TEST-01").delete()
+        db.query(NotificationOutbox).filter(NotificationOutbox.delivery_id == deliv_id).delete()
+        deliv = db.query(Delivery).filter(Delivery.id == deliv_id).first()
+        if deliv:
+            deliv.is_deleted = True
         db.commit()
         db.close()
 

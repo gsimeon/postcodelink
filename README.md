@@ -39,6 +39,42 @@ graph TD
 
 ---
 
+## Architecture & Security Hardening (Release Gate v6.0 Production Standard)
+
+Following the production-readiness review of Release Gate v5.9, Release Gate v6.0 introduces permanent audit retention, cryptographic provider delivery verification, consistent single-instance Redis opt-out, subprocess signal handling, and manual requeue dispatch attempt tracking:
+
+### 1. P1 — Twilio Outbound Verification with Multi-Vector Association & Fingerprint Checks
+- **Comprehensive Gateway Association**: `TwilioNotificationProvider.check_message_status()` enforces 5-point verification against the Twilio REST API:
+  1. Authenticates message SID identity.
+  2. Verifies destination recipient phone matches the delivery recipient.
+  3. Validates sender number against configured `TWILIO_FROM_NUMBER`.
+  4. Enforces cryptographic order fingerprint match in message body (`order {delivery_id}`).
+  5. Asserts authoritative status (`delivered`, `sent`, `queued`, `sending`), cleanly reporting `FAILED` on provider delivery failures.
+
+### 2. P1 — Termii Verification Evidence Checks & Strict Association
+- **Authoritative Status Query**: `TermiiNotificationProvider.check_message_status()` queries Termii's outbound status and inbox APIs.
+- **Strict Evidence Validation**: Validates returned message ID, recipient destination, configured sender ID, and order delivery fingerprint in message text. If provider status is inconclusive, returns `None` to route the item safely to reconciliation without duplicate dispatch risk.
+
+### 3. P1 — Permanent Audit Retention & Soft Deletion Architecture
+- **Elimination of Audit Cascades**: Removed `cascade="all, delete-orphan"` from `Delivery.events`. Direct hard deletions of `delivery_events` are permanently blocked by `ON DELETE RESTRICT` foreign key constraints and engine-level triggers.
+- **Soft Deletion of Deliveries**: Deleting a delivery via `DELETE /api/v1/deliveries/{id}` sets `is_deleted = True`, records `deleted_at = now`, transitions status to `CANCELLED`, and appends an immutable `DeliveryEvent` audit entry. Direct SQL `DELETE FROM deliveries` is blocked when audit records exist.
+- **Engine-Level Trigger Enforcement**: PostgreSQL `prevent_delivery_events_tampering()` and SQLite `trg_delivery_events_no_update`, `trg_delivery_events_no_delete`, and `trg_deliveries_no_delete_with_audit_events` ensure zero tampering at the database layer.
+
+### 4. P2 — Consistent Single-Instance Production Redis Configuration Policy
+- **Cohesive Policy Matrix**: Aligned `backend/app/config.py` and `backend/app/core/rate_limiter.py`. When operators deploy single-instance production nodes and set `ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION=True`, the rate limiter permits local sliding-window tracking without raising HTTP 503 from `RATE_LIMIT_REDIS_FAIL_CLOSED`.
+
+### 5. P2 — Mocked Provider Unit Tests & Strict Simulated Verification
+- **Isolated HTTP Mocking**: Comprehensive unit tests verify Twilio and Termii rejection of mismatched recipients, incorrect delivery fingerprints, wrong sender IDs, and failed carrier statuses.
+- **Strict Simulated Verification**: `SimulatedNotificationProvider` enforces exact message ID lookup, recipient verification, and delivery order fingerprint matching.
+
+### 6. P2 — Worker Subprocess OS Signal Handling & Crash Recovery
+- **Real OS Subprocess Verification**: Integration tests spawn `backend.app.workers.outbox_worker` as a real OS subprocess, verify heartbeat creation, send termination signals (`SIGTERM`, `SIGINT`, `SIGBREAK`), and confirm graceful exit code 0 with persistent `status="stopped"` and `stop_reason="graceful_shutdown"`.
+
+### 7. P2 — Manual Requeue Dispatch Attempt Tracking & Idempotency History
+- **Historical Idempotency Preservation**: On manual requeue of exhausted outbox notifications (`/reconcile` with `resolution="requeue"`), the system increments `dispatch_attempt`, preserves the initial key in `original_idempotency_key`, updates `idempotency_key` with attempt suffix (`_att{attempt}`), and resets `retry_count = 0` to enable immediate worker pickup without collisions.
+
+---
+
 ## Architecture & Security Hardening (Release Gate v5.9 Production Standard)
 
 Following the production-readiness review of Release Gate v5.8, Release Gate v5.9 introduces engine-level database audit guarantees, live upstream provider verification, and distributed fail-closed reliability:

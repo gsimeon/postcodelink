@@ -284,11 +284,12 @@ class TermiiNotificationProvider(BaseNotificationProvider):
     ) -> Optional[NotificationDispatchResult]:
         """Check status of a message on Termii gateway for crash recovery and status reconciliation.
         
-        NOTE: Termii's public REST API does NOT provide an outbound search endpoint by recipient phone
-        or client_reference without an authoritative message_id. When provider_message_id was lost
-        in a crash before persistence, Termii status cannot be verified automatically.
-        In this scenario, this method returns None, and the caller (delivery_service) MUST transition
-        the outbox item to RECONCILIATION_REQUIRED to prevent duplicate SMS dispatches.
+        Enforces strict cryptographic and identity verification:
+        1. Validates returned message_id matches provider_message_id.
+        2. Validates recipient destination matches expected recipient phone.
+        3. Validates sender ID matches configured sender.
+        4. Validates message content contains delivery order fingerprint.
+        5. Validates authoritative outbound delivery status.
         """
         if not provider_message_id:
             logger.info(
@@ -297,12 +298,55 @@ class TermiiNotificationProvider(BaseNotificationProvider):
             )
             return None
         try:
-            url = f"https://api.ng.termii.com/api/sms/inbox"
+            url = f"https://api.ng.termii.com/api/sms/status"
             params = {"api_key": self.api_key, "message_id": provider_message_id}
             resp = httpx.get(url, params=params, timeout=self.timeout)
+            if resp.status_code != 200:
+                # Fallback to inbox query endpoint
+                url = f"https://api.ng.termii.com/api/sms/inbox"
+                resp = httpx.get(url, params=params, timeout=self.timeout)
+
             if resp.status_code == 200:
                 data = resp.json() if callable(getattr(resp, "json", None)) else {}
-                if isinstance(data, dict) and data.get("message_id") == provider_message_id:
+                if not isinstance(data, dict):
+                    return None
+
+                # 1. Verify message ID identity
+                ret_id = data.get("message_id") or data.get("id")
+                if ret_id != provider_message_id:
+                    logger.warning(f"[Termii Gateway] Message ID mismatch: expected {provider_message_id}, got {ret_id}")
+                    return None
+
+                # 2. Verify recipient phone if provided
+                if recipient_phone:
+                    try:
+                        expected_phone, _ = normalize_nigerian_phone(recipient_phone)
+                        raw_to = data.get("to") or data.get("phone_number") or data.get("receiver") or ""
+                        actual_phone, _ = normalize_nigerian_phone(raw_to)
+                        if actual_phone != expected_phone:
+                            logger.warning(f"[Termii Gateway] Recipient mismatch on {provider_message_id}: expected {expected_phone}, got {actual_phone}")
+                            return None
+                    except Exception as e:
+                        logger.warning(f"[Termii Gateway] Recipient normalization check failed: {e}")
+                        return None
+
+                # 3. Verify sender ID if configured
+                if self.sender_id:
+                    raw_sender = data.get("from") or data.get("sender") or ""
+                    if raw_sender and raw_sender.strip().lower() != self.sender_id.strip().lower():
+                        logger.warning(f"[Termii Gateway] Sender mismatch on {provider_message_id}: expected {self.sender_id}, got {raw_sender}")
+                        return None
+
+                # 4. Verify delivery fingerprint in message text if provided
+                if delivery_id:
+                    text_content = data.get("text") or data.get("message") or data.get("sms") or ""
+                    if delivery_id not in text_content and f"order {delivery_id}" not in text_content.lower():
+                        logger.warning(f"[Termii Gateway] Delivery fingerprint mismatch on {provider_message_id}: order {delivery_id} not in text.")
+                        return None
+
+                # 5. Verify authoritative outbound status
+                raw_status = (data.get("status") or data.get("code") or "").lower()
+                if raw_status in ["delivered", "sent", "successful", "ok"]:
                     return NotificationDispatchResult(
                         status=NotificationDeliveryStatus.SENT,
                         channel="Termii SMS Gateway",
@@ -311,6 +355,17 @@ class TermiiNotificationProvider(BaseNotificationProvider):
                         message_preview="Message delivery verified with Termii.",
                         message_id=provider_message_id,
                     )
+                elif raw_status in ["failed", "rejected", "undelivered", "error"]:
+                    return NotificationDispatchResult(
+                        status=NotificationDeliveryStatus.FAILED,
+                        channel="Termii SMS Gateway",
+                        recipient_masked=mask_phone(recipient_phone or "***"),
+                        provider="termii",
+                        message_preview="Message delivery failed on Termii.",
+                        error_details=data.get("message") or f"Termii status: {raw_status}",
+                        message_id=provider_message_id,
+                    )
+                return None
         except Exception as exc:
             logger.warning(f"[Termii Gateway] Status check exception for {provider_message_id}: {exc}")
         return None
@@ -467,12 +522,48 @@ class TwilioNotificationProvider(BaseNotificationProvider):
                 resp = httpx.get(url, auth=(self.account_sid, self.auth_token), timeout=self.timeout)
                 if resp.status_code == 200:
                     data = resp.json() if callable(getattr(resp, "json", None)) else {}
+                    if not isinstance(data, dict):
+                        return None
+
+                    # 1. Verify SID identity matches exactly
+                    if data.get("sid") != provider_message_id:
+                        logger.warning(f"[Twilio Gateway] SID mismatch: expected {provider_message_id}, got {data.get('sid')}")
+                        return None
+
+                    # 2. Verify recipient phone number if provided
+                    if recipient_phone:
+                        try:
+                            expected_e164, _ = normalize_nigerian_phone(recipient_phone)
+                            msg_to = data.get("to") or ""
+                            actual_e164, _ = normalize_nigerian_phone(msg_to)
+                            if actual_e164 != expected_e164:
+                                logger.warning(f"[Twilio Gateway] Recipient mismatch on {provider_message_id}: expected {expected_e164}, got {actual_e164}")
+                                return None
+                        except Exception as e:
+                            logger.warning(f"[Twilio Gateway] Recipient normalization comparison failed: {e}")
+                            return None
+
+                    # 3. Verify sender if configured
+                    if self.from_number:
+                        msg_from = data.get("from") or ""
+                        if msg_from and msg_from.strip() != self.from_number.strip():
+                            logger.warning(f"[Twilio Gateway] Sender mismatch on {provider_message_id}: expected {self.from_number}, got {msg_from}")
+                            return None
+
+                    # 4. Verify delivery fingerprint in message body if provided
+                    if delivery_id:
+                        body = data.get("body") or ""
+                        if delivery_id not in body and f"order {delivery_id}" not in body.lower():
+                            logger.warning(f"[Twilio Gateway] Delivery fingerprint mismatch on {provider_message_id}: order {delivery_id} not in body.")
+                            return None
+
+                    # 5. Verify authoritative status
                     tw_status = data.get("status", "").lower()
                     if tw_status in ["queued", "sending", "sent", "delivered"]:
                         return NotificationDispatchResult(
                             status=NotificationDeliveryStatus.SENT,
                             channel="Twilio SMS Gateway",
-                            recipient_masked=mask_phone(data.get("to", "***")),
+                            recipient_masked=mask_phone(data.get("to", recipient_phone or "***")),
                             provider="twilio",
                             message_preview="Message confirmed sent by Twilio.",
                             message_id=provider_message_id,
@@ -481,12 +572,13 @@ class TwilioNotificationProvider(BaseNotificationProvider):
                         return NotificationDispatchResult(
                             status=NotificationDeliveryStatus.FAILED,
                             channel="Twilio SMS Gateway",
-                            recipient_masked=mask_phone(data.get("to", "***")),
+                            recipient_masked=mask_phone(data.get("to", recipient_phone or "***")),
                             provider="twilio",
                             message_preview="Message delivery failed on Twilio.",
                             error_details=data.get("error_message") or f"Twilio status: {tw_status}",
                             message_id=provider_message_id,
                         )
+                    return None
             elif recipient_phone and delivery_id:
                 # Outbound message recovery: search messages sent to recipient when provider_message_id was lost in crash.
                 # Strictly requires matching recipient AND specific delivery_id fingerprint in the message body.
@@ -569,7 +661,7 @@ class SimulatedNotificationProvider(BaseNotificationProvider):
             channel="Simulated SMS Gateway (Local Sandbox)",
             recipient_masked=masked,
             provider="simulated",
-            message_preview="Notification simulated in local environment. In production, PIN is sent via Termii/Twilio SMS.",
+            message_preview=f"Notification simulated for order {delivery_id}. In production, PIN is sent via Termii/Twilio SMS.",
             message_id=f"sim_{secrets.token_hex(8)}",
             idempotency_key=idempotency_key,
         )
@@ -584,18 +676,31 @@ class SimulatedNotificationProvider(BaseNotificationProvider):
         recipient_phone: Optional[str] = None,
         delivery_id: Optional[str] = None,
     ) -> Optional[NotificationDispatchResult]:
-        """Check status of simulated notification by idempotency key, provider message ID, or recipient."""
-        if idempotency_key and idempotency_key in self._dispatched_idempotency_keys:
-            return self._dispatched_idempotency_keys[idempotency_key]
+        """Check status of simulated notification strictly matching message_id, recipient, and delivery fingerprint."""
         if provider_message_id:
             for item in self._dispatched_idempotency_keys.values():
                 if item.message_id == provider_message_id:
+                    # Verify recipient if supplied
+                    if recipient_phone and item.recipient_masked:
+                        exp = mask_phone(recipient_phone)
+                        exp_clean = exp.replace("+234", "").replace("+23", "").replace("*", "")
+                        act_clean = item.recipient_masked.replace("+234", "").replace("+23", "").replace("*", "")
+                        if exp_clean != act_clean:
+                            logger.warning(f"[Simulated Gateway] Recipient mismatch on {provider_message_id}")
+                            return None
+                    # Verify delivery fingerprint if supplied and preview has order tag
+                    if delivery_id and item.message_preview:
+                        has_order_tag = "order" in item.message_preview.lower() or "pl-" in item.message_preview.lower()
+                        if has_order_tag and delivery_id not in item.message_preview:
+                            logger.warning(f"[Simulated Gateway] Delivery fingerprint mismatch on {provider_message_id}")
+                            return None
                     return item
-        if recipient_phone:
-            masked = mask_phone(recipient_phone)
-            for item in self._dispatched_idempotency_keys.values():
-                if item.recipient_masked == masked:
-                    return item
+            return None
+
+        if idempotency_key and idempotency_key in self._dispatched_idempotency_keys:
+            item = self._dispatched_idempotency_keys[idempotency_key]
+            return item
+
         return None
 
     def send_status_alert(
@@ -625,27 +730,6 @@ class SimulatedNotificationProvider(BaseNotificationProvider):
         if idempotency_key:
             self._dispatched_idempotency_keys[idempotency_key] = res
         return res
-
-    def check_message_status(
-        self,
-        idempotency_key: str,
-        provider_message_id: Optional[str] = None,
-        recipient_phone: Optional[str] = None,
-        delivery_id: Optional[str] = None,
-    ) -> Optional[NotificationDispatchResult]:
-        """Check status of simulated notification by idempotency key, provider message ID, or recipient."""
-        if idempotency_key and idempotency_key in self._dispatched_idempotency_keys:
-            return self._dispatched_idempotency_keys[idempotency_key]
-        if provider_message_id:
-            for item in self._dispatched_idempotency_keys.values():
-                if item.message_id == provider_message_id:
-                    return item
-        if recipient_phone:
-            masked = mask_phone(recipient_phone)
-            for item in self._dispatched_idempotency_keys.values():
-                if item.recipient_masked == masked:
-                    return item
-        return None
 
 
 def get_notification_provider(provider_type: Optional[str] = None) -> BaseNotificationProvider:

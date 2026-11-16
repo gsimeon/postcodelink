@@ -124,7 +124,7 @@ def api_list_deliveries(
     db: Session = Depends(get_db),
 ):
     """List deliveries scoped by tenant role (Merchants see their orders; Operators see assigned trips; supports x-api-key)."""
-    query = db.query(Delivery)
+    query = db.query(Delivery).filter(Delivery.is_deleted == False)
 
     # Tenant isolation
     if current_user.role == AppRole.MERCHANT:
@@ -160,7 +160,7 @@ def api_get_delivery(
     db: Session = Depends(get_db),
 ):
     """Get full details of a delivery (enforcing tenant access permissions)."""
-    delivery = db.query(Delivery).filter(Delivery.id == delivery_id).first()
+    delivery = db.query(Delivery).filter(Delivery.id == delivery_id, Delivery.is_deleted == False).first()
     if not delivery:
         raise HTTPException(status_code=404, detail="Delivery order not found.")
 
@@ -242,8 +242,12 @@ def api_delete_delivery(
     current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
     db: Session = Depends(get_db),
 ):
-    """Delete a delivery order (only permitted for unassigned or cancelled orders by merchant owner/admin)."""
-    delivery = db.query(Delivery).filter(Delivery.id == delivery_id).first()
+    """Soft-delete a delivery order (only permitted for unassigned or cancelled orders by merchant owner/admin).
+    
+    In compliance with permanent regulatory audit trail standards, delivery orders are soft-deleted,
+    marked CANCELLED, and all immutable DeliveryEvent records are permanently preserved.
+    """
+    delivery = db.query(Delivery).filter(Delivery.id == delivery_id, Delivery.is_deleted == False).first()
     if not delivery:
         raise HTTPException(status_code=404, detail="Delivery order not found.")
 
@@ -253,7 +257,21 @@ def api_delete_delivery(
     if delivery.status not in [DeliveryStatus.PENDING, DeliveryStatus.CANCELLED]:
         raise HTTPException(status_code=400, detail="Cannot delete an order that has already been dispatched or delivered.")
 
-    db.delete(delivery)
+    now = datetime.now(timezone.utc)
+    delivery.is_deleted = True
+    delivery.deleted_at = now
+    delivery.status = DeliveryStatus.CANCELLED
+
+    # Record immutable audit event
+    actor_role_str = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+    del_event = DeliveryEvent(
+        delivery_id=delivery.id,
+        status=DeliveryStatus.CANCELLED,
+        actor_name=current_user.full_name,
+        actor_role=actor_role_str,
+        note=f"Delivery order soft-deleted and archived by {current_user.email}. Compliance audit records permanently retained.",
+    )
+    db.add(del_event)
     db.commit()
 
 
@@ -386,9 +404,23 @@ def api_reconcile_outbox_item(
         item.locked_by = None
     elif req.resolution == "requeue":
         item.status = NotificationDeliveryStatus.QUEUED
-        item.failure_classification = None
+        item.failure_classification = "manual_requeue_authorized"
         item.retry_count = 0  # Reset retry counter so exhausted items are eligible for processing
-        item.error_details = f"Requeued by admin {current_user.email} (retry counter reset for manual retry allowance). Reason: {req.reason}."
+
+        # Explicit dispatch attempt increment while preserving initial idempotency key in audit history
+        current_attempt = getattr(item, "dispatch_attempt", 1) or 1
+        new_attempt = current_attempt + 1
+        item.dispatch_attempt = new_attempt
+        if not getattr(item, "original_idempotency_key", None):
+            item.original_idempotency_key = item.idempotency_key
+
+        base_idempotency = (item.original_idempotency_key or item.idempotency_key or f"outbox_{item.id}")[:48]
+        item.idempotency_key = f"{base_idempotency}_att{new_attempt}"
+
+        item.error_details = (
+            f"Supervisor {current_user.email} authorized manual requeue (dispatch_attempt: {new_attempt}, "
+            f"prior_idempotency: {item.original_idempotency_key}). Reason: {req.reason}."
+        )
         item.next_attempt_at = now
         item.locked_at = None
         item.locked_by = None

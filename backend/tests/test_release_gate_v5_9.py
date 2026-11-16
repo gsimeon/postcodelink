@@ -169,8 +169,9 @@ def test_provider_verified_reconciliation_validates_actual_provider():
         try:
             if outbox_id:
                 db.query(NotificationOutbox).filter(NotificationOutbox.id == outbox_id).delete()
-            db.query(Delivery).filter(Delivery.id == delivery_id).delete()
-            db.query(DeliveryEvent).filter(DeliveryEvent.delivery_id == delivery_id).delete()
+            deliv = db.query(Delivery).filter(Delivery.id == delivery_id).first()
+            if deliv:
+                deliv.is_deleted = True
             db.commit()
         except Exception:
             db.rollback()
@@ -246,17 +247,15 @@ def test_database_level_audit_immutability_triggers():
 
         assert delete_failed, "Database trigger must prevent direct SQL DELETE on delivery_events!"
 
-        # 3. Clean cascade deletion when parent delivery is removed is allowed
-        db.query(Delivery).filter(Delivery.id == delivery_id).delete()
-        db.query(DeliveryEvent).filter(DeliveryEvent.delivery_id == delivery_id).delete()
+        # 3. Permanent retention: soft-deletion archives delivery while audit events remain permanently intact
+        delivery.is_deleted = True
         db.commit()
+
+        # Audit events still exist and are queryable
+        preserved_event = db.query(DeliveryEvent).filter(DeliveryEvent.id == event_id).first()
+        assert preserved_event is not None
+        assert preserved_event.delivery_id == delivery_id
     finally:
-        try:
-            db.query(Delivery).filter(Delivery.id == delivery_id).delete()
-            db.query(DeliveryEvent).filter(DeliveryEvent.delivery_id == delivery_id).delete()
-            db.commit()
-        except Exception:
-            db.rollback()
         db.close()
 
 
@@ -480,8 +479,9 @@ def test_manual_requeue_resets_retry_counter_and_enables_processing():
         try:
             if outbox_id:
                 db.query(NotificationOutbox).filter(NotificationOutbox.id == outbox_id).delete()
-            db.query(Delivery).filter(Delivery.id == delivery_id).delete()
-            db.query(DeliveryEvent).filter(DeliveryEvent.delivery_id == delivery_id).delete()
+            deliv = db.query(Delivery).filter(Delivery.id == delivery_id).first()
+            if deliv:
+                deliv.is_deleted = True
             db.commit()
         except Exception:
             db.rollback()

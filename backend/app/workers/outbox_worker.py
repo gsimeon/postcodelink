@@ -84,7 +84,11 @@ def main():
         logger.info(f"Received termination signal ({sig}). Stopping outbox worker loop...")
         stop_event.set()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
+    signals = [signal.SIGINT, signal.SIGTERM]
+    if hasattr(signal, "SIGBREAK"):
+        signals.append(signal.SIGBREAK)
+
+    for sig in signals:
         try:
             signal.signal(sig, _handle_signal)
         except Exception:

@@ -150,8 +150,10 @@ def check_api_key_rate_limit(key_id: str, limit_per_minute: int = 60) -> None:
             _handle_redis_failure()
 
     # Fail-closed policy enforcement in production
-    fail_closed = getattr(settings, "RATE_LIMIT_REDIS_FAIL_CLOSED", False)
-    if settings.ENVIRONMENT == "production" and fail_closed:
+    # In multi-instance production: strictly fail closed with HTTP 503 unless explicit single-instance opt-out is enabled
+    allow_in_memory = getattr(settings, "ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION", False)
+    fail_closed = getattr(settings, "RATE_LIMIT_REDIS_FAIL_CLOSED", True)
+    if settings.ENVIRONMENT == "production" and fail_closed and not allow_in_memory:
         logger.error("[RateLimiter CRITICAL] Redis is unavailable and RATE_LIMIT_REDIS_FAIL_CLOSED is enabled. Failing closed.")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

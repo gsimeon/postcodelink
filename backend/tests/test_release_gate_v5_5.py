@@ -67,8 +67,12 @@ def clean_database_state():
     db = SessionLocal()
     try:
         db.query(NotificationOutbox).delete()
-        db.query(Delivery).delete()
+        for deliv in db.query(Delivery).all():
+            deliv.is_deleted = True
+            deliv.status = DeliveryStatus.CANCELLED
         db.commit()
+    except Exception:
+        db.rollback()
     finally:
         db.close()
 
