@@ -164,3 +164,74 @@ def test_nipost_lookup_exception_logs_only_error_category(caplog):
     assert "private-host.internal" not in rendered
     assert "secret-value" not in rendered
     assert "RuntimeError" in rendered
+
+
+@pytest.mark.parametrize(
+    "payload,expected_status",
+    [
+        ({"status": "NOT_FOUND"}, "NOT_FOUND"),
+        ({"status": "INVALID"}, "INVALID_RESPONSE"),
+        ({"valid": False}, "NOT_FOUND"),
+        ({"found": False}, "NOT_FOUND"),
+        ({"matches": []}, "NOT_FOUND"),
+    ],
+)
+def test_nipost_payload_negative_statuses_are_not_conflated(payload, expected_status):
+    status, _, _ = NIPOSTClient._adapt_nipost_payload(payload, "100001")
+    assert status.value == expected_status
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"detail": "Not Found"},
+        {"detail": "postcode route not found"},
+        {"message": "postcode invalid"},
+        {"status": "INVALID"},
+        {"error": "postcode lookup failed"},
+    ],
+)
+def test_generic_nipost_json_404_is_unavailable_not_postcode_not_found(body):
+    client = NIPOSTClient(base_url="https://nipost.example.test", api_key="test-key")
+    response = MagicMock()
+    response.status_code = 404
+    response.headers = {"content-type": "application/json"}
+    response.json.return_value = body
+    response.text = str(body)
+
+    with patch("httpx.Client.get", return_value=response):
+        result = client.lookup_postcode("100001")
+
+    assert result.status.value == "UNAVAILABLE"
+    assert result.http_status == 404
+
+
+def test_explicit_nipost_postcode_not_found_404_is_not_found():
+    client = NIPOSTClient(base_url="https://nipost.example.test", api_key="test-key")
+    response = MagicMock()
+    response.status_code = 404
+    response.headers = {"content-type": "application/json"}
+    response.json.return_value = {"status": "NOT_FOUND"}
+    response.text = '{"status":"NOT_FOUND"}'
+
+    with patch("httpx.Client.get", return_value=response):
+        result = client.lookup_postcode("100001")
+
+    assert result.status.value == "NOT_FOUND"
+    assert result.http_status == 404
+
+
+def test_rate_limiter_health_endpoint_omits_redis_username_password_and_query(monkeypatch):
+    monkeypatch.setattr(rate_limiter, "_get_redis_client", lambda: None)
+    monkeypatch.setattr(settings, "ENVIRONMENT", "development")
+    monkeypatch.setattr(
+        settings,
+        "REDIS_URL",
+        "rediss://operator:secret-password@cache.internal.example:6380/4?ssl=true",
+    )
+
+    status = get_rate_limiter_status()
+    assert status["redis_endpoint"] == "rediss://cache.internal.example:6380"
+    rendered = str(status)
+    for secret in ("operator", "secret-password", "/4", "ssl=true"):
+        assert secret not in rendered
