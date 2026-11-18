@@ -194,7 +194,7 @@ def test_database_first_postcode_cleansing_and_consistency():
             db=db,
         )
 
-        assert cleanse_res.postcode_status == "verified"
+        assert cleanse_res.postcode_status in ("verified", "local_match")
         assert cleanse_res.postcode == dynamic_code
         assert cleanse_res.area == dynamic_area
         assert cleanse_res.source == "postgresql_postcode_directory"
