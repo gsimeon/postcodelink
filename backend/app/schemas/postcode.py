@@ -6,8 +6,8 @@ from pydantic import BaseModel, Field, ConfigDict
 
 class PostcodeRecordSchema(BaseModel):
     code: str
-    area: str
-    state: str
+    area: Optional[str] = "Unspecified Area"
+    state: Optional[str] = "Nigeria"
     lga: Optional[str] = None
     lat: Optional[float] = None
     lng: Optional[float] = None
@@ -36,6 +36,8 @@ class PostcodeLookupResponse(BaseModel):
     count: int
     matches: List[PostcodeRecordSchema]
     is_live_nipost: bool = False
+    is_partial_verification: bool = False
+    service_type: Optional[str] = None
     dataset_version: Optional[str] = None
     api_integration_version: str = "2026.1"
     provenance: str = "PostcodeLink Local Reference Dataset"
@@ -53,6 +55,8 @@ class CleanseAddressRequest(BaseModel):
     area: Optional[str] = None
     state: Optional[str] = None
     postcode: Optional[str] = None
+    strict: bool = False
+    live_verify: bool = False
 
 
 class CleanseAddressResponse(BaseModel):
@@ -79,3 +83,9 @@ class CleanseAddressResponse(BaseModel):
     source_owner: Optional[str] = "PostcodeLink"
     source_type: Optional[str] = "local_reference"
     national_components: Optional[dict] = None
+    checked_against_nipost: bool = False
+    is_live_nipost: bool = False
+    verification_source: str = "local_nipost_reference_dataset"
+    fallback_used: bool = False
+    upstream_status: Optional[str] = None
+    upstream_error: Optional[str] = None

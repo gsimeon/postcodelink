@@ -73,18 +73,38 @@ def execute_postcode_lookup(
         if res.status == NIPOSTLookupStatus.FOUND and res.data:
             live_res = res.data
             upstream_version = live_res.get("dataset_version")
+            is_validator = (live_res.get("service") == "validator" or not live_res.get("area") or not live_res.get("state"))
+
+            rec_area = live_res.get("area")
+            rec_state = live_res.get("state")
+            rec_lga = live_res.get("lga")
+            rec_building = live_res.get("building_reference") or live_res.get("recent_house_address")
+
+            # If validator-only (existence verified without address metadata), check if local directory provides attributes
+            if is_validator and (not rec_area or not rec_state):
+                local_candidates = find_postcodes(db=db, code=code)
+                if local_candidates:
+                    loc = local_candidates[0]
+                    rec_area = rec_area or loc.area
+                    rec_state = rec_state or loc.state
+                    rec_lga = rec_lga or loc.lga
+                    rec_building = rec_building or loc.building_reference
+                else:
+                    rec_area = rec_area or "Unspecified Location"
+                    rec_state = rec_state or "Nigeria"
+
             schema_rec = PostcodeRecordSchema(
-                code=live_res["code"],
-                area=live_res["area"],
-                state=live_res["state"],
-                lga=live_res.get("lga"),
+                code=live_res.get("code") or code,
+                area=rec_area,
+                state=rec_state,
+                lga=rec_lga,
                 lat=live_res.get("lat"),
                 lng=live_res.get("lng"),
                 postcode_type=live_res.get("postcode_type", "digital_location" if len(code.replace("-", "")) > 6 else "conventional_area"),
                 postcode_category="official_digital_postcode" if len(code.replace("-", "")) > 6 else "legacy_postal_code",
-                building_reference=live_res.get("building_reference") or live_res.get("recent_house_address"),
+                building_reference=rec_building,
                 verification_status="official_verified",
-                provenance="NIPOST Official National Directory (Live API)",
+                provenance="NIPOST Official National Directory (Live API - Existence Verified)" if is_validator else "NIPOST Official National Directory (Live API)",
                 dataset_version=upstream_version,
                 source_owner="NIPOST",
                 source_type="official_national_directory",
@@ -94,9 +114,11 @@ def execute_postcode_lookup(
                 count=1,
                 matches=[schema_rec],
                 is_live_nipost=True,
+                is_partial_verification=is_validator,
+                service_type="validator" if is_validator else "autofill",
                 dataset_version=upstream_version,
                 api_integration_version="2026.1",
-                provenance="NIPOST Official National Directory (Live API)",
+                provenance="NIPOST Official National Directory (Live API - Existence Verified)" if is_validator else "NIPOST Official National Directory (Live API)",
                 lookup_status="official_verified",
                 verification_source="live_nipost_api",
                 verification_status="official_verified",
@@ -227,14 +249,24 @@ def api_lookup_postcodes(
 
 
 @router.post("/cleanse", response_model=CleanseAddressResponse)
-def api_cleanse_address(request: CleanseAddressRequest, http_req: Request, db: Session = Depends(get_db)):
-    """Normalize and cleanse a messy Nigerian street address against verified reference postcodes."""
+def api_cleanse_address(
+    request: CleanseAddressRequest,
+    http_req: Request,
+    client: NIPOSTClient = Depends(get_nipost_client),
+    db: Session = Depends(get_db),
+):
+    """Normalize and cleanse a messy Nigerian street address against verified reference postcodes,
+    optionally verifying directly against the live official NIPOST gateway.
+    """
     check_optional_api_key(http_req, db)
     return cleanse_address(
         address=request.address,
         state_hint=request.state,
         area_hint=request.area,
         postcode_hint=request.postcode,
+        strict=request.strict,
+        live_verify=request.live_verify,
+        client=client,
         db=db,
     )
 
@@ -273,6 +305,7 @@ def api_commercial_lookup_postcodes(
 def api_commercial_cleanse_address(
     request: CleanseAddressRequest,
     http_req: Request,
+    client: NIPOSTClient = Depends(get_nipost_client),
     merchant: Profile = Depends(get_api_key_merchant),
     db: Session = Depends(get_db),
 ):
@@ -286,5 +319,8 @@ def api_commercial_cleanse_address(
         state_hint=request.state,
         area_hint=request.area,
         postcode_hint=request.postcode,
+        strict=request.strict,
+        live_verify=request.live_verify,
+        client=client,
         db=db,
     )

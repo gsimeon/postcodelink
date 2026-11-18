@@ -10,9 +10,11 @@ PostcodeLink Local Reference Provenance:
 """
 import re
 from typing import Optional, List, Dict, Any
+from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 from backend.app.models.postcode import PostcodeDirectory
 from backend.app.schemas.postcode import CleanseAddressResponse, PostcodeRecordSchema
+from backend.app.services.nipost_client import NIPOSTLookupStatus
 from backend.app.core.postcode_utils import (
     parse_digital_postcode_components,
     parse_legacy_postcode,
@@ -267,7 +269,7 @@ def find_postcodes(
     compact_code = clean_code.replace("-", "") if clean_code else ""
 
     if db:
-        from sqlalchemy import or_
+        from sqlalchemy import func, or_
         query = db.query(PostcodeDirectory).filter(PostcodeDirectory.is_active == True)
         if clean_code:
             query = query.filter(
@@ -275,6 +277,8 @@ def find_postcodes(
                     PostcodeDirectory.code == clean_code,
                     PostcodeDirectory.code == compact_code,
                     PostcodeDirectory.code.ilike(clean_code),
+                    PostcodeDirectory.code.ilike(compact_code),
+                    func.replace(PostcodeDirectory.code, "-", "").ilike(compact_code),
                 )
             )
         if state:
@@ -314,6 +318,9 @@ def cleanse_address(
     postcode_hint: Optional[str] = None,
     area_hint: Optional[str] = None,
     db: Optional[Session] = None,
+    client: Optional[Any] = None,
+    strict: bool = False,
+    live_verify: bool = False,
 ) -> CleanseAddressResponse:
     """Cleanse, disambiguate, and validate a Nigerian delivery address against official NIPOST records (Database-first)."""
     target_addr = address or raw_address or ""
@@ -347,6 +354,229 @@ def cleanse_address(
     postcode_type = "digital_location" if is_digital_location else "conventional_area"
     postcode_category = "official_digital_postcode" if is_digital_location else "legacy_postal_code"
     resolution_level = "building_location" if is_digital_location else "area_district"
+
+    # 2. Live Official NIPOST Verification Workflow
+    checked_against_nipost = False
+    is_live_nipost = False
+    verification_source = "local_nipost_reference_dataset"
+    fallback_used = False
+    upstream_status: Optional[str] = None
+    upstream_error: Optional[str] = None
+
+    should_live_verify = bool(live_verify or strict or (client and getattr(client, "is_configured", False) and (live_verify or strict)))
+
+    if strict:
+        if not extracted_code:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Strict verification mode requires an identifiable postcode in input or address text. Area-only discovery cannot be strictly verified against NIPOST.",
+            )
+        if not client or not getattr(client, "is_configured", False):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Official NIPOST API gateway is not configured or enabled. Strict verification requires live NIPOST connectivity.",
+            )
+
+    if should_live_verify and extracted_code and client and getattr(client, "is_configured", False):
+        nipost_res = client.lookup_postcode(extracted_code)
+        if nipost_res.status == NIPOSTLookupStatus.INVALID_INPUT:
+            if strict:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=nipost_res.error_message or f"NIPOST rejected postcode '{extracted_code}' as invalid input.",
+                )
+            return CleanseAddressResponse(
+                original_address=clean_addr,
+                formatted_address=clean_addr,
+                area=area_hint or "Invalid Location",
+                state=state_hint or "Lagos",
+                lga=None,
+                postcode=extracted_code,
+                postcode_type=postcode_type,
+                postcode_category=postcode_category,
+                resolution_level=resolution_level,
+                postcode_status="invalid",
+                verification_status="unverified",
+                confidence=0.0,
+                postcode_valid=False,
+                address_consistent=False,
+                dispatch_confidence=0.0,
+                source="live_nipost_api",
+                matched_record=None,
+                changes_made=[f"NIPOST API rejected postcode '{extracted_code}' as invalid input."],
+                provenance="NIPOST Official National Directory (Rejected Input)",
+                checked_against_nipost=True,
+                is_live_nipost=True,
+                verification_source="live_nipost_api",
+                upstream_status=nipost_res.status.value,
+                upstream_error=nipost_res.error_message,
+            )
+        elif nipost_res.status == NIPOSTLookupStatus.NOT_FOUND:
+            if strict:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=nipost_res.error_message or f"Postcode '{extracted_code}' not found in official national directory.",
+                )
+            return CleanseAddressResponse(
+                original_address=clean_addr,
+                formatted_address=clean_addr,
+                area=area_hint or "Unverified Location",
+                state=state_hint or "Lagos",
+                lga=None,
+                postcode=extracted_code,
+                postcode_type=postcode_type,
+                postcode_category=postcode_category,
+                resolution_level=resolution_level,
+                postcode_status="unverified",
+                verification_status="unverified",
+                confidence=0.0,
+                postcode_valid=False,
+                address_consistent=False,
+                dispatch_confidence=0.0,
+                source="live_nipost_api",
+                matched_record=None,
+                changes_made=[f"Postcode '{extracted_code}' verified as unassigned in official NIPOST directory."],
+                provenance="NIPOST Official National Directory (Not Found)",
+                checked_against_nipost=True,
+                is_live_nipost=True,
+                verification_source="live_nipost_api",
+                upstream_status=nipost_res.status.value,
+                upstream_error=nipost_res.error_message,
+            )
+        elif nipost_res.status in (NIPOSTLookupStatus.UNAUTHORIZED, NIPOSTLookupStatus.UNAVAILABLE, NIPOSTLookupStatus.INVALID_RESPONSE):
+            if strict:
+                if nipost_res.status == NIPOSTLookupStatus.UNAUTHORIZED:
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=f"Official NIPOST API authorization failed: {nipost_res.error_message or 'Invalid or expired credentials'}. Fallback disabled in strict verification mode.",
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail=f"Official NIPOST API unavailable ({nipost_res.status.value}): {nipost_res.error_message or 'Service unreachable'}. Fallback disabled in strict verification mode.",
+                    )
+            fallback_used = True
+            checked_against_nipost = True
+            upstream_status = nipost_res.status.value
+            upstream_error = nipost_res.error_message
+        elif nipost_res.status == NIPOSTLookupStatus.FOUND and nipost_res.data:
+            live_data = nipost_res.data
+            live_code = live_data.get("code") or extracted_code
+            live_area = live_data.get("area")
+            live_state = live_data.get("state")
+            live_lga = live_data.get("lga")
+            live_building = live_data.get("building_reference") or live_data.get("recent_house_address")
+
+            is_validator = (live_data.get("service") == "validator" or not live_area or not live_state)
+            if is_validator and (not live_area or not live_state):
+                loc_cands = find_postcodes(db=db, code=live_code)
+                if loc_cands:
+                    live_area = live_area or loc_cands[0].area
+                    live_state = live_state or loc_cands[0].state
+                    live_lga = live_lga or loc_cands[0].lga
+                    live_building = live_building or loc_cands[0].building_reference
+                else:
+                    live_area = live_area or area_hint or "Unspecified Location"
+                    live_state = live_state or state_hint or "Nigeria"
+
+            norm_live_area = normalize_string(live_area)
+            norm_live_state = normalize_string(live_state)
+            norm_live_lga = normalize_string(live_lga) if live_lga else ""
+
+            area_consistent = True
+            if norm_area_hint:
+                if (
+                    norm_area_hint not in norm_live_area
+                    and norm_live_area not in norm_area_hint
+                    and norm_area_hint not in norm_live_lga
+                ):
+                    area_consistent = False
+
+            state_consistent = True
+            if norm_state_hint and norm_state_hint != norm_live_state:
+                state_consistent = False
+
+            address_consistent = area_consistent and state_consistent
+            rec_type = live_data.get("postcode_type", "digital_location" if len(live_code.replace("-", "")) > 6 else "conventional_area")
+            rec_cat = "official_digital_postcode" if len(live_code.replace("-", "")) > 6 else "legacy_postal_code"
+            rec_res = "building_location" if rec_type == "digital_location" else "area_district"
+
+            matched_schema = PostcodeRecordSchema(
+                code=live_code,
+                area=live_area,
+                state=live_state,
+                lga=live_lga,
+                lat=live_data.get("lat"),
+                lng=live_data.get("lng"),
+                postcode_type=rec_type,
+                postcode_category=rec_cat,
+                building_reference=live_building,
+                verification_status="official_verified",
+                provenance="NIPOST Official National Directory (Live API)",
+                dataset_version=live_data.get("dataset_version"),
+                source_owner="NIPOST",
+                source_type="official_national_directory",
+            )
+
+            if address_consistent:
+                formatted = f"{clean_addr.rstrip(',')}, {live_area}, {live_state} {live_code}"
+                return CleanseAddressResponse(
+                    original_address=clean_addr,
+                    formatted_address=formatted,
+                    area=live_area,
+                    state=live_state,
+                    lga=live_lga,
+                    postcode=live_code,
+                    postcode_type=rec_type,
+                    postcode_category=rec_cat,
+                    resolution_level=rec_res,
+                    postcode_status="verified",
+                    verification_status="official_verified",
+                    confidence=0.95,
+                    postcode_valid=True,
+                    address_consistent=True,
+                    dispatch_confidence=0.95,
+                    source="live_nipost_api",
+                    matched_record=matched_schema,
+                    changes_made=[f"Verified against official live NIPOST API code {live_code} for {live_area}, {live_state}"],
+                    provenance="NIPOST Official National Directory (Live API)",
+                    source_owner="NIPOST",
+                    source_type="official_national_directory",
+                    checked_against_nipost=True,
+                    is_live_nipost=True,
+                    verification_source="live_nipost_api",
+                    fallback_used=False,
+                    upstream_status=nipost_res.status.value,
+                )
+            else:
+                return CleanseAddressResponse(
+                    original_address=clean_addr,
+                    formatted_address=f"{clean_addr.rstrip(',')}, {live_state}",
+                    area=area_hint or live_area,
+                    state=state_hint or live_state,
+                    lga=live_lga,
+                    postcode=live_code,
+                    postcode_type=rec_type,
+                    postcode_category=rec_cat,
+                    resolution_level=rec_res,
+                    postcode_status="conflict",
+                    verification_status="official_verified",
+                    confidence=0.50,
+                    postcode_valid=True,
+                    address_consistent=False,
+                    dispatch_confidence=0.45,
+                    source="live_nipost_api",
+                    matched_record=matched_schema,
+                    changes_made=[f"Address Inconsistency: Supplied area '{area_hint or clean_addr}' does not match official postcode {live_code} area '{live_area}, {live_state}'."],
+                    provenance="NIPOST Official National Directory (Live API)",
+                    source_owner="NIPOST",
+                    source_type="official_national_directory",
+                    checked_against_nipost=True,
+                    is_live_nipost=True,
+                    verification_source="live_nipost_api",
+                    fallback_used=False,
+                    upstream_status=nipost_res.status.value,
+                )
 
     # 2. Database-First Candidates Selection
     candidates = []
@@ -470,6 +700,12 @@ def cleanse_address(
             verification_status="unverified",
             source_owner="PostcodeLink",
             source_type="unverified_input",
+            checked_against_nipost=checked_against_nipost,
+            is_live_nipost=False,
+            verification_source="local_nipost_reference_dataset",
+            fallback_used=fallback_used,
+            upstream_status=upstream_status,
+            upstream_error=upstream_error,
         )
 
     # CASE 1: Exact postcode provided and matches reference record
@@ -575,6 +811,12 @@ def cleanse_address(
                 source_owner=best_match.get("source_owner", "PostcodeLink"),
                 source_type=best_match.get("source_type", "local_reference"),
                 national_components=best_match.get("national_components"),
+                checked_against_nipost=checked_against_nipost,
+                is_live_nipost=False,
+                verification_source="local_nipost_reference_dataset",
+                fallback_used=fallback_used,
+                upstream_status=upstream_status,
+                upstream_error=upstream_error,
             )
         else:
             # Conflict detected: Postcode is valid, but supplied area/state contradicts postcode directory!
@@ -602,6 +844,12 @@ def cleanse_address(
                 matched_record=PostcodeRecordSchema(**best_match),
                 changes_made=changes,
                 provenance=best_match.get("provenance", "NIPOST 6-Digit Postal Directory (Zone Reference)"),
+                checked_against_nipost=checked_against_nipost,
+                is_live_nipost=False,
+                verification_source="local_nipost_reference_dataset",
+                fallback_used=fallback_used,
+                upstream_status=upstream_status,
+                upstream_error=upstream_error,
             )
 
     # CASE 2: Area recognized in address without explicit matching code (estimated postcode)
@@ -632,6 +880,12 @@ def cleanse_address(
             matched_record=PostcodeRecordSchema(**best_match),
             changes_made=changes,
             provenance=best_match.get("provenance", "NIPOST 6-Digit Postal Directory (Zone Reference)"),
+            checked_against_nipost=checked_against_nipost,
+            is_live_nipost=False,
+            verification_source="local_nipost_reference_dataset",
+            fallback_used=fallback_used,
+            upstream_status=upstream_status,
+            upstream_error=upstream_error,
         )
 
     # CASE 3: Unrecognized address / No postcode match (UNVERIFIED)
@@ -657,4 +911,10 @@ def cleanse_address(
             matched_record=None,
             changes_made=changes,
             provenance="Unverified Address Input",
+            checked_against_nipost=checked_against_nipost,
+            is_live_nipost=False,
+            verification_source="local_nipost_reference_dataset",
+            fallback_used=fallback_used,
+            upstream_status=upstream_status,
+            upstream_error=upstream_error,
         )

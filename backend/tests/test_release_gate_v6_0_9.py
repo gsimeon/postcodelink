@@ -283,3 +283,185 @@ def test_nipost_client_decoupled_validator_and_autofill_contracts():
     assert adapted_af["state"] == "Lagos"
     assert adapted_af["lga"] == "Ikeja"
     assert adapted_af["lat"] == 6.6186
+
+
+# ==============================================================================
+# 6. P2: Compact Postcode Searches in Database
+# ==============================================================================
+def test_compact_postcode_search_in_database():
+    """Verify that querying compact codes (e.g. FC02A09DB09 or lowercase) matches hyphenated records in database."""
+    from backend.app.services.postcode_service import find_postcodes
+    db = SessionLocal()
+    code_canonical = "FC-02-A09-DB-09"
+    try:
+        rec = db.query(PostcodeDirectory).filter(PostcodeDirectory.code == code_canonical).first()
+        if not rec:
+            rec = PostcodeDirectory(
+                code=code_canonical,
+                area="Garki District Area 2",
+                state="Abuja (FCT)",
+                lga="Municipal Area Council",
+                lat=9.0321,
+                lng=7.4891,
+                verification_status="local_reference",
+                provenance="PostcodeLink Local Reference Dataset",
+                dataset_version="2024.2",
+                is_active=True,
+            )
+            db.add(rec)
+            db.commit()
+
+        # 1. Search with canonical code
+        matches_canon = find_postcodes(db=db, code=code_canonical)
+        assert len(matches_canon) >= 1
+        assert matches_canon[0].code == code_canonical
+
+        # 2. Search with compact uppercase code: FC02A09DB09
+        matches_compact = find_postcodes(db=db, code="FC02A09DB09")
+        assert len(matches_compact) >= 1
+        assert matches_compact[0].code == code_canonical
+
+        # 3. Search with compact lowercase code: fc02a09db09
+        matches_lower = find_postcodes(db=db, code="fc02a09db09")
+        assert len(matches_lower) >= 1
+        assert matches_lower[0].code == code_canonical
+    finally:
+        db.close()
+
+
+# ==============================================================================
+# 7. P1: Validator-Only Responses Without Address Attributes
+# ==============================================================================
+def test_execute_postcode_lookup_handles_validator_only_payload_without_key_error():
+    """Verify execute_postcode_lookup() handles validator-only responses without raising KeyError."""
+    from unittest.mock import MagicMock
+    from backend.app.routers.postcodes import execute_postcode_lookup
+    from backend.app.services.nipost_client import NIPOSTLookupStatus, NIPOSTLookupResult
+
+    mock_client = MagicMock(spec=NIPOSTClient)
+    mock_client.is_configured = True
+    # Validator response contains code and valid: True, but lacks area and state
+    mock_client.lookup_postcode.return_value = NIPOSTLookupResult(
+        status=NIPOSTLookupStatus.FOUND,
+        data={
+            "code": "100001",
+            "valid": True,
+            "dataset_version": "2026.1",
+            "service": "validator",
+        },
+    )
+
+    db = SessionLocal()
+    try:
+        res = execute_postcode_lookup(db=db, code="100001", client=mock_client)
+        assert res.lookup_status == "official_verified"
+        assert res.is_live_nipost is True
+        assert res.is_partial_verification is True
+        assert res.service_type == "validator"
+        assert len(res.matches) == 1
+        assert res.matches[0].code == "100001"
+        assert res.matches[0].verification_status == "official_verified"
+    finally:
+        db.close()
+
+
+# ==============================================================================
+# 8. P1: Address Cleansing NIPOST Verification Workflow
+# ==============================================================================
+def test_cleanse_address_invokes_nipost_and_discloses_live_verification():
+    """Verify /postcodes/cleanse invokes NIPOST when live_verify=True and discloses live verification."""
+    from unittest.mock import patch
+    from starlette.testclient import TestClient
+    from backend.app.main import app
+    from backend.app.services.nipost_client import NIPOSTLookupStatus, NIPOSTLookupResult
+
+    client = TestClient(app)
+    live_result = NIPOSTLookupResult(
+        status=NIPOSTLookupStatus.FOUND,
+        data={
+            "code": "100001",
+            "area": "Ikeja Central / Alausa",
+            "state": "Lagos",
+            "lga": "Ikeja",
+            "lat": 6.6186,
+            "lng": 3.3570,
+            "dataset_version": "2026.1",
+            "service": "autofill",
+        },
+    )
+
+    with patch("backend.app.services.nipost_client.NIPOSTClient.is_configured", True), \
+         patch("backend.app.services.nipost_client.NIPOSTClient.lookup_postcode", return_value=live_result):
+        resp = client.post("/api/v1/postcodes/cleanse", json={
+            "address": "12 Broad Street, Marina, Lagos",
+            "postcode": "100001",
+            "live_verify": True,
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["postcode"] == "100001"
+        assert data["postcode_status"] == "verified"
+        assert data["verification_status"] == "official_verified"
+        assert data["confidence"] == 0.95
+        assert data["checked_against_nipost"] is True
+        assert data["is_live_nipost"] is True
+        assert data["verification_source"] == "live_nipost_api"
+        assert any("Verified against official live NIPOST API" in c for c in data["changes_made"])
+
+
+def test_cleanse_address_strict_mode_fails_closed_when_nipost_unavailable():
+    """Verify /postcodes/cleanse with strict=True fails closed with HTTP 503 when NIPOST is unavailable."""
+    from unittest.mock import patch
+    from starlette.testclient import TestClient
+    from backend.app.main import app
+    from backend.app.services.nipost_client import NIPOSTLookupStatus, NIPOSTLookupResult
+
+    client = TestClient(app)
+    unavailable_result = NIPOSTLookupResult(
+        status=NIPOSTLookupStatus.UNAVAILABLE,
+        error_message="Gateway timeout connecting to upstream NIPOST.",
+    )
+
+    with patch("backend.app.services.nipost_client.NIPOSTClient.is_configured", True), \
+         patch("backend.app.services.nipost_client.NIPOSTClient.lookup_postcode", return_value=unavailable_result):
+        resp = client.post("/api/v1/postcodes/cleanse", json={
+            "address": "12 Broad Street, Marina, Lagos",
+            "postcode": "100001",
+            "strict": True,
+        })
+        assert resp.status_code == 503
+        assert "Official NIPOST API unavailable" in resp.json()["detail"]
+
+
+def test_cleanse_address_fallback_discloses_upstream_failure():
+    """Verify /postcodes/cleanse with strict=False falls back to local reference and discloses upstream failure."""
+    from unittest.mock import patch
+    from starlette.testclient import TestClient
+    from backend.app.main import app
+    from backend.app.services.nipost_client import NIPOSTLookupStatus, NIPOSTLookupResult
+
+    client = TestClient(app)
+    unavailable_result = NIPOSTLookupResult(
+        status=NIPOSTLookupStatus.UNAVAILABLE,
+        error_message="Gateway connection reset.",
+    )
+
+    with patch("backend.app.services.nipost_client.NIPOSTClient.is_configured", True), \
+         patch("backend.app.services.nipost_client.NIPOSTClient.lookup_postcode", return_value=unavailable_result):
+        resp = client.post("/api/v1/postcodes/cleanse", json={
+            "address": "12 Broad Street, Marina, Lagos",
+            "postcode": "100001",
+            "live_verify": True,
+            "strict": False,
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["postcode"] == "100001"
+        assert data["postcode_status"] == "local_match"
+        assert data["verification_status"] == "local_reference"
+        assert data["confidence"] == 0.75
+        assert data["checked_against_nipost"] is True
+        assert data["is_live_nipost"] is False
+        assert data["fallback_used"] is True
+        assert data["upstream_status"] == "UNAVAILABLE"
+        assert data["verification_source"] == "local_nipost_reference_dataset"
