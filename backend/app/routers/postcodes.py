@@ -10,8 +10,13 @@ from backend.app.schemas.postcode import (
     CleanseAddressRequest,
     CleanseAddressResponse,
     PostcodeRecordSchema,
+    CoverageReportResponse,
 )
-from backend.app.services.postcode_service import find_postcodes, cleanse_address
+from backend.app.services.postcode_service import (
+    find_postcodes,
+    cleanse_address,
+    get_postcode_coverage_report,
+)
 from backend.app.services.nipost_client import get_nipost_client, NIPOSTClient, NIPOSTLookupStatus
 from backend.app.routers.api_keys import get_api_key_merchant
 from backend.app.core.rate_limiter import check_client_ip_rate_limit
@@ -190,6 +195,8 @@ def execute_postcode_lookup(
                 count=1,
                 matches=[schema_rec],
                 is_live_nipost=bool(evidence_persisted),
+                upstream_contacted=True,
+                postcode_exists=True,
                 is_partial_verification=is_validator,
                 service_type=service_type_val,
                 dataset_version=upstream_version,
@@ -214,7 +221,9 @@ def execute_postcode_lookup(
                 source="live_nipost_api",
                 count=0,
                 matches=[],
-                is_live_nipost=True,
+                is_live_nipost=False,
+                upstream_contacted=True,
+                postcode_exists=False,
                 dataset_version=upstream_version,
                 api_integration_version="2026.1",
                 provenance="NIPOST Official National Directory (Live API: Postcode Not Found)",
@@ -290,6 +299,8 @@ def execute_postcode_lookup(
         count=len(matches),
         matches=matches,
         is_live_nipost=False,
+        upstream_contacted=fallback_used,
+        postcode_exists=bool(matches) if not fallback_used else None,
         dataset_version="2024.2",
         api_integration_version="2026.1",
         provenance="PostcodeLink Local Reference Dataset",
@@ -351,6 +362,17 @@ def api_cleanse_address(
         client=client,
         db=db,
     )
+
+
+@router.get("/coverage", response_model=CoverageReportResponse)
+def api_get_coverage_report(
+    db: Session = Depends(get_db),
+    client: NIPOSTClient = Depends(get_nipost_client),
+):
+    """Statistical dataset coverage, geographic breadth, and upstream NIPOST adapter status.
+    Provides verifiable operational metrics for platform users and enterprise evaluators.
+    """
+    return get_postcode_coverage_report(db=db, client=client)
 
 
 # ==============================================================================

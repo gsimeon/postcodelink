@@ -16,7 +16,12 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger("postcode_service")
 from backend.app.models.postcode import PostcodeDirectory
-from backend.app.schemas.postcode import CleanseAddressResponse, PostcodeRecordSchema
+from backend.app.schemas.postcode import (
+    CleanseAddressResponse,
+    PostcodeRecordSchema,
+    VerificationMode,
+    CoverageReportResponse,
+)
 from backend.app.services.nipost_client import NIPOSTLookupStatus
 from backend.app.core.postcode_utils import (
     parse_digital_postcode_components,
@@ -324,7 +329,7 @@ def cleanse_address(
     client: Optional[Any] = None,
     strict: bool = False,
     live_verify: bool = False,
-    verification_mode: Optional[str] = None,
+    verification_mode: Optional[VerificationMode] = None,
 ) -> CleanseAddressResponse:
     """Cleanse, disambiguate, and validate a Nigerian delivery address against official NIPOST records (Database-first)."""
     target_addr = address or raw_address or ""
@@ -333,21 +338,33 @@ def cleanse_address(
     norm_area_hint = normalize_string(area_hint)
     norm_state_hint = normalize_string(state_hint)
 
-    # Resolve verification mode and flags with full backwards compatibility
-    if verification_mode == "nipost_strict" or strict:
-        effective_mode = "nipost_strict"
-        effective_strict = True
-        effective_live_verify = True
-    elif verification_mode == "local_standardization" and not live_verify:
-        effective_mode = "local_standardization"
+    # Validate verification mode if supplied as string directly
+    if verification_mode is not None and verification_mode not in ("local_standardization", "nipost_validate", "nipost_strict"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid verification_mode '{verification_mode}'. Supported modes: 'local_standardization', 'nipost_validate', 'nipost_strict'."
+        )
+
+    # Validate contradictory flags
+    if verification_mode == "local_standardization":
+        if strict or live_verify:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Contradictory parameters: verification_mode='local_standardization' cannot be combined with strict or live_verify flags."
+            )
+        effective_mode: VerificationMode = "local_standardization"
         effective_strict = False
         effective_live_verify = False
+    elif verification_mode == "nipost_strict" or strict:
+        effective_mode: VerificationMode = "nipost_strict"
+        effective_strict = True
+        effective_live_verify = True
     elif verification_mode == "nipost_validate" or live_verify:
-        effective_mode = "nipost_validate"
+        effective_mode: VerificationMode = "nipost_validate"
         effective_strict = False
         effective_live_verify = True
     else:
-        effective_mode = "local_standardization"
+        effective_mode: VerificationMode = "local_standardization"
         effective_strict = False
         effective_live_verify = False
 
@@ -366,7 +383,7 @@ def cleanse_address(
         extracted_code = norm_digital
         is_digital_location = True
         is_digital_syntax = True
-    elif re.match(r"^\d{6}$", cleaned_hint):
+    elif cleaned_hint:
         extracted_code = cleaned_hint
         is_digital_location = False
     else:
@@ -436,15 +453,18 @@ def cleanse_address(
                 verification_status="unverified",
                 verification_mode=effective_mode,
                 confidence=0.0,
+                match_quality_score=0.0,
                 postcode_valid=False,
+                postcode_exists=False,
                 address_consistent=False,
+                upstream_contacted=True,
                 dispatch_confidence=0.0,
                 source="live_nipost_api",
                 matched_record=None,
                 changes_made=[f"NIPOST API rejected postcode '{extracted_code}' as invalid input."],
                 provenance="NIPOST Official National Directory (Rejected Input)",
                 checked_against_nipost=True,
-                is_live_nipost=True,
+                is_live_nipost=False,
                 verification_source="live_nipost_api",
                 upstream_status=nipost_status.value,
                 upstream_error=nipost_err,
@@ -470,15 +490,18 @@ def cleanse_address(
                 verification_status="unverified",
                 verification_mode=effective_mode,
                 confidence=0.0,
+                match_quality_score=0.0,
                 postcode_valid=False,
+                postcode_exists=False,
                 address_consistent=False,
+                upstream_contacted=True,
                 dispatch_confidence=0.0,
                 source="live_nipost_api",
                 matched_record=None,
                 changes_made=[f"Postcode '{extracted_code}' verified as unassigned in official NIPOST directory."],
                 provenance="NIPOST Official National Directory (Not Found)",
                 checked_against_nipost=True,
-                is_live_nipost=True,
+                is_live_nipost=False,
                 verification_source="live_nipost_api",
                 upstream_status=nipost_status.value,
                 upstream_error=nipost_err,
@@ -680,8 +703,11 @@ def cleanse_address(
                 verification_status=ver_status,
                 verification_mode=effective_mode,
                 confidence=conf,
+                match_quality_score=disp_conf,
                 postcode_valid=True,
+                postcode_exists=True,
                 address_consistent=address_consistent,
+                upstream_contacted=True,
                 dispatch_confidence=disp_conf,
                 source="live_nipost_api" if evidence_persisted else "local_reference_fallback",
                 matched_record=matched_schema,
@@ -817,8 +843,11 @@ def cleanse_address(
             verification_status="unverified",
             verification_mode=effective_mode,
             confidence=0.0,
+            match_quality_score=0.0,
             postcode_valid=False,
+            postcode_exists=False if checked_against_nipost else None,
             address_consistent=False,
+            upstream_contacted=checked_against_nipost,
             dispatch_confidence=0.0,
             source=source_name,
             matched_record=None,
@@ -960,8 +989,11 @@ def cleanse_address(
                 verification_status=ver_status,
                 verification_mode=effective_mode,
                 confidence=conf,
+                match_quality_score=disp_conf,
                 postcode_valid=True,
+                postcode_exists=True if is_official else None,
                 address_consistent=True,
+                upstream_contacted=checked_against_nipost,
                 dispatch_confidence=disp_conf,
                 source=source_name,
                 matched_record=PostcodeRecordSchema(**best_match_rec),
@@ -1001,8 +1033,11 @@ def cleanse_address(
                 verification_status="local_reference",
                 verification_mode=effective_mode,
                 confidence=0.50,
+                match_quality_score=0.45,
                 postcode_valid=True,
+                postcode_exists=None,
                 address_consistent=False,
+                upstream_contacted=checked_against_nipost,
                 dispatch_confidence=0.45,
                 source=source_name,
                 matched_record=PostcodeRecordSchema(**best_match),
@@ -1038,8 +1073,11 @@ def cleanse_address(
             verification_status="estimated",
             verification_mode=effective_mode,
             confidence=0.70,
+            match_quality_score=0.68,
             postcode_valid=postcode_valid,
+            postcode_exists=None,
             address_consistent=True,
+            upstream_contacted=checked_against_nipost,
             dispatch_confidence=0.68,
             source=source_name,
             matched_record=PostcodeRecordSchema(**best_match),
@@ -1070,8 +1108,11 @@ def cleanse_address(
             verification_status="unverified",
             verification_mode=effective_mode,
             confidence=0.20,
+            match_quality_score=0.0,
             postcode_valid=False,
+            postcode_exists=None,
             address_consistent=False,
+            upstream_contacted=checked_against_nipost,
             dispatch_confidence=0.0,
             source=source_name,
             matched_record=None,
@@ -1084,3 +1125,93 @@ def cleanse_address(
             upstream_status=upstream_status,
             upstream_error=upstream_error,
         )
+
+
+def get_postcode_coverage_report(
+    db: Optional[Session] = None,
+    client: Optional[Any] = None,
+) -> CoverageReportResponse:
+    """Calculate and return data coverage metrics, state distribution, and integration readiness."""
+    # 1. Inspect upstream integration
+    if client is None:
+        try:
+            from backend.app.services.nipost_client import get_nipost_client
+            client = get_nipost_client()
+        except Exception:
+            client = None
+
+    integration_status = (
+        client.get_integration_status()
+        if client and hasattr(client, "get_integration_status")
+        else {
+            "adapter_installed": True,
+            "configuration_complete": False,
+            "base_url_set": False,
+            "credentials_set": False,
+            "auth_scheme": "bearer",
+            "status": "unconfigured",
+            "display_status": "Adapter Installed (Awaiting Production Credentials)",
+        }
+    )
+
+    # 2. Gather dataset counts from DB or fallback dataset
+    states_set = set(DATASET_METADATA.get("states_covered", []))
+    records_per_state: Dict[str, int] = {}
+    total_records = 0
+    records_with_coords = 0
+    records_with_verified_provenance = 0
+    digital_building_records = 0
+
+    if db is not None:
+        try:
+            db_records = db.query(PostcodeDirectory).all()
+            if db_records:
+                total_records = len(db_records)
+                for r in db_records:
+                    st = r.state or "Other"
+                    states_set.add(st)
+                    records_per_state[st] = records_per_state.get(st, 0) + 1
+                    if r.lat is not None and r.lng is not None:
+                        records_with_coords += 1
+                    if r.verification_status == "official_verified":
+                        records_with_verified_provenance += 1
+                    if (
+                        r.postcode_type == "digital_location"
+                        or r.postcode_category == "official_digital_postcode"
+                        or (r.code and len(r.code.replace("-", "")) > 6)
+                    ):
+                        digital_building_records += 1
+        except Exception as db_err:
+            logger.warning(f"Error querying PostcodeDirectory for coverage report: {db_err}")
+
+    if total_records == 0:
+        total_records = len(OFFICIAL_POSTCODES)
+        for r in OFFICIAL_POSTCODES:
+            st = r.get("state") or "Other"
+            states_set.add(st)
+            records_per_state[st] = records_per_state.get(st, 0) + 1
+            if r.get("lat") is not None and r.get("lng") is not None:
+                records_with_coords += 1
+            if r.get("verification_status") == "official_verified":
+                records_with_verified_provenance += 1
+            if (
+                r.get("postcode_type") == "digital_location"
+                or r.get("postcode_category") == "official_digital_postcode"
+                or (r.get("code") and len(r.get("code").replace("-", "")) > 6)
+            ):
+                digital_building_records += 1
+
+    states_list = sorted(list(states_set))
+
+    return CoverageReportResponse(
+        edition=DATASET_METADATA.get("edition", "Local Demonstration & Reference Edition"),
+        version=DATASET_METADATA.get("version", "2024.2"),
+        scope_states_count=len(states_list),
+        states_covered=states_list,
+        total_reference_records=total_records,
+        records_per_state=records_per_state,
+        records_with_coordinates=records_with_coords,
+        records_with_verified_provenance=records_with_verified_provenance,
+        digital_building_level_records=digital_building_records,
+        upstream_integration=integration_status,
+    )

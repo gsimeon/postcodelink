@@ -6,6 +6,7 @@ import {
   CleanseResult,
   PostcodeDirectoryEntry,
   PostcodeLookupResult,
+  CoverageReport,
 } from "@/lib/fastapi-client";
 import {
   STATES_LIST,
@@ -143,7 +144,25 @@ export function getVerificationBadgeConfig(
 }
 
 export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookupTabProps) {
-  const [activeSubTab, setActiveSubTab] = useState<"directory" | "cleanser">("directory");
+  const [activeSubTab, setActiveSubTab] = useState<"directory" | "cleanser" | "coverage">("directory");
+
+  // Coverage Report States
+  const [coverageReport, setCoverageReport] = useState<CoverageReport | null>(null);
+  const [isLoadingCoverage, setIsLoadingCoverage] = useState<boolean>(false);
+  const [coverageError, setCoverageError] = useState<string | null>(null);
+
+  const fetchCoverageReport = useCallback(async () => {
+    setIsLoadingCoverage(true);
+    setCoverageError(null);
+    try {
+      const data = await fastApiClient.getCoverageReport();
+      setCoverageReport(data);
+    } catch (err: any) {
+      setCoverageError(err.message || "Failed to load coverage report from FastAPI registry.");
+    } finally {
+      setIsLoadingCoverage(false);
+    }
+  }, []);
 
   // Directory / Explorer States
   const [searchQuery, setSearchQuery] = useState("");
@@ -163,6 +182,33 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
   const [areaHint, setAreaHint] = useState<string>("");
   const [postcodeHint, setPostcodeHint] = useState<string>("");
   const [verificationMode, setVerificationMode] = useState<VerificationMode>("nipost_validate");
+
+  // WAI-ARIA Radio Group Keyboard Navigation
+  const handleRadioKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const modes: VerificationMode[] = [
+      "local_standardization",
+      "nipost_validate",
+      "nipost_strict",
+    ];
+    const currentIndex = modes.indexOf(verificationMode);
+    if (currentIndex === -1) return;
+
+    let nextIndex = currentIndex;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+      e.preventDefault();
+      nextIndex = (currentIndex + 1) % modes.length;
+    } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+      e.preventDefault();
+      nextIndex = (currentIndex - 1 + modes.length) % modes.length;
+    }
+
+    if (nextIndex !== currentIndex) {
+      const nextMode = modes[nextIndex];
+      setVerificationMode(nextMode);
+      const buttons = e.currentTarget.querySelectorAll<HTMLButtonElement>('button[role="radio"]');
+      buttons[nextIndex]?.focus();
+    }
+  };
 
   const [isCleansing, setIsCleansing] = useState<boolean>(false);
   const [cleanseResult, setCleanseResult] = useState<CleanseResult | null>(null);
@@ -366,6 +412,18 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
           onClick={() => setActiveSubTab("cleanser")}
         >
           <Sparkles size={15} /> Nigerian Address Cleanser & Standardizer
+        </button>
+        <button
+          type="button"
+          className={`tab-btn ${activeSubTab === "coverage" ? "active" : ""}`}
+          onClick={() => {
+            setActiveSubTab("coverage");
+            if (!coverageReport && !isLoadingCoverage) {
+              fetchCoverageReport();
+            }
+          }}
+        >
+          <Database size={15} /> Data Coverage & Upstream Readiness
         </button>
       </div>
 
@@ -743,6 +801,7 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
             <div
               role="radiogroup"
               aria-labelledby="verification-mode-label"
+              onKeyDown={handleRadioKeyDown}
               style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
@@ -754,7 +813,7 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                 type="button"
                 role="radio"
                 aria-checked={verificationMode === "local_standardization"}
-                tabIndex={0}
+                tabIndex={verificationMode === "local_standardization" ? 0 : -1}
                 onClick={() => setVerificationMode("local_standardization")}
                 style={{
                   border: `2px solid ${
@@ -820,7 +879,7 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                 type="button"
                 role="radio"
                 aria-checked={verificationMode === "nipost_validate"}
-                tabIndex={0}
+                tabIndex={verificationMode === "nipost_validate" ? 0 : -1}
                 onClick={() => setVerificationMode("nipost_validate")}
                 style={{
                   border: `2px solid ${
@@ -886,7 +945,7 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                 type="button"
                 role="radio"
                 aria-checked={verificationMode === "nipost_strict"}
-                tabIndex={0}
+                tabIndex={verificationMode === "nipost_strict" ? 0 : -1}
                 onClick={() => setVerificationMode("nipost_strict")}
                 style={{
                   border: `2px solid ${
@@ -1151,288 +1210,357 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
           )}
 
           {/* Cleanser Result Presentation */}
-          {cleanseResult && (
-            <div
-              className="analyzer-card"
-              style={{
-                background: "#ffffff",
-                border: "1px solid #bbf7d0",
-                borderRadius: "var(--radius-md)",
-                padding: "20px",
-                boxShadow: "var(--shadow-sm)",
-              }}
-            >
-              {/* Header with 6-Tier Badge and Confidence Meter */}
-              {(() => {
-                const badge = getVerificationBadgeConfig(
-                  cleanseResult.postcode_status,
-                  cleanseResult.is_live_nipost,
-                  cleanseResult.is_partial_verification
-                );
+          {cleanseResult && (() => {
+            const badge = getVerificationBadgeConfig(
+              cleanseResult.postcode_status,
+              cleanseResult.is_live_nipost,
+              cleanseResult.is_partial_verification
+            );
 
-                return (
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      flexWrap: "wrap",
-                      gap: "12px",
-                      paddingBottom: "16px",
-                      borderBottom: "1px solid #e2e8f0",
-                      marginBottom: "16px",
-                    }}
-                  >
-                    <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                      <CheckCircle2 size={22} color={badge.color} />
-                      <div>
-                        <b style={{ fontSize: "15px", color: "var(--ink)" }}>
-                          Address Normalized & Cleansed
-                        </b>
-                        <div style={{ fontSize: "12px", color: "#64748b" }}>
-                          Resolution: {cleanseResult.resolution_level === "building_location" ? "Precise Building Location" : "Area Dispatch District"}
-                        </div>
-                      </div>
-                    </div>
+            const cardBorder =
+              badge.tier === "nipost_verified"
+                ? "#bbf7d0"
+                : badge.tier === "partially_verified"
+                ? "#ddd6fe"
+                : badge.tier === "local_match"
+                ? "#fde68a"
+                : badge.tier === "address_conflict"
+                ? "#fecaca"
+                : "#e2e8f0";
 
-                    <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                      <span
-                        className={badge.pillClass}
-                        style={{ fontSize: "11px", padding: "5px 12px" }}
-                        title={badge.description}
-                      >
-                        <i></i> {badge.label}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })()}
+            const cardBg =
+              badge.tier === "address_conflict" ? "#fffdfd" : "#ffffff";
 
-              {/* Five-Dimension Verification & Trust Metrics */}
+            const resultHeadline =
+              badge.tier === "nipost_verified"
+                ? "Address Cleansed & Officially Verified (NIPOST Live)"
+                : badge.tier === "partially_verified"
+                ? "Address Cleansed & Validated (NIPOST Two-Stage)"
+                : badge.tier === "local_match"
+                ? "Address Normalized (Local Reference Registry)"
+                : badge.tier === "address_conflict"
+                ? "Address Discrepancy Detected (Local Reference)"
+                : "Address Syntax Formatted";
+
+            const ResultIcon =
+              badge.tier === "address_conflict"
+                ? AlertTriangle
+                : badge.tier === "unavailable"
+                ? AlertCircle
+                : CheckCircle2;
+
+            const heuristicScore =
+              cleanseResult.match_quality_score !== undefined
+                ? cleanseResult.match_quality_score
+                : cleanseResult.confidence;
+
+            return (
               <div
+                className="analyzer-card"
                 style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
-                  gap: "10px",
-                  marginBottom: "16px",
+                  background: cardBg,
+                  border: `1px solid ${cardBorder}`,
+                  borderRadius: "var(--radius-md)",
+                  padding: "20px",
+                  boxShadow: "var(--shadow-sm)",
                 }}
               >
-                {/* 1. Address Syntax */}
+                {/* Header with Tier Badge and Heuristic Quality */}
                 <div
                   style={{
-                    background: "#f8fafc",
-                    border: "1px solid #e2e8f0",
-                    borderRadius: "6px",
-                    padding: "10px 12px",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    flexWrap: "wrap",
+                    gap: "12px",
+                    paddingBottom: "16px",
+                    borderBottom: "1px solid #e2e8f0",
+                    marginBottom: "16px",
                   }}
                 >
-                  <div style={{ fontSize: "10px", color: "#64748b", fontWeight: 700 }}>
-                    1. ADDRESS SYNTAX
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                    <ResultIcon size={22} color={badge.color} />
+                    <div>
+                      <b style={{ fontSize: "15px", color: "var(--ink)" }}>
+                        {resultHeadline}
+                      </b>
+                      <div style={{ fontSize: "12px", color: "#64748b" }}>
+                        Resolution: {cleanseResult.resolution_level === "building_location" ? "Precise Building Location" : "Area Dispatch District"}
+                      </div>
+                    </div>
                   </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" }}>
-                    {cleanseResult.postcode_valid ? (
-                      <CheckCheck size={15} color="#16a34a" />
-                    ) : (
-                      <AlertCircle size={15} color="#dc2626" />
-                    )}
-                    <b style={{ fontSize: "12px", color: cleanseResult.postcode_valid ? "#16a34a" : "#dc2626" }}>
-                      {cleanseResult.postcode_valid ? "Valid Postal Code" : "Invalid Syntax"}
-                    </b>
-                  </div>
-                  <small style={{ color: "#64748b", fontSize: "11px", display: "block", marginTop: "2px" }}>
-                    {cleanseResult.postcode_type === "digital_location"
-                      ? "5-Part Digital Code"
-                      : "6-Digit Postal Zone"}
-                  </small>
-                </div>
 
-                {/* 2. Local Reference Match */}
-                <div
-                  style={{
-                    background: "#f8fafc",
-                    border: "1px solid #e2e8f0",
-                    borderRadius: "6px",
-                    padding: "10px 12px",
-                  }}
-                >
-                  <div style={{ fontSize: "10px", color: "#64748b", fontWeight: 700 }}>
-                    2. LOCAL MATCH
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" }}>
-                    {cleanseResult.postcode_status !== "unverified" ? (
-                      <CheckCheck size={15} color="#16a34a" />
-                    ) : (
-                      <AlertCircle size={15} color="#dc2626" />
-                    )}
-                    <b style={{ fontSize: "12px", color: cleanseResult.postcode_status !== "unverified" ? "#16a34a" : "#dc2626" }}>
-                      {cleanseResult.postcode_status !== "unverified" ? "Matched in Registry" : "Unmatched"}
-                    </b>
-                  </div>
-                  <small style={{ color: "#64748b", fontSize: "11px", display: "block", marginTop: "2px" }}>
-                    {cleanseResult.resolution_level === "building_location"
-                      ? "Building Location"
-                      : "Area Dispatch District"}
-                  </small>
-                </div>
-
-                {/* 3. NIPOST Upstream Verification */}
-                <div
-                  style={{
-                    background: "#f8fafc",
-                    border: "1px solid #e2e8f0",
-                    borderRadius: "6px",
-                    padding: "10px 12px",
-                  }}
-                >
-                  <div style={{ fontSize: "10px", color: "#64748b", fontWeight: 700 }}>
-                    3. NIPOST GATEWAY
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" }}>
-                    {cleanseResult.is_live_nipost ? (
-                      <CheckCheck size={15} color="#2563eb" />
-                    ) : cleanseResult.fallback_used ? (
-                      <AlertTriangle size={15} color="#d97706" />
-                    ) : (
-                      <Compass size={15} color="#64748b" />
-                    )}
-                    <b
-                      style={{
-                        fontSize: "12px",
-                        color: cleanseResult.is_live_nipost
-                          ? "#2563eb"
-                          : cleanseResult.fallback_used
-                          ? "#d97706"
-                          : "#475569",
-                      }}
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                    <span
+                      className={badge.pillClass}
+                      style={{ fontSize: "11px", padding: "5px 12px" }}
+                      title={badge.description}
                     >
-                      {cleanseResult.is_live_nipost
-                        ? cleanseResult.is_partial_verification
-                          ? "Validated (Two-Stage)"
-                          : "Official Verified"
-                        : cleanseResult.fallback_used
-                        ? "Fallback to Local"
-                        : "Reference Only"}
-                    </b>
+                      <i></i> {badge.label}
+                    </span>
                   </div>
-                  <small style={{ color: "#64748b", fontSize: "11px", display: "block", marginTop: "2px" }}>
-                    {cleanseResult.evidence_id
-                      ? `Ev: ${cleanseResult.evidence_id.slice(0, 8)}`
-                      : "No Upstream Evidence"}
-                  </small>
                 </div>
 
-                {/* 4. Geographic Consistency */}
+                {/* Five-Dimension Verification & Trust Metrics */}
                 <div
                   style={{
-                    background: "#f8fafc",
-                    border: "1px solid #e2e8f0",
-                    borderRadius: "6px",
-                    padding: "10px 12px",
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
+                    gap: "10px",
+                    marginBottom: "16px",
                   }}
                 >
-                  <div style={{ fontSize: "10px", color: "#64748b", fontWeight: 700 }}>
-                    4. BOUNDARY CONSISTENCY
+                  {/* 1. Address Syntax */}
+                  <div
+                    style={{
+                      background: "#f8fafc",
+                      border: "1px solid #e2e8f0",
+                      borderRadius: "6px",
+                      padding: "10px 12px",
+                    }}
+                  >
+                    <div style={{ fontSize: "10px", color: "#64748b", fontWeight: 700 }}>
+                      1. FORMAT SYNTAX
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" }}>
+                      {cleanseResult.postcode_valid ? (
+                        <CheckCheck size={15} color="#16a34a" />
+                      ) : (
+                        <AlertCircle size={15} color="#dc2626" />
+                      )}
+                      <b style={{ fontSize: "12px", color: cleanseResult.postcode_valid ? "#16a34a" : "#dc2626" }}>
+                        {cleanseResult.postcode_valid ? "Valid Syntax" : "Invalid Syntax"}
+                      </b>
+                    </div>
+                    <small style={{ color: "#64748b", fontSize: "11px", display: "block", marginTop: "2px" }}>
+                      {cleanseResult.postcode_type === "digital_location"
+                        ? "5-Part Digital Code"
+                        : "6-Digit Postal Zone"}
+                    </small>
                   </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" }}>
-                    {cleanseResult.address_consistent ? (
-                      <CheckCheck size={15} color="#16a34a" />
-                    ) : (
-                      <AlertTriangle size={15} color="#d97706" />
-                    )}
-                    <b style={{ fontSize: "12px", color: cleanseResult.address_consistent ? "#16a34a" : "#d97706" }}>
-                      {cleanseResult.address_consistent ? "Consistent Area" : "Boundary Discrepancy"}
-                    </b>
-                  </div>
-                  <small style={{ color: "#64748b", fontSize: "11px", display: "block", marginTop: "2px" }}>
-                    {cleanseResult.area || "Area"}, {cleanseResult.state || "State"}
-                  </small>
-                </div>
 
-                {/* 5. Dispatch Confidence Score */}
-                <div
-                  style={{
-                    background: "#f8fafc",
-                    border: "1px solid #e2e8f0",
-                    borderRadius: "6px",
-                    padding: "10px 12px",
-                  }}
-                >
-                  <div style={{ fontSize: "10px", color: "#64748b", fontWeight: 700 }}>
-                    5. DISPATCH CONFIDENCE
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "4px" }}>
-                    <b style={{ fontSize: "14px", color: "var(--ink)", fontFamily: "'JetBrains Mono', monospace" }}>
-                      {Math.round(cleanseResult.dispatch_confidence * 100)}%
-                    </b>
-                    <div style={{ flex: 1, background: "#e2e8f0", height: "6px", borderRadius: "3px", overflow: "hidden" }}>
-                      <div
+                  {/* 2. Registry Existence */}
+                  <div
+                    style={{
+                      background: "#f8fafc",
+                      border: "1px solid #e2e8f0",
+                      borderRadius: "6px",
+                      padding: "10px 12px",
+                    }}
+                  >
+                    <div style={{ fontSize: "10px", color: "#64748b", fontWeight: 700 }}>
+                      2. REGISTRY EXISTENCE
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" }}>
+                      {cleanseResult.postcode_exists === true ? (
+                        <CheckCheck size={15} color="#16a34a" />
+                      ) : cleanseResult.postcode_exists === false ? (
+                        <AlertCircle size={15} color="#dc2626" />
+                      ) : cleanseResult.postcode_status !== "unverified" ? (
+                        <CheckCheck size={15} color="#d97706" />
+                      ) : (
+                        <AlertCircle size={15} color="#dc2626" />
+                      )}
+                      <b
                         style={{
-                          width: `${Math.round(cleanseResult.dispatch_confidence * 100)}%`,
-                          height: "100%",
-                          background:
-                            cleanseResult.dispatch_confidence >= 0.9
+                          fontSize: "12px",
+                          color:
+                            cleanseResult.postcode_exists === true
                               ? "#16a34a"
-                              : cleanseResult.dispatch_confidence >= 0.7
+                              : cleanseResult.postcode_exists === false
+                              ? "#dc2626"
+                              : cleanseResult.postcode_status !== "unverified"
                               ? "#d97706"
                               : "#dc2626",
                         }}
-                      />
+                      >
+                        {cleanseResult.postcode_exists === true
+                          ? "Confirmed in Registry"
+                          : cleanseResult.postcode_exists === false
+                          ? "Not Found in Registry"
+                          : cleanseResult.postcode_status !== "unverified"
+                          ? "Local Registry Match"
+                          : "Unmatched"}
+                      </b>
                     </div>
+                    <small style={{ color: "#64748b", fontSize: "11px", display: "block", marginTop: "2px" }}>
+                      {cleanseResult.resolution_level === "building_location"
+                        ? "Building Location"
+                        : "Area Dispatch District"}
+                    </small>
                   </div>
-                  <small style={{ color: "#64748b", fontSize: "11px", display: "block", marginTop: "2px" }}>
-                    Score: {cleanseResult.confidence}
-                  </small>
-                </div>
-              </div>
 
-              {/* Resolved Postal Information Card */}
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
-                  gap: "14px",
-                  marginBottom: "16px",
-                }}
-              >
+                  {/* 3. Upstream Gateway / Provenance */}
+                  <div
+                    style={{
+                      background: "#f8fafc",
+                      border: "1px solid #e2e8f0",
+                      borderRadius: "6px",
+                      padding: "10px 12px",
+                    }}
+                  >
+                    <div style={{ fontSize: "10px", color: "#64748b", fontWeight: 700 }}>
+                      3. UPSTREAM GATEWAY
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" }}>
+                      {cleanseResult.is_live_nipost ? (
+                        <CheckCheck size={15} color="#2563eb" />
+                      ) : cleanseResult.upstream_contacted ? (
+                        <AlertCircle size={15} color="#d97706" />
+                      ) : cleanseResult.fallback_used ? (
+                        <AlertTriangle size={15} color="#d97706" />
+                      ) : (
+                        <Compass size={15} color="#64748b" />
+                      )}
+                      <b
+                        style={{
+                          fontSize: "12px",
+                          color: cleanseResult.is_live_nipost
+                            ? "#2563eb"
+                            : cleanseResult.upstream_contacted
+                            ? "#d97706"
+                            : cleanseResult.fallback_used
+                            ? "#d97706"
+                            : "#475569",
+                        }}
+                      >
+                        {cleanseResult.is_live_nipost
+                          ? cleanseResult.is_partial_verification
+                            ? "Validated (Two-Stage)"
+                            : "Official Verified"
+                          : cleanseResult.upstream_contacted
+                          ? "Contacted (Postcode Missing)"
+                          : cleanseResult.fallback_used
+                          ? "Fallback to Local"
+                          : "Reference Only"}
+                      </b>
+                    </div>
+                    <small style={{ color: "#64748b", fontSize: "11px", display: "block", marginTop: "2px" }}>
+                      {cleanseResult.evidence_id
+                        ? `SHA-256 Ev: ${cleanseResult.evidence_id.slice(0, 8)}`
+                        : cleanseResult.upstream_contacted
+                        ? "Gateway Contacted (No Match)"
+                        : "Offline Reference Fixture"}
+                    </small>
+                  </div>
+
+                  {/* 4. Geographic Consistency */}
+                  <div
+                    style={{
+                      background: "#f8fafc",
+                      border: "1px solid #e2e8f0",
+                      borderRadius: "6px",
+                      padding: "10px 12px",
+                    }}
+                  >
+                    <div style={{ fontSize: "10px", color: "#64748b", fontWeight: 700 }}>
+                      4. BOUNDARY CONSISTENCY
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" }}>
+                      {cleanseResult.address_consistent ? (
+                        <CheckCheck size={15} color="#16a34a" />
+                      ) : (
+                        <AlertTriangle size={15} color="#d97706" />
+                      )}
+                      <b style={{ fontSize: "12px", color: cleanseResult.address_consistent ? "#16a34a" : "#d97706" }}>
+                        {cleanseResult.address_consistent ? "Consistent Area" : "Boundary Discrepancy"}
+                      </b>
+                    </div>
+                    <small style={{ color: "#64748b", fontSize: "11px", display: "block", marginTop: "2px" }}>
+                      {cleanseResult.area || "Area"}, {cleanseResult.state || "State"}
+                    </small>
+                  </div>
+
+                  {/* 5. Internal Match Quality Score */}
+                  <div
+                    style={{
+                      background: "#f8fafc",
+                      border: "1px solid #e2e8f0",
+                      borderRadius: "6px",
+                      padding: "10px 12px",
+                    }}
+                  >
+                    <div style={{ fontSize: "10px", color: "#64748b", fontWeight: 700 }}>
+                      5. MATCH QUALITY (HEURISTIC)
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "4px" }}>
+                      <b style={{ fontSize: "14px", color: "var(--ink)", fontFamily: "'JetBrains Mono', monospace" }}>
+                        {Math.round(heuristicScore * 100)}%
+                      </b>
+                      <div style={{ flex: 1, background: "#e2e8f0", height: "6px", borderRadius: "3px", overflow: "hidden" }}>
+                        <div
+                          style={{
+                            width: `${Math.round(heuristicScore * 100)}%`,
+                            height: "100%",
+                            background:
+                              heuristicScore >= 0.9
+                                ? "#16a34a"
+                                : heuristicScore >= 0.7
+                                ? "#d97706"
+                                : "#dc2626",
+                          }}
+                        />
+                      </div>
+                    </div>
+                    <small style={{ color: "#64748b", fontSize: "10px", display: "block", marginTop: "2px" }} title="Internal match quality heuristic, not an empirical delivery probability">
+                      Score: {heuristicScore.toFixed(2)} · Match heuristic
+                    </small>
+                  </div>
+                </div>
+
+                {/* Resolved Postal Information Card */}
                 <div
                   style={{
-                    background: "#f0fdf4",
-                    border: "1px solid #bbf7d0",
-                    borderRadius: "8px",
-                    padding: "14px",
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+                    gap: "14px",
+                    marginBottom: "16px",
                   }}
                 >
-                  <div style={{ fontSize: "10px", color: "#166534", fontWeight: 700, textTransform: "uppercase" }}>
-                    STANDARDIZED POSTAL CODE
+                  <div
+                    style={{
+                      background:
+                        badge.tier === "nipost_verified"
+                          ? "#f0fdf4"
+                          : badge.tier === "address_conflict"
+                          ? "#fef2f2"
+                          : "#f8fafc",
+                      border: `1px solid ${cardBorder}`,
+                      borderRadius: "8px",
+                      padding: "14px",
+                    }}
+                  >
+                    <div style={{ fontSize: "10px", color: badge.color, fontWeight: 700, textTransform: "uppercase" }}>
+                      STANDARDIZED POSTAL CODE
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "4px" }}>
+                      <span
+                        style={{
+                          fontFamily: "'JetBrains Mono', monospace",
+                          fontSize: "20px",
+                          fontWeight: 700,
+                          color: badge.color,
+                        }}
+                      >
+                        {cleanseResult.postcode}
+                      </span>
+                      <button
+                        type="button"
+                        className="icon-btn"
+                        onClick={() => handleCopyCode(cleanseResult.postcode)}
+                        title="Copy postcode"
+                      >
+                        {copiedCode === cleanseResult.postcode ? (
+                          <Check size={14} color="#16a34a" />
+                        ) : (
+                          <Copy size={14} />
+                        )}
+                      </button>
+                    </div>
+                    <div style={{ fontSize: "11px", color: "#64748b", marginTop: "4px" }}>
+                      Category: {cleanseResult.postcode_category || "legacy_postal_code"}
+                    </div>
                   </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "4px" }}>
-                    <span
-                      style={{
-                        fontFamily: "'JetBrains Mono', monospace",
-                        fontSize: "20px",
-                        fontWeight: 700,
-                        color: "#166534",
-                      }}
-                    >
-                      {cleanseResult.postcode}
-                    </span>
-                    <button
-                      type="button"
-                      className="icon-btn"
-                      onClick={() => handleCopyCode(cleanseResult.postcode)}
-                      title="Copy postcode"
-                    >
-                      {copiedCode === cleanseResult.postcode ? (
-                        <Check size={14} color="#16a34a" />
-                      ) : (
-                        <Copy size={14} />
-                      )}
-                    </button>
-                  </div>
-                  <div style={{ fontSize: "11px", color: "#166534", marginTop: "4px" }}>
-                    Category: {cleanseResult.postcode_category || "legacy_postal_code"}
-                  </div>
-                </div>
 
                 <div
                   style={{
@@ -1629,6 +1757,240 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                 )}
               </div>
             </div>
+            );
+          })()}
+        </section>
+      )}
+
+      {/* SUBTAB 3: DATA COVERAGE & UPSTREAM READINESS */}
+      {activeSubTab === "coverage" && (
+        <section className="panel">
+          <div className="panel-head">
+            <div>
+              <h2>Dataset Coverage & Upstream Adapter Status</h2>
+              <p>
+                Verifiable operational metrics: geographic breadth, coordinates, building-level digital codes, and live NIPOST integration readiness.
+              </p>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+              <button
+                type="button"
+                className="outline"
+                onClick={fetchCoverageReport}
+                disabled={isLoadingCoverage}
+                style={{ height: "32px", fontSize: "12px", display: "inline-flex", alignItems: "center", gap: "6px" }}
+              >
+                <RefreshCw size={13} className={isLoadingCoverage ? "spin" : ""} />
+                Refresh Coverage
+              </button>
+            </div>
+          </div>
+
+          {coverageError && (
+            <div
+              style={{
+                background: "#fef2f2",
+                border: "1px solid #fecaca",
+                borderRadius: "var(--radius-sm)",
+                padding: "12px 16px",
+                margin: "12px 0",
+                color: "#991b1b",
+                display: "flex",
+                alignItems: "center",
+                gap: "10px",
+                fontSize: "12px",
+              }}
+            >
+              <AlertCircle size={16} />
+              <div>
+                <strong>Coverage Query Error:</strong> {coverageError}
+              </div>
+            </div>
+          )}
+
+          {isLoadingCoverage && !coverageReport && (
+            <div style={{ padding: "40px", textAlign: "center", color: "#64748b", fontSize: "13px" }}>
+              <RefreshCw size={24} className="spin" style={{ margin: "0 auto 10px" }} />
+              <div>Querying FastAPI Dataset Coverage Report...</div>
+            </div>
+          )}
+
+          {coverageReport && (
+            <>
+              {/* Top Key Metrics */}
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+                  gap: "14px",
+                  marginBottom: "20px",
+                }}
+              >
+                <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "8px", padding: "16px" }}>
+                  <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
+                    STATES COVERED
+                  </div>
+                  <div style={{ fontSize: "24px", fontWeight: 800, color: "var(--ink)", marginTop: "4px" }}>
+                    {coverageReport.scope_states_count}{" "}
+                    <span style={{ fontSize: "14px", fontWeight: 600, color: "#64748b" }}>/ 37</span>
+                  </div>
+                  <small style={{ fontSize: "11px", color: "#64748b" }}>
+                    Active regional directories
+                  </small>
+                </div>
+
+                <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "8px", padding: "16px" }}>
+                  <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
+                    TOTAL REFERENCE POSTCODES
+                  </div>
+                  <div style={{ fontSize: "24px", fontWeight: 800, color: "var(--ink)", marginTop: "4px" }}>
+                    {coverageReport.total_reference_records.toLocaleString()}
+                  </div>
+                  <small style={{ fontSize: "11px", color: "#64748b" }}>
+                    Edition {coverageReport.version}
+                  </small>
+                </div>
+
+                <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "8px", padding: "16px" }}>
+                  <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
+                    GEO-REFERENCED (GPS)
+                  </div>
+                  <div style={{ fontSize: "24px", fontWeight: 800, color: "#0f766e", marginTop: "4px" }}>
+                    {coverageReport.records_with_coordinates.toLocaleString()}
+                  </div>
+                  <small style={{ fontSize: "11px", color: "#64748b" }}>
+                    {Math.round((coverageReport.records_with_coordinates / Math.max(1, coverageReport.total_reference_records)) * 100)}% with lat/lng coordinates
+                  </small>
+                </div>
+
+                <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "8px", padding: "16px" }}>
+                  <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
+                    DIGITAL BUILDING CODES
+                  </div>
+                  <div style={{ fontSize: "24px", fontWeight: 800, color: "#1d4ed8", marginTop: "4px" }}>
+                    {coverageReport.digital_building_level_records.toLocaleString()}
+                  </div>
+                  <small style={{ fontSize: "11px", color: "#64748b" }}>
+                    5-part building-level location codes
+                  </small>
+                </div>
+              </div>
+
+              {/* Two Column Grid: State Breakdown & Adapter Status */}
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+                  gap: "20px",
+                }}
+              >
+                {/* Column 1: State Breakdown Table */}
+                <div style={{ border: "1px solid #e2e8f0", borderRadius: "8px", overflow: "hidden" }}>
+                  <div style={{ padding: "12px 16px", background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+                    <b style={{ fontSize: "13px", color: "var(--ink)" }}>Regional State Breakdown</b>
+                  </div>
+                  <div style={{ maxHeight: "320px", overflowY: "auto" }}>
+                    <table>
+                      <thead>
+                        <tr>
+                          <th style={{ fontSize: "11px" }}>STATE</th>
+                          <th style={{ fontSize: "11px", textAlign: "right" }}>POSTCODES</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Object.entries(coverageReport.records_per_state || {}).map(([state, count]) => (
+                          <tr key={state}>
+                            <td style={{ fontSize: "12px", fontWeight: 600 }}>{state}</td>
+                            <td style={{ fontSize: "12px", textAlign: "right", fontFamily: "'JetBrains Mono', monospace" }}>
+                              {count}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Column 2: Upstream NIPOST Integration Readiness */}
+                <div style={{ border: "1px solid #e2e8f0", borderRadius: "8px", padding: "16px", background: "#ffffff" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "14px" }}>
+                    <Globe size={18} color="#0f766e" />
+                    <b style={{ fontSize: "14px", color: "var(--ink)" }}>
+                      Upstream NIPOST Gateway Readiness
+                    </b>
+                  </div>
+
+                  <div style={{ display: "flex", flexDirection: "column", gap: "10px", fontSize: "12px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid #f1f5f9", paddingBottom: "6px" }}>
+                      <span style={{ color: "#64748b" }}>Adapter Module:</span>
+                      <span style={{ fontWeight: 600, color: coverageReport.upstream_integration.adapter_installed ? "#16a34a" : "#dc2626" }}>
+                        {coverageReport.upstream_integration.adapter_installed ? "Installed (NIPOSTClient)" : "Missing"}
+                      </span>
+                    </div>
+
+                    <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid #f1f5f9", paddingBottom: "6px" }}>
+                      <span style={{ color: "#64748b" }}>Configuration Status:</span>
+                      <span style={{ fontWeight: 600, color: coverageReport.upstream_integration.configuration_complete ? "#16a34a" : "#d97706" }}>
+                        {coverageReport.upstream_integration.configuration_complete ? "Complete" : "Incomplete (Missing Key/URL)"}
+                      </span>
+                    </div>
+
+                    <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid #f1f5f9", paddingBottom: "6px" }}>
+                      <span style={{ color: "#64748b" }}>Authentication Scheme:</span>
+                      <span style={{ fontWeight: 600, fontFamily: "'JetBrains Mono', monospace" }}>
+                        {coverageReport.upstream_integration.auth_scheme}
+                      </span>
+                    </div>
+
+                    <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid #f1f5f9", paddingBottom: "6px" }}>
+                      <span style={{ color: "#64748b" }}>Gateway Endpoint (Base URL):</span>
+                      <span style={{ fontWeight: 600, color: coverageReport.upstream_integration.base_url_set ? "#16a34a" : "#dc2626" }}>
+                        {coverageReport.upstream_integration.base_url_set ? "Configured" : "Not Set"}
+                      </span>
+                    </div>
+
+                    <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid #f1f5f9", paddingBottom: "6px" }}>
+                      <span style={{ color: "#64748b" }}>Production API Key:</span>
+                      <span style={{ fontWeight: 600, color: coverageReport.upstream_integration.credentials_set ? "#16a34a" : "#dc2626" }}>
+                        {coverageReport.upstream_integration.credentials_set ? "Configured (Protected)" : "Missing / Unconfigured"}
+                      </span>
+                    </div>
+
+                    <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid #f1f5f9", paddingBottom: "6px" }}>
+                      <span style={{ color: "#64748b" }}>Operational Status:</span>
+                      <span
+                        style={{
+                          fontWeight: 700,
+                          color:
+                            coverageReport.upstream_integration.status === "ready"
+                              ? "#16a34a"
+                              : coverageReport.upstream_integration.status === "awaiting_credentials"
+                              ? "#d97706"
+                              : "#64748b",
+                        }}
+                      >
+                        {coverageReport.upstream_integration.display_status}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div
+                    style={{
+                      background: "#f8fafc",
+                      border: "1px solid #e2e8f0",
+                      borderRadius: "6px",
+                      padding: "10px 12px",
+                      marginTop: "14px",
+                      fontSize: "11px",
+                      color: "#475569",
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    <strong>Provenance Integrity Disclosure:</strong> PostcodeLink guarantees strict verification separation. Local reference records are never promoted to official NIPOST verification without live upstream confirmation and cryptographically signed SHA-256 evidence.
+                  </div>
+                </div>
+              </div>
+            </>
           )}
         </section>
       )}

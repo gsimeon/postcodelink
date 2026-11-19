@@ -169,6 +169,8 @@ export interface PostcodeLookupResult {
   count: number;
   matches: PostcodeDirectoryEntry[];
   is_live_nipost: boolean;
+  upstream_contacted?: boolean;
+  postcode_exists?: boolean | null;
   is_partial_verification?: boolean;
   service_type?: string;
   dataset_version?: string;
@@ -201,6 +203,9 @@ export interface CleanseResult {
   verification_status?: string;
   verification_mode?: string;
   confidence: number;
+  match_quality_score?: number;
+  postcode_exists?: boolean | null;
+  upstream_contacted?: boolean;
   postcode_valid: boolean;
   address_consistent: boolean;
   dispatch_confidence: number;
@@ -224,6 +229,27 @@ export interface CleanseResult {
   dataset_version?: string;
   api_integration_version?: string;
   valid_until?: string;
+}
+
+export interface CoverageReport {
+  edition: string;
+  version: string;
+  scope_states_count: number;
+  states_covered: string[];
+  total_reference_records: number;
+  records_per_state: Record<string, number>;
+  records_with_coordinates: number;
+  records_with_verified_provenance: number;
+  digital_building_level_records: number;
+  upstream_integration: {
+    adapter_installed: boolean;
+    configuration_complete: boolean;
+    base_url_set: boolean;
+    credentials_set: boolean;
+    auth_scheme: string;
+    status: string;
+    display_status: string;
+  };
 }
 
 function getHeaders(extraHeaders: Record<string, string> = {}): Record<string, string> {
@@ -562,6 +588,18 @@ export const fastApiClient = {
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || 'Failed to cleanse address');
+    }
+    return await res.json();
+  },
+
+  async getCoverageReport(): Promise<CoverageReport> {
+    const res = await fetch(`${API_V1}/postcodes/coverage`, {
+      headers: getHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to fetch coverage report');
     }
     return await res.json();
   },

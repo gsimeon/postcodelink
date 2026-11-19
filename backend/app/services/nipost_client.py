@@ -76,9 +76,54 @@ class NIPOSTClient:
         self.query_param = query_param or getattr(settings, "NIPOST_QUERY_PARAM", "code")
 
     @property
+    def adapter_installed(self) -> bool:
+        """Integration adapter code exists and is initialized."""
+        return True
+
+    @property
     def is_configured(self) -> bool:
         """Returns True if live NIPOST API base URL is configured."""
         return bool(self.base_url)
+
+    @property
+    def configuration_complete(self) -> bool:
+        """Required endpoint URL and active credentials exist for production verification."""
+        return bool(self.base_url and self.api_key)
+
+    def get_integration_status(self) -> Dict[str, Any]:
+        """Provides structured integration status separating code presence, configuration, and health."""
+        has_url = bool(self.base_url)
+        has_key = bool(self.api_key)
+        configured = bool(has_url and has_key)
+        return {
+            "adapter_installed": True,
+            "configuration_complete": configured,
+            "base_url_set": has_url,
+            "credentials_set": has_key,
+            "auth_scheme": self.auth_scheme,
+            "status": "ready" if configured else ("awaiting_credentials" if has_url else "unconfigured"),
+            "display_status": "Adapter Configured - NIPOST Two-Stage" if configured else "Adapter Installed (Awaiting Production Credentials)",
+        }
+
+    def check_health(self) -> Dict[str, Any]:
+        """Performs a lightweight health check on the configured NIPOST endpoint."""
+        if not self.configuration_complete:
+            return {
+                "healthy": False,
+                "reason": "Configuration incomplete: base URL or API key missing",
+                "status_code": None,
+            }
+        try:
+            with httpx.Client(transport=self.transport, timeout=min(self.timeout, 3.0)) as http_client:
+                resp = http_client.get(f"{self.base_url}/health", headers=self._get_headers())
+                if resp.status_code in (200, 204):
+                    return {"healthy": True, "reason": "Endpoint responsive", "status_code": resp.status_code}
+                elif resp.status_code in (401, 403):
+                    return {"healthy": False, "reason": "Authentication failed (invalid or rejected credentials)", "status_code": resp.status_code}
+                else:
+                    return {"healthy": False, "reason": f"Unexpected upstream status: {resp.status_code}", "status_code": resp.status_code}
+        except Exception as err:
+            return {"healthy": False, "reason": f"Connection check failed: {str(err)}", "status_code": None}
 
     def _get_headers(self) -> Dict[str, str]:
         headers = {

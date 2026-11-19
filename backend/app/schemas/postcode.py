@@ -1,7 +1,9 @@
 """Pydantic schemas for Nigerian Postcode resolution and validation."""
-from typing import Optional, List
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
+
+VerificationMode = Literal["local_standardization", "nipost_validate", "nipost_strict"]
 
 
 class PostcodeRecordSchema(BaseModel):
@@ -40,6 +42,8 @@ class PostcodeLookupResponse(BaseModel):
     count: int
     matches: List[PostcodeRecordSchema]
     is_live_nipost: bool = False
+    upstream_contacted: bool = False
+    postcode_exists: Optional[bool] = None
     is_partial_verification: bool = False
     service_type: Optional[str] = None
     dataset_version: Optional[str] = None
@@ -52,7 +56,6 @@ class PostcodeLookupResponse(BaseModel):
     fallback_reason: Optional[str] = None
     upstream_status: Optional[str] = None
     upstream_error: Optional[str] = None
-    is_partial_verification: bool = False
     evidence_id: Optional[str] = None
     verification_method: Optional[str] = None
     address_metadata_source: Optional[str] = None
@@ -66,7 +69,22 @@ class CleanseAddressRequest(BaseModel):
     postcode: Optional[str] = None
     strict: bool = False
     live_verify: bool = False
-    verification_mode: Optional[str] = None  # "local_standardization" | "nipost_validate" | "nipost_strict"
+    verification_mode: Optional[VerificationMode] = None  # "local_standardization" | "nipost_validate" | "nipost_strict"
+
+    @model_validator(mode="after")
+    def validate_mode_and_legacy_flags(self) -> "CleanseAddressRequest":
+        if self.verification_mode == "local_standardization":
+            if self.strict:
+                raise ValueError(
+                    "Contradictory parameters: verification_mode='local_standardization' cannot be combined with strict=True. "
+                    "Local standardization is an offline mode with zero upstream verification."
+                )
+            if self.live_verify:
+                raise ValueError(
+                    "Contradictory parameters: verification_mode='local_standardization' cannot be combined with live_verify=True. "
+                    "Local standardization is an offline mode with zero upstream verification."
+                )
+        return self
 
 
 class CleanseAddressResponse(BaseModel):
@@ -81,12 +99,19 @@ class CleanseAddressResponse(BaseModel):
     resolution_level: str = "area_district"  # area_district | building_location
     postcode_status: str  # verified | local_match | unverified | estimated | conflict | invalid
     verification_status: Optional[str] = "local_reference"
-    verification_mode: str = "nipost_validate"  # Effective mode applied: "local_standardization" | "nipost_validate" | "nipost_strict"
+    verification_mode: VerificationMode = "nipost_validate"  # Effective mode applied
+    
+    # Internal heuristic match quality (explicitly labeled as internal heuristic, NOT delivery probability)
     confidence: float
-    # Explicit three-dimension validation
-    postcode_valid: bool = False
-    address_consistent: bool = False
     dispatch_confidence: float = 0.0
+    match_quality_score: float = 0.0
+
+    # Factual trust indicators
+    postcode_valid: bool = False
+    postcode_exists: Optional[bool] = None  # True if confirmed upstream, False if rejected/not found, None if unverified/offline
+    address_consistent: bool = False
+    upstream_contacted: bool = False
+
     source: str
     matched_record: Optional[PostcodeRecordSchema] = None
     changes_made: List[str] = []
@@ -98,6 +123,7 @@ class CleanseAddressResponse(BaseModel):
     is_live_nipost: bool = False
     verification_source: str = "local_nipost_reference_dataset"
     fallback_used: bool = False
+    fallback_reason: Optional[str] = None
     upstream_status: Optional[str] = None
     upstream_error: Optional[str] = None
     is_partial_verification: bool = False
@@ -107,3 +133,16 @@ class CleanseAddressResponse(BaseModel):
     valid_until: Optional[datetime] = None
     dataset_version: Optional[str] = None
     api_integration_version: str = "2026.1"
+
+
+class CoverageReportResponse(BaseModel):
+    edition: str = "Local Demonstration & Reference Edition"
+    version: str = "2024.2"
+    scope_states_count: int
+    states_covered: List[str]
+    total_reference_records: int
+    records_per_state: Dict[str, int]
+    records_with_coordinates: int
+    records_with_verified_provenance: int
+    digital_building_level_records: int
+    upstream_integration: Dict[str, Any]

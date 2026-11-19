@@ -1477,7 +1477,9 @@ def test_nipost_provenance_preserves_upstream_version_or_returns_null():
             data=None,
         )
         res3 = execute_postcode_lookup(db=db, code="999999", client=mock_client)
-        assert res3.is_live_nipost is True
+        assert res3.is_live_nipost is False
+        assert res3.upstream_contacted is True
+        assert res3.postcode_exists is False
         assert res3.count == 0
         assert res3.dataset_version is None
         assert res3.api_integration_version == "2026.1"
