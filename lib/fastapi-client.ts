@@ -220,6 +220,8 @@ export interface CleanseResult {
   evidence_id?: string;
   verification_method?: string;
   address_metadata_source?: string;
+  dataset_version?: string;
+  api_integration_version?: string;
   valid_until?: string;
 }
 

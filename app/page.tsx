@@ -540,6 +540,7 @@ export default function Home() {
               deliveries={deliveries}
               operators={operators}
               settings={settings}
+              profile={currentProfile}
               onOpenCreate={() => setShowCreateModal(true)}
               onNavigateTab={(tab) => setActiveTab(tab)}
               onUpdateStatus={handleUpdateStatus}

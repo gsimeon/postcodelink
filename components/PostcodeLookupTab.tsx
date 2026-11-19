@@ -10,7 +10,6 @@ import {
 import {
   NIGERIA_POSTCODES,
   STATES_LIST,
-  cleanseAndStandardizeAddress,
 } from "@/lib/nigeria-postcodes";
 import {
   Search,
@@ -49,6 +48,11 @@ export type VerificationTier =
   | "format_valid"
   | "address_conflict"
   | "unavailable";
+
+export type VerificationMode =
+  | "local_standardization"
+  | "nipost_validate"
+  | "nipost_strict";
 
 interface VerificationBadgeConfig {
   tier: VerificationTier;
@@ -159,8 +163,7 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
   const [stateHint, setStateHint] = useState<string>("");
   const [areaHint, setAreaHint] = useState<string>("");
   const [postcodeHint, setPostcodeHint] = useState<string>("");
-  const [liveVerifyToggle, setLiveVerifyToggle] = useState<boolean>(false);
-  const [strictModeToggle, setStrictModeToggle] = useState<boolean>(false);
+  const [verificationMode, setVerificationMode] = useState<VerificationMode>("nipost_validate");
 
   const [isCleansing, setIsCleansing] = useState<boolean>(false);
   const [cleanseResult, setCleanseResult] = useState<CleanseResult | null>(null);
@@ -248,71 +251,39 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
   }, [searchQuery, selectedState, strictLookup, fetchDirectory]);
 
   // 2. Address Cleansing via FastAPI /api/v1/postcodes/cleanse
-  const handleCleanseAddress = async () => {
-    if (!rawAddressInput.trim()) return;
+  const handleCleanseAddress = useCallback(
+    async (modeOverride?: VerificationMode) => {
+      if (!rawAddressInput.trim()) return;
 
-    setIsCleansing(true);
-    setCleanseError(null);
+      setIsCleansing(true);
+      setCleanseError(null);
 
-    try {
-      const result: CleanseResult = await fastApiClient.cleanseAddress({
-        address: rawAddressInput.trim(),
-        state: stateHint.trim() || undefined,
-        area: areaHint.trim() || undefined,
-        postcode: postcodeHint.trim() || undefined,
-        strict: strictModeToggle,
-        live_verify: liveVerifyToggle,
-      });
-      setCleanseResult(result);
-    } catch (err: any) {
-      if (strictModeToggle) {
+      const activeMode = modeOverride || verificationMode;
+      const isLive = activeMode !== "local_standardization";
+      const isStrict = activeMode === "nipost_strict";
+
+      try {
+        const result: CleanseResult = await fastApiClient.cleanseAddress({
+          address: rawAddressInput.trim(),
+          state: stateHint.trim() || undefined,
+          area: areaHint.trim() || undefined,
+          postcode: postcodeHint.trim() || undefined,
+          strict: isStrict,
+          live_verify: isLive,
+        });
+        setCleanseResult(result);
+      } catch (err: any) {
         setCleanseError(
-          `Strict Verification Block: ${err.message || "Upstream NIPOST gateway rejected or unavailable."}`
+          err.message ||
+            "Unable to reach FastAPI backend. Address cleansing is managed exclusively by FastAPI to prevent split-brain logic."
         );
         setCleanseResult(null);
-      } else {
-        // Fallback to local regex-based analysis with explicit local provenance
-        try {
-          const localAnalysis = cleanseAndStandardizeAddress(rawAddressInput);
-          const fallbackResult: CleanseResult = {
-            original_address: rawAddressInput,
-            formatted_address: localAnalysis.standardizedAddress,
-            area: localAnalysis.detectedArea || "General Area",
-            state: localAnalysis.detectedState || "Nigeria",
-            lga: localAnalysis.detectedLga || undefined,
-            postcode: localAnalysis.matchedPostcode || "000000",
-            postcode_type: "conventional_area",
-            postcode_category: "local_address_reference",
-            resolution_level: "area_district",
-            postcode_status: localAnalysis.matchedPostcode ? "local_match" : "unverified",
-            verification_status: "local_reference",
-            confidence: localAnalysis.confidence === "high" ? 0.75 : 0.5,
-            postcode_valid: Boolean(localAnalysis.matchedPostcode),
-            address_consistent: true,
-            dispatch_confidence: localAnalysis.confidence === "high" ? 0.75 : 0.5,
-            source: "local_client_fallback",
-            changes_made: [
-              "Standardized street and building terms",
-              `Detected administrative zone: ${localAnalysis.detectedArea || "General Area"}`,
-              "Local regex fallback: verification status set to local_reference",
-            ],
-            provenance: "PostcodeLink Local Reference Dataset (Fallback)",
-            source_owner: "PostcodeLink",
-            source_type: "demonstration_fixture",
-            checked_against_nipost: false,
-            is_live_nipost: false,
-            verification_source: "local_nipost_reference_dataset",
-            fallback_used: true,
-          };
-          setCleanseResult(fallbackResult);
-        } catch (innerErr: any) {
-          setCleanseError(innerErr.message || "Failed to parse address.");
-        }
+      } finally {
+        setIsCleansing(false);
       }
-    } finally {
-      setIsCleansing(false);
-    }
-  };
+    },
+    [rawAddressInput, stateHint, areaHint, postcodeHint, verificationMode]
+  );
 
   // Perform initial cleanse on component mount
   useEffect(() => {
@@ -726,9 +697,25 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
               <span
                 style={{
                   fontSize: "11px",
-                  background: liveVerifyToggle ? "#dcfce7" : "#f1f5f9",
-                  color: liveVerifyToggle ? "#15803d" : "#64748b",
-                  border: `1px solid ${liveVerifyToggle ? "#bbf7d0" : "#e2e8f0"}`,
+                  background:
+                    verificationMode === "nipost_strict"
+                      ? "#fef2f2"
+                      : verificationMode === "nipost_validate"
+                      ? "#dcfce7"
+                      : "#eff6ff",
+                  color:
+                    verificationMode === "nipost_strict"
+                      ? "#b91c1c"
+                      : verificationMode === "nipost_validate"
+                      ? "#15803d"
+                      : "#1d4ed8",
+                  border: `1px solid ${
+                    verificationMode === "nipost_strict"
+                      ? "#fecaca"
+                      : verificationMode === "nipost_validate"
+                      ? "#bbf7d0"
+                      : "#bfdbfe"
+                  }`,
                   padding: "4px 10px",
                   borderRadius: "12px",
                   fontWeight: 600,
@@ -737,76 +724,218 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                   gap: "5px",
                 }}
               >
-                <Globe size={13} /> {liveVerifyToggle ? "NIPOST Live Mode" : "Local Reference Mode"}
+                {verificationMode === "nipost_strict" && (
+                  <>
+                    <ShieldAlert size={13} /> Strict Fail-Closed Mode
+                  </>
+                )}
+                {verificationMode === "nipost_validate" && (
+                  <>
+                    <Globe size={13} /> NIPOST Live Validation Mode
+                  </>
+                )}
+                {verificationMode === "local_standardization" && (
+                  <>
+                    <Database size={13} /> Local Standardisation Mode
+                  </>
+                )}
               </span>
             </div>
           </div>
 
-          {/* Cleanser Controls: Live Toggle & Strict Toggle */}
-          <div
-            style={{
-              background: "#f8fafc",
-              border: "1px solid var(--line)",
-              borderRadius: "var(--radius-sm)",
-              padding: "14px 18px",
-              marginBottom: "16px",
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              flexWrap: "wrap",
-              gap: "14px",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: "20px", flexWrap: "wrap" }}>
-              {/* Live NIPOST Gateway Toggle */}
-              <label
+          {/* 3-Way Explicit Verification Mode Selector */}
+          <div style={{ marginBottom: "18px" }}>
+            <label
+              style={{
+                fontSize: "12px",
+                fontWeight: 700,
+                color: "var(--ink)",
+                display: "block",
+                marginBottom: "8px",
+              }}
+            >
+              Verification & Cleansing Mode:
+            </label>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+                gap: "12px",
+              }}
+            >
+              {/* Option 1: Local Standardisation */}
+              <div
+                onClick={() => setVerificationMode("local_standardization")}
                 style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  fontSize: "12px",
-                  fontWeight: 600,
+                  border: `2px solid ${
+                    verificationMode === "local_standardization" ? "#2563eb" : "#e2e8f0"
+                  }`,
+                  background:
+                    verificationMode === "local_standardization" ? "#eff6ff" : "#ffffff",
+                  borderRadius: "var(--radius-sm)",
+                  padding: "12px 14px",
                   cursor: "pointer",
-                  color: liveVerifyToggle ? "#0f766e" : "#475569",
+                  transition: "all 0.15s ease",
                 }}
               >
-                <input
-                  type="checkbox"
-                  checked={liveVerifyToggle}
-                  onChange={(e) => setLiveVerifyToggle(e.target.checked)}
-                  style={{ width: "16px", height: "16px", cursor: "pointer" }}
-                />
-                <Globe size={15} color={liveVerifyToggle ? "#0f766e" : "#64748b"} />
-                Query Live NIPOST Gateway (`live_verify: true`)
-              </label>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    marginBottom: "4px",
+                  }}
+                >
+                  <Database
+                    size={16}
+                    color={
+                      verificationMode === "local_standardization" ? "#2563eb" : "#64748b"
+                    }
+                  />
+                  <b
+                    style={{
+                      fontSize: "13px",
+                      color:
+                        verificationMode === "local_standardization"
+                          ? "#1e40af"
+                          : "#1e293b",
+                    }}
+                  >
+                    Local Standardisation
+                  </b>
+                  {verificationMode === "local_standardization" && (
+                    <span
+                      style={{
+                        marginLeft: "auto",
+                        fontSize: "10px",
+                        fontWeight: 700,
+                        color: "#2563eb",
+                      }}
+                    >
+                      ACTIVE
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: "11px", color: "#64748b", lineHeight: 1.4 }}>
+                  Format address syntax & match against local reference dataset (offline; zero external network calls).
+                </div>
+              </div>
 
-              {/* Strict Fail-Closed Mode Toggle */}
-              <label
+              {/* Option 2: NIPOST Validation & Autofill */}
+              <div
+                onClick={() => setVerificationMode("nipost_validate")}
                 style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  fontSize: "12px",
-                  fontWeight: 600,
+                  border: `2px solid ${
+                    verificationMode === "nipost_validate" ? "#16a34a" : "#e2e8f0"
+                  }`,
+                  background:
+                    verificationMode === "nipost_validate" ? "#f0fdf4" : "#ffffff",
+                  borderRadius: "var(--radius-sm)",
+                  padding: "12px 14px",
                   cursor: "pointer",
-                  color: strictModeToggle ? "#dc2626" : "#475569",
+                  transition: "all 0.15s ease",
                 }}
               >
-                <input
-                  type="checkbox"
-                  checked={strictModeToggle}
-                  onChange={(e) => setStrictModeToggle(e.target.checked)}
-                  style={{ width: "16px", height: "16px", cursor: "pointer" }}
-                />
-                <ShieldAlert size={15} color={strictModeToggle ? "#dc2626" : "#64748b"} />
-                Strict Verification Mode (`strict: true`)
-              </label>
-            </div>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    marginBottom: "4px",
+                  }}
+                >
+                  <Globe
+                    size={16}
+                    color={
+                      verificationMode === "nipost_validate" ? "#16a34a" : "#64748b"
+                    }
+                  />
+                  <b
+                    style={{
+                      fontSize: "13px",
+                      color:
+                        verificationMode === "nipost_validate"
+                          ? "#166534"
+                          : "#1e293b",
+                    }}
+                  >
+                    NIPOST Validation & Autofill
+                  </b>
+                  {verificationMode === "nipost_validate" && (
+                    <span
+                      style={{
+                        marginLeft: "auto",
+                        fontSize: "10px",
+                        fontWeight: 700,
+                        color: "#16a34a",
+                      }}
+                    >
+                      ACTIVE
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: "11px", color: "#64748b", lineHeight: 1.4 }}>
+                  Live upstream check with graceful fallback to local reference data if gateway is offline.
+                </div>
+              </div>
 
-            <div style={{ fontSize: "11px", color: "#64748b" }}>
-              {strictModeToggle
-                ? "Fails closed with HTTP 502/503 if live gateway is offline"
-                : "Gracefully falls back to local reference dataset if live gateway is unreachable"}
+              {/* Option 3: Strict Fail-Closed Verification */}
+              <div
+                onClick={() => setVerificationMode("nipost_strict")}
+                style={{
+                  border: `2px solid ${
+                    verificationMode === "nipost_strict" ? "#dc2626" : "#e2e8f0"
+                  }`,
+                  background:
+                    verificationMode === "nipost_strict" ? "#fef2f2" : "#ffffff",
+                  borderRadius: "var(--radius-sm)",
+                  padding: "12px 14px",
+                  cursor: "pointer",
+                  transition: "all 0.15s ease",
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    marginBottom: "4px",
+                  }}
+                >
+                  <ShieldAlert
+                    size={16}
+                    color={
+                      verificationMode === "nipost_strict" ? "#dc2626" : "#64748b"
+                    }
+                  />
+                  <b
+                    style={{
+                      fontSize: "13px",
+                      color:
+                        verificationMode === "nipost_strict"
+                          ? "#991b1b"
+                          : "#1e293b",
+                    }}
+                  >
+                    Strict Fail-Closed Verification
+                  </b>
+                  {verificationMode === "nipost_strict" && (
+                    <span
+                      style={{
+                        marginLeft: "auto",
+                        fontSize: "10px",
+                        fontWeight: 700,
+                        color: "#dc2626",
+                      }}
+                    >
+                      ACTIVE
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: "11px", color: "#64748b", lineHeight: 1.4 }}>
+                  Authoritative NIPOST evidence required. Fails closed with error if upstream rejects or fails.
+                </div>
+              </div>
             </div>
           </div>
 
@@ -915,7 +1044,7 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
             <button
               type="button"
               className="primary"
-              onClick={handleCleanseAddress}
+              onClick={() => handleCleanseAddress()}
               disabled={isCleansing || !rawAddressInput.trim()}
             >
               {isCleansing ? (
@@ -1002,9 +1131,9 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
               <div>
                 <b>Cleansing Blocked:</b>
                 <div style={{ marginTop: "4px" }}>{cleanseError}</div>
-                {strictModeToggle && (
+                {verificationMode === "nipost_strict" && (
                   <div style={{ marginTop: "6px", fontSize: "11px", color: "#b91c1c" }}>
-                    Strict verification prevented fallback to local demonstration data. Ensure NIPOST gateway is online or disable strict mode.
+                    Strict verification prevented fallback to local demonstration data. Ensure NIPOST gateway is online or switch to standardisation/validation mode.
                   </div>
                 )}
               </div>

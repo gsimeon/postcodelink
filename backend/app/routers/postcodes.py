@@ -1,4 +1,5 @@
 """Postcode lookup and address cleansing router."""
+import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, Query, Request, HTTPException, status
 from sqlalchemy.orm import Session
@@ -19,6 +20,7 @@ from backend.app.config import settings
 from backend.app.models.profile import Profile
 
 router = APIRouter(prefix="/postcodes", tags=["postcodes"])
+logger = logging.getLogger("postcode_router")
 
 
 def check_optional_api_key(request: Request, db: Session):
@@ -55,6 +57,9 @@ def execute_postcode_lookup(
     upstream_status = None
     upstream_error = None
     fallback_reason = None
+
+    if client is None:
+        client = get_nipost_client()
 
     if strict:
         if not code or not code.strip():
@@ -102,6 +107,7 @@ def execute_postcode_lookup(
             # Create VerificationEvidence if db available
             ev_id = None
             ev_valid_until = None
+            evidence_persisted = False
             if db is not None:
                 try:
                     import hashlib
@@ -115,7 +121,7 @@ def execute_postcode_lookup(
                         provider="NIPOST",
                         provider_reference_id=live_res.get("reference_id") or live_res.get("transaction_id"),
                         verification_method=ver_method,
-                        dataset_version=upstream_version or "2026.1",
+                        dataset_version=upstream_version,
                         response_hash=resp_hash,
                         status="verified" if not is_validator else "partial",
                         address_metadata_source=addr_metadata_source,
@@ -125,14 +131,34 @@ def execute_postcode_lookup(
                     db.commit()
                     db.refresh(ev_rec)
                     ev_id = ev_rec.id
-                except Exception:
-                    pass
+                    evidence_persisted = True
+                except Exception as ev_err:
+                    db.rollback()
+                    logger.warning(f"Failed to persist VerificationEvidence audit record in lookup: {ev_err}")
+                    if strict:
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="Verification evidence audit record could not be persisted. Strict verification failed closed.",
+                        )
+                    evidence_persisted = False
 
-            prov_text = (
-                "NIPOST Official Directory (Existence Verified by Validator; Local Enrichment for Address Attributes)"
-                if is_validator
-                else "NIPOST Official National Directory (Live API)"
-            )
+            if db is not None and not evidence_persisted:
+                prov_text = (
+                    "NIPOST Live Gateway responded, but audit evidence persistence failed; "
+                    "downgraded to local reference per verification integrity policy."
+                )
+                ver_status = "local_reference"
+                lookup_status_val = "local_reference"
+                service_type_val = "unverified_fallback"
+            else:
+                prov_text = (
+                    "NIPOST Official Directory (Existence Verified by Validator; Local Enrichment for Address Attributes)"
+                    if is_validator
+                    else "NIPOST Official National Directory (Live API)"
+                )
+                ver_status = "official_verified" if not is_validator else "local_reference"
+                lookup_status_val = "official_verified" if not is_validator else "partially_verified"
+                service_type_val = "validator" if is_validator else "autofill"
 
             schema_rec = PostcodeRecordSchema(
                 code=live_res.get("code") or code,
@@ -144,33 +170,34 @@ def execute_postcode_lookup(
                 postcode_type=live_res.get("postcode_type", "digital_location" if len(code.replace("-", "")) > 6 else "conventional_area"),
                 postcode_category="official_digital_postcode" if len(code.replace("-", "")) > 6 else "legacy_postal_code",
                 building_reference=rec_building,
-                verification_status="official_verified" if not is_validator else "local_reference",
+                verification_status=ver_status,
                 provenance=prov_text,
                 dataset_version=upstream_version,
-                source_owner="NIPOST",
-                source_type="official_national_directory",
+                source_owner="NIPOST" if (evidence_persisted or db is None) else "PostcodeLink",
+                source_type="official_national_directory" if (evidence_persisted or db is None) else "local_reference",
                 evidence_id=ev_id,
-                verification_method=ver_method,
+                verification_method=ver_method if (evidence_persisted or db is None) else "unverified_fallback",
                 address_metadata_source=addr_metadata_source,
                 valid_until=ev_valid_until,
             )
             return PostcodeLookupResponse(
-                source="live_nipost_api",
+                source="live_nipost_api" if (evidence_persisted or db is None) else "local_reference_fallback",
                 count=1,
                 matches=[schema_rec],
-                is_live_nipost=True,
+                is_live_nipost=bool(evidence_persisted or db is None),
                 is_partial_verification=is_validator,
-                service_type="validator" if is_validator else "autofill",
+                service_type=service_type_val,
                 dataset_version=upstream_version,
                 api_integration_version="2026.1",
                 provenance=prov_text,
-                lookup_status="official_verified" if not is_validator else "partially_verified",
-                verification_source="live_nipost_api",
-                verification_status="official_verified" if not is_validator else "local_reference",
-                fallback_used=False,
+                lookup_status=lookup_status_val,
+                verification_source="live_nipost_api" if (evidence_persisted or db is None) else "local_nipost_reference_dataset",
+                verification_status=ver_status,
+                fallback_used=bool(db is not None and not evidence_persisted),
+                fallback_reason="Verification evidence could not be recorded" if (db is not None and not evidence_persisted) else None,
                 upstream_status=res_status_val,
                 evidence_id=ev_id,
-                verification_method=ver_method,
+                verification_method=ver_method if (evidence_persisted or db is None) else "unverified_fallback",
                 address_metadata_source=addr_metadata_source,
                 valid_until=ev_valid_until,
             )

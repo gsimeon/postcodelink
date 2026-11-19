@@ -57,10 +57,6 @@ class PostcodeLookupResponse(BaseModel):
     verification_method: Optional[str] = None
     address_metadata_source: Optional[str] = None
     valid_until: Optional[datetime] = None
-    evidence_id: Optional[str] = None
-    verification_method: Optional[str] = None
-    address_metadata_source: Optional[str] = None
-    valid_until: Optional[datetime] = None
 
 
 class CleanseAddressRequest(BaseModel):
@@ -107,3 +103,5 @@ class CleanseAddressResponse(BaseModel):
     verification_method: Optional[str] = None
     address_metadata_source: Optional[str] = None
     valid_until: Optional[datetime] = None
+    dataset_version: Optional[str] = None
+    api_integration_version: str = "2026.1"

@@ -9,9 +9,12 @@ PostcodeLink Local Reference Provenance:
   Local records are strictly categorized as local_reference and never represented as official government verification.
 """
 import re
+import logging
 from typing import Optional, List, Dict, Any
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger("postcode_service")
 from backend.app.models.postcode import PostcodeDirectory
 from backend.app.schemas.postcode import CleanseAddressResponse, PostcodeRecordSchema
 from backend.app.services.nipost_client import NIPOSTLookupStatus
@@ -329,6 +332,10 @@ def cleanse_address(
     norm_area_hint = normalize_string(area_hint)
     norm_state_hint = normalize_string(state_hint)
 
+    if client is None:
+        from backend.app.services.nipost_client import get_nipost_client
+        client = get_nipost_client()
+
     # 1. Digital Postcode (10-11 character building location) vs Conventional (6-digit area) detection
     extracted_code: Optional[str] = None
     is_digital_location: bool = False
@@ -518,6 +525,9 @@ def cleanse_address(
             # Create and record VerificationEvidence if database is present
             ev_id = None
             ev_valid_until = None
+            evidence_persisted = False
+            upstream_ver = live_data.get("dataset_version") if live_data else None
+
             if db is not None:
                 try:
                     import hashlib
@@ -531,7 +541,7 @@ def cleanse_address(
                         provider="NIPOST",
                         provider_reference_id=live_data.get("reference_id") or live_data.get("transaction_id"),
                         verification_method=ver_method,
-                        dataset_version=live_data.get("dataset_version") or "2026.1",
+                        dataset_version=upstream_ver,
                         response_hash=resp_hash,
                         status="verified" if not is_validator else "partial",
                         address_metadata_source=addr_metadata_source,
@@ -541,15 +551,33 @@ def cleanse_address(
                     db.commit()
                     db.refresh(ev_rec)
                     ev_id = ev_rec.id
-                except Exception:
-                    pass
+                    evidence_persisted = True
+                except Exception as ev_err:
+                    db.rollback()
+                    logger.warning(f"Failed to persist VerificationEvidence audit record: {ev_err}")
+                    if strict:
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="Verification evidence audit record could not be persisted. Strict verification failed closed.",
+                        )
+                    evidence_persisted = False
 
-            prov_text = (
-                "NIPOST Official Directory (Existence Verified by Validator; Local Enrichment for Address Attributes)"
-                if is_validator
-                else "NIPOST Official National Directory (Live API)"
-            )
-            ver_status = "official_verified" if not is_validator else "local_reference"
+            if db is not None and not evidence_persisted:
+                # Evidence could not be durably recorded: MUST NOT claim official verification
+                prov_text = (
+                    "NIPOST Live Gateway responded, but audit evidence persistence failed; "
+                    "downgraded to local reference per verification integrity policy."
+                )
+                ver_status = "local_reference"
+                is_official = False
+            else:
+                prov_text = (
+                    "NIPOST Official Directory (Existence Verified by Validator; Local Enrichment for Address Attributes)"
+                    if is_validator
+                    else "NIPOST Official National Directory (Live API)"
+                )
+                ver_status = "official_verified" if not is_validator else "local_reference"
+                is_official = not is_validator and (evidence_persisted or db is None)
 
             matched_schema = PostcodeRecordSchema(
                 code=live_code,
@@ -563,31 +591,51 @@ def cleanse_address(
                 building_reference=live_building,
                 verification_status=ver_status,
                 provenance=prov_text,
-                dataset_version=live_data.get("dataset_version"),
-                source_owner="NIPOST",
-                source_type="official_national_directory",
+                dataset_version=upstream_ver,
+                source_owner="NIPOST" if (evidence_persisted or db is None) else "PostcodeLink",
+                source_type="official_national_directory" if (evidence_persisted or db is None) else "local_reference",
                 evidence_id=ev_id,
-                verification_method=ver_method,
+                verification_method=ver_method if (evidence_persisted or db is None) else "unverified_fallback",
                 address_metadata_source=addr_metadata_source,
                 valid_until=ev_valid_until,
             )
 
-            p_status = "verified" if (address_consistent and not is_validator) else ("partially_verified" if address_consistent else "conflict")
-            conf = 0.95 if (address_consistent and not is_validator) else (0.80 if address_consistent else 0.50)
-            disp_conf = 0.95 if (address_consistent and not is_validator) else (0.75 if address_consistent else 0.45)
+            if not address_consistent:
+                p_status = "conflict"
+                conf = 0.50
+                disp_conf = 0.45
+            elif db is not None and not evidence_persisted:
+                p_status = "local_match"
+                conf = 0.75
+                disp_conf = 0.75
+            elif is_official:
+                p_status = "verified"
+                conf = 0.95
+                disp_conf = 0.95
+            elif is_validator:
+                p_status = "partially_verified"
+                conf = 0.80
+                disp_conf = 0.75
+            else:
+                p_status = "local_match"
+                conf = 0.75
+                disp_conf = 0.75
 
-            if is_validator:
+            if not address_consistent:
+                changes_msg = [
+                    f"Address Inconsistency: Supplied area '{area_hint or clean_addr}' does not match official postcode {live_code} area '{live_area}, {live_state}'."
+                ]
+            elif db is not None and not evidence_persisted:
+                changes_msg = [
+                    f"Warning: Audit evidence persistence failed for code {live_code}. Downgraded from official verification to local reference."
+                ]
+            elif is_validator:
                 changes_msg = [
                     f"Postcode existence verified by official NIPOST Validator for code {live_code}; address metadata enriched from local reference dataset ({live_area}, {live_state})."
                 ]
             else:
                 changes_msg = [
                     f"Verified against official live NIPOST API code {live_code} for {live_area}, {live_state}"
-                ]
-
-            if not address_consistent:
-                changes_msg = [
-                    f"Address Inconsistency: Supplied area '{area_hint or clean_addr}' does not match official postcode {live_code} area '{live_area}, {live_state}'."
                 ]
 
             formatted = f"{clean_addr.rstrip(',')}, {live_area}, {live_state} {live_code}" if address_consistent else f"{clean_addr.rstrip(',')}, {live_state}"
@@ -608,22 +656,24 @@ def cleanse_address(
                 postcode_valid=True,
                 address_consistent=address_consistent,
                 dispatch_confidence=disp_conf,
-                source="live_nipost_api",
+                source="live_nipost_api" if (evidence_persisted or db is None) else "local_reference_fallback",
                 matched_record=matched_schema,
                 changes_made=changes_msg,
                 provenance=prov_text,
-                source_owner="NIPOST",
-                source_type="official_national_directory",
+                source_owner="NIPOST" if (evidence_persisted or db is None) else "PostcodeLink",
+                source_type="official_national_directory" if (evidence_persisted or db is None) else "local_reference",
                 checked_against_nipost=True,
-                is_live_nipost=True,
-                verification_source="live_nipost_api",
-                fallback_used=False,
-                upstream_status=nipost_status.value,
-                is_partial_verification=is_validator,
+                is_live_nipost=bool(evidence_persisted or db is None),
+                verification_source="live_nipost_api" if (evidence_persisted or db is None) else "local_nipost_reference_dataset",
+                fallback_used=bool(db is not None and not evidence_persisted),
+                dataset_version=upstream_ver,
+                api_integration_version="2026.1",
                 evidence_id=ev_id,
-                verification_method=ver_method,
+                verification_method=ver_method if (evidence_persisted or db is None) else "unverified_fallback",
                 address_metadata_source=addr_metadata_source,
                 valid_until=ev_valid_until,
+                upstream_status=nipost_status.value,
+                is_partial_verification=is_validator,
             )
 
     # 2. Database-First Candidates Selection
