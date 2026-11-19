@@ -46,26 +46,51 @@ graph TD
 
 ---
 
-## Data Sources, System Taxonomy & Regulatory Governance (Release Gate v6.0.10 Standard)
+## Data Sources, System Taxonomy & Regulatory Governance (Release Gate v6.1.4 Standard)
 
-PostcodeLink strictly differentiates between four tiers of postcode data and enforces clear data governance in compliance with the [NIPOST Terms of Service](https://www.postcode.gov.ng/terms):
+PostcodeLink strictly differentiates between tiers of postcode data and enforces clear data governance in compliance with the [NIPOST Terms of Service](https://www.postcode.gov.ng/terms):
 
 ### 1. Six-Tier Verification Taxonomy & Provenance Enforcement
 To prevent fabricated test fixtures or local reference data from being misrepresented as official government verifications, PostcodeLink enforces strict six-tier categorization across API contracts, database persistence, and UI indicators:
 1. **Format Valid (`format_valid`)**: The postcode adheres to official syntax specifications (either the 11-character 5-component `SS-LL-DDD-AA-BB` national digital standard or the 6-digit legacy format). Validated by `is_well_formed_postcode()`.
-2. **Local Reference Match (`local_match`)**: Matched against PostcodeLink's local demonstration registry or database directory (`PostcodeDirectory`). Returns `postcode_status: "local_match"` (confidence `0.75`). Demonstration fixtures (e.g. `FC-02-A09-DB-09` and `LA-01-A04-IK-02`) carry `source_type: "demonstration_fixture"` and explicitly disclose `(unverified with official NIPOST)`. Even database-backed reference entries remain `local_reference` unless authoritatively verified.
-3. **Partially Verified (`partially_verified`)**: Postcode existence confirmed by official NIPOST Validator (`/v1/validate`), but address metadata is absent from NIPOST and enriched from local reference datasets. Tagged with `address_metadata_source = "local_enrichment"` (confidence `0.80`). Enriched addresses are never falsely described as officially verified.
-4. **Officially Verified (`nipost_verified`)**: Both postcode existence and address administrative metadata are verified in real time against the live official NIPOST national digital directory (`/v1/lookup`). Returns `postcode_status: "verified"` (confidence `0.95+`).
-5. **Address Conflict (`address_conflict`)**: Postcode exists in the directory, but the caller-supplied area or state contradicts the official geographic zone assignment (confidence `0.40`).
+2. **Local Reference Match (`local_match`)**: Matched against PostcodeLink's local demonstration registry or database directory (`PostcodeDirectory`). Returns `postcode_status: "local_match"` (internal algorithmic heuristic score `match_quality_score: 0.75`). Demonstration fixtures (e.g. `FC-02-A09-DB-09` and `LA-01-A04-IK-02`) carry `source_type: "demonstration_fixture"` and explicitly disclose `(unverified with official NIPOST)`. Even database-backed reference entries remain `local_reference` unless authoritatively verified.
+3. **Partially Verified (`partially_verified`)**: Postcode existence confirmed by official NIPOST Validator (`/v1/validate`), but address metadata is absent from NIPOST and enriched from local reference datasets. Tagged with `address_metadata_source = "local_enrichment"` (internal heuristic score `0.80`). Enriched addresses are never falsely described as officially verified.
+4. **Officially Verified (`nipost_verified`)**: Both postcode existence and address administrative metadata are verified in real time against the live official NIPOST national digital directory (`/v1/lookup`). Returns `postcode_status: "verified"` (internal heuristic score `0.95`).
+5. **Address Conflict (`address_conflict`)**: Postcode exists in the directory, but the caller-supplied area or state contradicts the official geographic zone assignment (internal heuristic score `0.40`).
 6. **Verification Unavailable (`unavailable`)**: Upstream official NIPOST gateway is unreachable or timed out; non-strict local fallback applied with full transparent disclosure (`fallback_used: true`, `upstream_status: "UNAVAILABLE"`).
+
+> [!NOTE]
+> **Heuristic Scoring vs Factual Trust Indicators**:
+> Scores returned in `confidence` and `match_quality_score` are strictly internal algorithmic match heuristics and MUST NOT be construed as empirical delivery success probabilities. Production applications should evaluate PostcodeLink's 5 factual trust indicators:
+> 1. **Format Syntax (`postcode_valid`)**: Conformance to canonical Nigerian postal or digital location standard.
+> 2. **Registry Existence (`postcode_exists`)**: Authoritative upstream confirmation of registry existence (`True`, `False`, or `None` if unverified).
+> 3. **Upstream Gateway (`upstream_contacted`, `is_live_nipost`)**: Confirmation that live NIPOST APIs were queried and authoritative evidence logged.
+> 4. **Boundary Consistency (`address_consistent`)**: Geographic alignment between supplied address text and administrative district boundaries.
+> 5. **Location Precision (`resolution_level`)**: Granularity indicator (`building_location` for 11-char digital codes vs `area_district` for 6-digit codes).
 
 | Data Source Tier | Scope & Format | Verification Status | Provenance Attributes |
 | :--- | :--- | :--- | :--- |
-| **Authoritative Live NIPOST Cloud Gateway** | Live FMCIDE/NIPOST national digital postcode registry. | `official_verified` (`postcode_status: "verified"`, confidence 0.95+) | `dataset_version: null` (or provider-supplied), `fallback_used: false` |
-| **Database Directory Records** | Seeded reference data in local SQLite/PostgreSQL (`PostcodeDirectory`). | `local_reference` (`postcode_status: "local_match"`, confidence 0.75) | `source_type: "database_directory"`, `source_owner: "NIPOST / PostcodeLink"` |
+| **Authoritative Live NIPOST Cloud Gateway** | Live FMCIDE/NIPOST national digital postcode registry. | `official_verified` (`postcode_status: "verified"`) | `dataset_version: null` (or provider-supplied), `fallback_used: false` |
+| **Database Directory Records** | Seeded reference data in local SQLite/PostgreSQL (`PostcodeDirectory`). | `local_reference` (`postcode_status: "local_match"`) | `source_type: "database_directory"`, `source_owner: "NIPOST / PostcodeLink"` |
 | **NIPOST 11-Character National Digital Postcode** | 5-component building-level standard (`SS-LL-DDD-AA-BB`: State, LGA, District, Area, Building Unit). | Standard NIPOST format | Strict 2-2-3-2-2 width validation, canonical & compact parsing |
 | **Legacy 6-Digit Postal Codes** | Traditional regional sorting codes (e.g. `100001` Lagos Island, `900001` Garki Abuja). | `local_match` (or `verified` when verified upstream) | Regional routing (`[1-9]\d{5}`) |
-| **Demonstration Reference Fixtures** | Sample 11-character format demonstration codes (e.g. `FC-02-A09-DB-09`, `LA-01-A04-IK-02`). | `local_reference` (`postcode_status: "local_match"`, confidence 0.75) | `source_type: "demonstration_fixture"`, `source_owner: "PostcodeLink"` |
+| **Demonstration Reference Fixtures** | Sample 11-character format demonstration codes (e.g. `FC-02-A09-DB-09`, `LA-01-A04-IK-02`). | `local_reference` (`postcode_status: "local_match"`) | `source_type: "demonstration_fixture"`, `source_owner: "PostcodeLink"` |
+
+### 2. Verification Mode Precedence & Validation Matrix
+PostcodeLink supports explicit verification mode control via `verification_mode` alongside backwards-compatible boolean flags (`strict`, `live_verify`). Contradictory flag combinations are rejected with HTTP 422:
+
+| `verification_mode` | `strict` Flag | `live_verify` Flag | Effective Behavior | Resolution / Validation |
+| :--- | :--- | :--- | :--- | :--- |
+| `local_standardization` | `False` (default) | `False` (default) | Local standardization only | **Allowed** (Offline standardisation; zero upstream queries) |
+| `local_standardization` | `True` | Any | Contradictory | **Rejected with HTTP 422** |
+| `local_standardization` | Any | `True` | Contradictory | **Rejected with HTTP 422** |
+| `nipost_validate` | `False` (default) | Any | Upstream verification with local fallback | **Allowed** (Fallback enabled if NIPOST unavailable) |
+| `nipost_validate` | `True` | Any | Contradictory | **Rejected with HTTP 422** (Use `nipost_strict` for fail-closed) |
+| `nipost_strict` | `True` (or omitted) | Any | Upstream verification fail-closed | **Allowed** (Fails closed with HTTP 503/404/502) |
+| `nipost_strict` | `False` (explicit) | Any | Contradictory | **Rejected with HTTP 422** (`nipost_strict` cannot be non-strict) |
+| `None` (omitted) | `True` | Any | Resolves to `nipost_strict` | **Allowed** (Legacy strict flag resolution) |
+| `None` (omitted) | `False` | `True` | Resolves to `nipost_validate` | **Allowed** (Legacy live_verify flag resolution) |
+| `None` (omitted) | `False` | `False` | Resolves to `local_standardization` | **Allowed** (Default offline resolution) |
 
 > [!IMPORTANT]
 > **No Conflation of Local Data with Official Verification**: Local reference data and demonstration fixtures are strictly tagged as demonstration and fallback data. In strict verification mode (`strict=true`), local fallback is disabled; unverified postcodes return HTTP 503 rather than asserting local demonstration data as government truth.
@@ -73,7 +98,7 @@ To prevent fabricated test fixtures or local reference data from being misrepres
 ### 2. Verification Evidence Model & Database Provenance Gate
 A database record in `PostcodeDirectory` claiming `verification_status = "official_verified"` is **never** accepted as official truth on face value. To qualify as `verified`, it must be backed by an active, unexpired record in `VerificationEvidence`:
 - **Evidence Fields**: `postcode`, `provider = "NIPOST"`, `provider_reference_id`, `verification_method` (`validator_autofill_pipeline` | `validator`), `dataset_version`, `verified_at`, `valid_until` (default 30-day expiration window), `response_hash` (SHA-256 of raw response payload), and `address_metadata_source`.
-- **Automatic Demotion**: If verification evidence is missing, expired, or deactivated, database candidates are automatically demoted to `postcode_status = "local_match"` (confidence `0.75`), preventing stale or artificially flagged entries from posing as government-verified truth.
+- **Automatic Demotion**: If verification evidence is missing, expired, or deactivated, database candidates are automatically demoted to `postcode_status = "local_match"` (internal heuristic score `0.75`), preventing stale or artificially flagged entries from posing as government-verified truth.
 
 ### 3. Explicit Two-Stage Validator $\to$ Autofill Orchestration
 1. **Stage 1 (Validator)**: Queries `/v1/validate` to verify existence. If rejected or not found, halts immediately (failing closed with HTTP 404/422 in strict mode).

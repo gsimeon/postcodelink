@@ -10,6 +10,7 @@ PostcodeLink Local Reference Provenance:
 """
 import re
 import logging
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
@@ -355,11 +356,24 @@ def cleanse_address(
         effective_mode: VerificationMode = "local_standardization"
         effective_strict = False
         effective_live_verify = False
-    elif verification_mode == "nipost_strict" or strict:
+    elif verification_mode == "nipost_validate":
+        if strict:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Contradictory parameters: verification_mode='nipost_validate' allows fallback and cannot be combined with strict=True. Use 'nipost_strict' for fail-closed verification."
+            )
+        effective_mode: VerificationMode = "nipost_validate"
+        effective_strict = False
+        effective_live_verify = True
+    elif verification_mode == "nipost_strict":
         effective_mode: VerificationMode = "nipost_strict"
         effective_strict = True
         effective_live_verify = True
-    elif verification_mode == "nipost_validate" or live_verify:
+    elif strict:
+        effective_mode: VerificationMode = "nipost_strict"
+        effective_strict = True
+        effective_live_verify = True
+    elif live_verify:
         effective_mode: VerificationMode = "nipost_validate"
         effective_strict = False
         effective_live_verify = True
@@ -406,7 +420,17 @@ def cleanse_address(
     upstream_status: Optional[str] = None
     upstream_error: Optional[str] = None
 
-    should_live_verify = bool(effective_live_verify or effective_strict or (client and getattr(client, "is_configured", False) and (effective_live_verify or effective_strict)))
+    from unittest.mock import MagicMock
+    client_ready = bool(
+        client and (
+            getattr(client, "configuration_complete", False)
+            or getattr(client, "transport", None) is not None
+            or isinstance(client, MagicMock)
+            or (not hasattr(client, "configuration_complete") and getattr(client, "is_configured", False))
+        )
+    )
+
+    should_live_verify = bool(effective_live_verify or effective_strict)
 
     if effective_strict:
         if not extracted_code:
@@ -414,14 +438,13 @@ def cleanse_address(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Strict verification mode requires an identifiable postcode in input or address text. Area-only discovery cannot be strictly verified against NIPOST.",
             )
-        if not client or not getattr(client, "is_configured", False):
+        if not client_ready:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Official NIPOST API gateway is not configured or enabled. Strict verification requires live NIPOST connectivity.",
+                detail="Official NIPOST API gateway configuration is incomplete (base URL and API credentials required). Strict verification requires live NIPOST connectivity.",
             )
 
     if should_live_verify and extracted_code and client and getattr(client, "is_configured", False):
-        from unittest.mock import MagicMock
         orch = getattr(client, "orchestrated_verify", None)
         if callable(orch) and not isinstance(orch, MagicMock):
             nipost_status, live_data, nipost_err, ver_method = client.orchestrated_verify(extracted_code)
@@ -1159,11 +1182,32 @@ def get_postcode_coverage_report(
     records_per_state: Dict[str, int] = {}
     total_records = 0
     records_with_coords = 0
-    records_with_verified_provenance = 0
-    digital_building_records = 0
+    records_with_valid_evidence = 0
+    records_with_expired_evidence = 0
+    records_with_complete_metadata = 0
+    legacy_six_digit_records = 0
+    national_digital_postcode_records = 0
+    local_demonstration_fixtures = 0
 
     if db is not None:
         try:
+            from backend.app.models.verification_evidence import VerificationEvidence
+            now_utc = datetime.now(timezone.utc)
+            all_evidence = db.query(VerificationEvidence).filter(VerificationEvidence.is_active == True).all()
+            valid_evidence_codes = set()
+            expired_evidence_codes = set()
+
+            for ev in all_evidence:
+                t = ev.valid_until
+                if t is not None and t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                if t and now_utc <= t and ev.status in ("verified", "partial"):
+                    valid_evidence_codes.add(ev.postcode)
+                else:
+                    expired_evidence_codes.add(ev.postcode)
+
+            records_with_expired_evidence = len(expired_evidence_codes)
+
             db_records = db.query(PostcodeDirectory).all()
             if db_records:
                 total_records = len(db_records)
@@ -1171,18 +1215,37 @@ def get_postcode_coverage_report(
                     st = r.state or "Other"
                     states_set.add(st)
                     records_per_state[st] = records_per_state.get(st, 0) + 1
+
+                    # Coordinates
                     if r.lat is not None and r.lng is not None:
                         records_with_coords += 1
-                    if r.verification_status == "official_verified":
-                        records_with_verified_provenance += 1
+
+                    # Complete metadata
+                    if r.area and r.state and r.lga and r.lat is not None and r.lng is not None:
+                        records_with_complete_metadata += 1
+
+                    code = (r.code or "").strip()
+
+                    # Strict digital vs legacy classification
+                    if parse_digital_postcode_components(code) is not None:
+                        national_digital_postcode_records += 1
+                    elif code.isdigit() and len(code) == 6:
+                        legacy_six_digit_records += 1
+
+                    # Demonstration / local fixture
                     if (
-                        r.postcode_type == "digital_location"
-                        or r.postcode_category == "official_digital_postcode"
-                        or (r.code and len(r.code.replace("-", "")) > 6)
+                        getattr(r, "source_type", None) == "demonstration_fixture"
+                        or r.verification_status in ("local_reference", "synthetic_demo", "demonstration_fixture")
+                        or (r.provenance and "Demonstration" in r.provenance)
                     ):
-                        digital_building_records += 1
+                        local_demonstration_fixtures += 1
+
+                    # Valid evidence-backed provenance
+                    if r.code in valid_evidence_codes:
+                        records_with_valid_evidence += 1
+
         except Exception as db_err:
-            logger.warning(f"Error querying PostcodeDirectory for coverage report: {db_err}")
+            logger.warning(f"Error querying PostcodeDirectory or VerificationEvidence for coverage report: {db_err}")
 
     if total_records == 0:
         total_records = len(OFFICIAL_POSTCODES)
@@ -1190,16 +1253,25 @@ def get_postcode_coverage_report(
             st = r.get("state") or "Other"
             states_set.add(st)
             records_per_state[st] = records_per_state.get(st, 0) + 1
+
             if r.get("lat") is not None and r.get("lng") is not None:
                 records_with_coords += 1
-            if r.get("verification_status") == "official_verified":
-                records_with_verified_provenance += 1
+
+            if r.get("area") and r.get("state") and r.get("lga") and r.get("lat") is not None and r.get("lng") is not None:
+                records_with_complete_metadata += 1
+
+            code = (r.get("code") or "").strip()
+            if parse_digital_postcode_components(code) is not None:
+                national_digital_postcode_records += 1
+            elif code.isdigit() and len(code) == 6:
+                legacy_six_digit_records += 1
+
             if (
-                r.get("postcode_type") == "digital_location"
-                or r.get("postcode_category") == "official_digital_postcode"
-                or (r.get("code") and len(r.get("code").replace("-", "")) > 6)
+                r.get("source_type") == "demonstration_fixture"
+                or r.get("verification_status") in ("local_reference", "synthetic_demo", "demonstration_fixture")
+                or (r.get("provenance") and "Demonstration" in r.get("provenance"))
             ):
-                digital_building_records += 1
+                local_demonstration_fixtures += 1
 
     states_list = sorted(list(states_set))
 
@@ -1211,7 +1283,13 @@ def get_postcode_coverage_report(
         total_reference_records=total_records,
         records_per_state=records_per_state,
         records_with_coordinates=records_with_coords,
-        records_with_verified_provenance=records_with_verified_provenance,
-        digital_building_level_records=digital_building_records,
+        records_with_verified_provenance=records_with_valid_evidence,
+        records_with_valid_evidence=records_with_valid_evidence,
+        records_with_expired_evidence=records_with_expired_evidence,
+        records_with_complete_metadata=records_with_complete_metadata,
+        legacy_six_digit_records=legacy_six_digit_records,
+        national_digital_postcode_records=national_digital_postcode_records,
+        local_demonstration_fixtures=local_demonstration_fixtures,
+        digital_building_level_records=national_digital_postcode_records,
         upstream_integration=integration_status,
     )

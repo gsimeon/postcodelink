@@ -73,16 +73,28 @@ class CleanseAddressRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_mode_and_legacy_flags(self) -> "CleanseAddressRequest":
+        fields_set = self.model_fields_set
         if self.verification_mode == "local_standardization":
-            if self.strict:
+            if self.strict or ("strict" in fields_set and self.strict):
                 raise ValueError(
                     "Contradictory parameters: verification_mode='local_standardization' cannot be combined with strict=True. "
                     "Local standardization is an offline mode with zero upstream verification."
                 )
-            if self.live_verify:
+            if self.live_verify or ("live_verify" in fields_set and self.live_verify):
                 raise ValueError(
                     "Contradictory parameters: verification_mode='local_standardization' cannot be combined with live_verify=True. "
                     "Local standardization is an offline mode with zero upstream verification."
+                )
+        elif self.verification_mode == "nipost_validate":
+            if "strict" in fields_set and self.strict:
+                raise ValueError(
+                    "Contradictory parameters: verification_mode='nipost_validate' allows fallback and cannot be combined with strict=True. "
+                    "Use 'nipost_strict' for fail-closed verification."
+                )
+        elif self.verification_mode == "nipost_strict":
+            if "strict" in fields_set and not self.strict:
+                raise ValueError(
+                    "Contradictory parameters: verification_mode='nipost_strict' requires fail-closed behavior and cannot be combined with strict=False."
                 )
         return self
 
@@ -143,6 +155,12 @@ class CoverageReportResponse(BaseModel):
     total_reference_records: int
     records_per_state: Dict[str, int]
     records_with_coordinates: int
-    records_with_verified_provenance: int
-    digital_building_level_records: int
+    records_with_verified_provenance: int = 0
+    records_with_valid_evidence: int = 0
+    records_with_expired_evidence: int = 0
+    records_with_complete_metadata: int = 0
+    legacy_six_digit_records: int = 0
+    national_digital_postcode_records: int = 0
+    local_demonstration_fixtures: int = 0
+    digital_building_level_records: int = 0
     upstream_integration: Dict[str, Any]

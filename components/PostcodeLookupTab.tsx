@@ -73,10 +73,10 @@ export function getVerificationBadgeConfig(
     return {
       tier: "partially_verified",
       label: "PARTIALLY VERIFIED",
-      pillClass: "pill purple",
-      color: "#7c3aed",
-      bg: "#f5f3ff",
-      border: "#ddd6fe",
+      pillClass: "pill blue",
+      color: "#2563eb",
+      bg: "#eff6ff",
+      border: "#bfdbfe",
       description: "Postcode existence validated by NIPOST; address attributes enriched from local dataset",
     };
   }
@@ -114,10 +114,10 @@ export function getVerificationBadgeConfig(
     return {
       tier: "format_valid",
       label: "FORMAT VALID",
-      pillClass: "pill blue",
-      color: "#2563eb",
-      bg: "#eff6ff",
-      border: "#bfdbfe",
+      pillClass: "pill cyan",
+      color: "#0284c7",
+      bg: "#f0f9ff",
+      border: "#bae6fd",
       description: "Valid Nigerian postal syntax (pending authoritative upstream check)",
     };
   }
@@ -1823,7 +1823,7 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                   display: "grid",
                   gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
                   gap: "14px",
-                  marginBottom: "20px",
+                  marginBottom: "14px",
                 }}
               >
                 <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "8px", padding: "16px" }}>
@@ -1868,10 +1868,68 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                     DIGITAL BUILDING CODES
                   </div>
                   <div style={{ fontSize: "24px", fontWeight: 800, color: "#1d4ed8", marginTop: "4px" }}>
-                    {coverageReport.digital_building_level_records.toLocaleString()}
+                    {(coverageReport.national_digital_postcode_records ?? coverageReport.digital_building_level_records).toLocaleString()}
                   </div>
                   <small style={{ fontSize: "11px", color: "#64748b" }}>
-                    5-part building-level location codes
+                    5-part canonical digital codes
+                  </small>
+                </div>
+              </div>
+
+              {/* Data Governance & Breakdown Dimensions */}
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+                  gap: "14px",
+                  marginBottom: "20px",
+                }}
+              >
+                <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "8px", padding: "14px" }}>
+                  <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
+                    LEGACY 6-DIGIT CODES
+                  </div>
+                  <div style={{ fontSize: "20px", fontWeight: 700, color: "#475569", marginTop: "4px" }}>
+                    {(coverageReport.legacy_six_digit_records ?? 0).toLocaleString()}
+                  </div>
+                  <small style={{ fontSize: "11px", color: "#64748b" }}>
+                    Conventional postal areas
+                  </small>
+                </div>
+
+                <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "8px", padding: "14px" }}>
+                  <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
+                    COMPLETE METADATA
+                  </div>
+                  <div style={{ fontSize: "20px", fontWeight: 700, color: "#0f766e", marginTop: "4px" }}>
+                    {(coverageReport.records_with_complete_metadata ?? 0).toLocaleString()}
+                  </div>
+                  <small style={{ fontSize: "11px", color: "#64748b" }}>
+                    Area, state, LGA & GPS coordinates
+                  </small>
+                </div>
+
+                <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "8px", padding: "14px" }}>
+                  <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
+                    EVIDENCE-BACKED PROVENANCE
+                  </div>
+                  <div style={{ fontSize: "20px", fontWeight: 700, color: "#16a34a", marginTop: "4px" }}>
+                    {(coverageReport.records_with_valid_evidence ?? 0).toLocaleString()}
+                  </div>
+                  <small style={{ fontSize: "11px", color: "#64748b" }}>
+                    Active unexpired NIPOST audit evidence
+                  </small>
+                </div>
+
+                <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "8px", padding: "14px" }}>
+                  <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
+                    LOCAL DEMO FIXTURES
+                  </div>
+                  <div style={{ fontSize: "20px", fontWeight: 700, color: "#d97706", marginTop: "4px" }}>
+                    {(coverageReport.local_demonstration_fixtures ?? 0).toLocaleString()}
+                  </div>
+                  <small style={{ fontSize: "11px", color: "#64748b" }}>
+                    Demonstration & reference fixtures
                   </small>
                 </div>
               </div>

@@ -240,6 +240,12 @@ export interface CoverageReport {
   records_per_state: Record<string, number>;
   records_with_coordinates: number;
   records_with_verified_provenance: number;
+  records_with_valid_evidence?: number;
+  records_with_expired_evidence?: number;
+  records_with_complete_metadata?: number;
+  legacy_six_digit_records?: number;
+  national_digital_postcode_records?: number;
+  local_demonstration_fixtures?: number;
   digital_building_level_records: number;
   upstream_integration: {
     adapter_installed: boolean;
