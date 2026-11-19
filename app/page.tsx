@@ -156,12 +156,16 @@ export default function Home() {
         setIsFastAPIConnected(true);
 
         if (fastApiClient.isAuthenticated()) {
-          const [apiDeliveries, apiOperators, apiCustomers] = await Promise.all([
+          const [apiDeliveries, apiOperators, apiCustomers, profile] = await Promise.all([
             fastApiClient.listDeliveries().catch(() => []),
             fastApiClient.listOperators().catch(() => []),
             fastApiClient.listCustomers().catch(() => []),
+            fastApiClient.getProfile().catch(() => null),
           ]);
 
+          if (profile) {
+            setCurrentProfile(profile);
+          }
           // An empty array is a valid empty database state
           setDeliveries(apiDeliveries.map(mapFastAPIDelivery));
           setOperators(apiOperators.map(mapFastAPIOperator));
@@ -455,6 +459,7 @@ export default function Home() {
         deliveriesCount={deliveries.length}
         unassignedCount={unassignedCount}
         availableOperatorsCount={availableOperatorsCount}
+        profile={currentProfile}
       />
 
       {/* Main Content Area */}

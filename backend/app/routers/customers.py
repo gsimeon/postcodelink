@@ -9,7 +9,7 @@ from backend.app.models.customer import Customer
 from backend.app.models.profile import Profile
 from backend.app.models.enums import AppRole
 from backend.app.schemas.customer import CustomerCreate, CustomerResponse
-from backend.app.core.auth_deps import require_roles
+from backend.app.core.auth_deps import get_authenticated_merchant_or_api_key
 
 router = APIRouter(prefix="/customers", tags=["customers"])
 
@@ -18,7 +18,7 @@ router = APIRouter(prefix="/customers", tags=["customers"])
 def api_list_customers(
     search: Optional[str] = Query(None),
     limit: int = Query(50, le=100),
-    current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
+    current_user: Profile = Depends(get_authenticated_merchant_or_api_key),
     db: Session = Depends(get_db),
 ):
     """List customer address book scoped strictly to the authenticated merchant."""
@@ -42,7 +42,7 @@ def api_list_customers(
 @router.post("/", response_model=CustomerResponse, status_code=status.HTTP_201_CREATED)
 def api_create_customer(
     request: CustomerCreate,
-    current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
+    current_user: Profile = Depends(get_authenticated_merchant_or_api_key),
     db: Session = Depends(get_db),
 ):
     """Add or update customer in the authenticated merchant's address directory."""
@@ -83,7 +83,7 @@ def api_create_customer(
 @router.get("/{customer_id}", response_model=CustomerResponse)
 def api_get_customer(
     customer_id: str,
-    current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
+    current_user: Profile = Depends(get_authenticated_merchant_or_api_key),
     db: Session = Depends(get_db),
 ):
     """Get customer record scoped strictly to merchant ownership."""
@@ -100,7 +100,7 @@ def api_get_customer(
 @router.delete("/{customer_id}", status_code=status.HTTP_204_NO_CONTENT)
 def api_delete_customer(
     customer_id: str,
-    current_user: Profile = Depends(require_roles([AppRole.MERCHANT, AppRole.ADMIN])),
+    current_user: Profile = Depends(get_authenticated_merchant_or_api_key),
     db: Session = Depends(get_db),
 ):
     """Delete a customer entry from merchant's address book."""

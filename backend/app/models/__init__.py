@@ -10,6 +10,7 @@ from backend.app.models.postcode import PostcodeDirectory
 from backend.app.models.notification_outbox import NotificationOutbox
 from backend.app.models.login_attempt import LoginAttempt
 from backend.app.models.api_key import ApiKey
+from backend.app.models.verification_evidence import VerificationEvidence
 
 __all__ = [
     "Base",
@@ -26,5 +27,6 @@ __all__ = [
     "NotificationOutbox",
     "LoginAttempt",
     "ApiKey",
+    "VerificationEvidence",
 ]
 
