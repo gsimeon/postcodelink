@@ -141,6 +141,88 @@ export interface FastAPIAnalytics {
   total_customers: number;
 }
 
+export interface PostcodeDirectoryEntry {
+  code: string;
+  area: string;
+  state: string;
+  lga?: string;
+  lat?: number;
+  lng?: number;
+  postcode_type: string;
+  postcode_category?: string;
+  building_reference?: string;
+  verification_status?: string;
+  provenance?: string;
+  dataset_version?: string;
+  verified_at?: string;
+  valid_until?: string;
+  evidence_id?: string;
+  verification_method?: string;
+  address_metadata_source?: string;
+  source_owner?: string;
+  source_type?: string;
+  national_components?: Record<string, string>;
+}
+
+export interface PostcodeLookupResult {
+  source: string;
+  count: number;
+  matches: PostcodeDirectoryEntry[];
+  is_live_nipost: boolean;
+  is_partial_verification?: boolean;
+  service_type?: string;
+  dataset_version?: string;
+  api_integration_version: string;
+  provenance: string;
+  lookup_status: string;
+  verification_source: string;
+  verification_status: string;
+  fallback_used: boolean;
+  fallback_reason?: string;
+  upstream_status?: string;
+  upstream_error?: string;
+  evidence_id?: string;
+  verification_method?: string;
+  address_metadata_source?: string;
+  valid_until?: string;
+}
+
+export interface CleanseResult {
+  original_address: string;
+  formatted_address: string;
+  area: string;
+  state: string;
+  lga?: string;
+  postcode: string;
+  postcode_type: string;
+  postcode_category?: string;
+  resolution_level: string;
+  postcode_status: string;
+  verification_status?: string;
+  confidence: number;
+  postcode_valid: boolean;
+  address_consistent: boolean;
+  dispatch_confidence: number;
+  source: string;
+  matched_record?: PostcodeDirectoryEntry;
+  changes_made: string[];
+  provenance?: string;
+  source_owner?: string;
+  source_type?: string;
+  national_components?: Record<string, string>;
+  checked_against_nipost: boolean;
+  is_live_nipost: boolean;
+  verification_source: string;
+  fallback_used: boolean;
+  upstream_status?: string;
+  upstream_error?: string;
+  is_partial_verification?: boolean;
+  evidence_id?: string;
+  verification_method?: string;
+  address_metadata_source?: string;
+  valid_until?: string;
+}
+
 function getHeaders(extraHeaders: Record<string, string> = {}): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -402,13 +484,79 @@ export const fastApiClient = {
     return await res.json();
   },
 
-  async cleanseAddress(address: string, state?: string, area?: string, postcode?: string) {
+  async getProfile(): Promise<FastAPIProfile> {
+    const res = await fetch(`${API_V1}/auth/me`, {
+      headers: getHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to fetch current profile');
+    }
+    return await res.json();
+  },
+
+  async lookupPostcodes(params: {
+    code?: string;
+    state?: string;
+    area?: string;
+    strict?: boolean;
+  } = {}): Promise<PostcodeLookupResult> {
+    const q = new URLSearchParams();
+    if (params.code && params.code.trim()) q.append('code', params.code.trim());
+    if (params.state && params.state !== 'All') q.append('state', params.state);
+    if (params.area && params.area.trim()) q.append('area', params.area.trim());
+    if (params.strict) q.append('strict', 'true');
+
+    const res = await fetch(`${API_V1}/postcodes/lookup?${q.toString()}`, {
+      headers: getHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to lookup postcodes');
+    }
+    return await res.json();
+  },
+
+  async cleanseAddress(
+    addressOrPayload:
+      | string
+      | {
+          address: string;
+          state?: string;
+          area?: string;
+          postcode?: string;
+          strict?: boolean;
+          live_verify?: boolean;
+        },
+    state?: string,
+    area?: string,
+    postcode?: string,
+    strict?: boolean,
+    live_verify?: boolean
+  ): Promise<CleanseResult> {
+    const payload =
+      typeof addressOrPayload === 'string'
+        ? {
+            address: addressOrPayload,
+            state: state || undefined,
+            area: area || undefined,
+            postcode: postcode || undefined,
+            strict: !!strict,
+            live_verify: !!live_verify,
+          }
+        : addressOrPayload;
+
     const res = await fetch(`${API_V1}/postcodes/cleanse`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ address, state, area, postcode }),
+      headers: getHeaders(),
+      body: JSON.stringify(payload),
     });
-    if (!res.ok) throw new Error('Failed to cleanse address');
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to cleanse address');
+    }
     return await res.json();
   },
 

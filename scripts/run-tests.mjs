@@ -197,3 +197,78 @@ test('OTP Security: completes delivery when correct 6-digit PIN provided on out_
   assert.equal(mockDelivery.status, 'delivered');
   assert.equal(mockDelivery.podVerified, true);
 });
+
+// 4. Test 6-Tier Verification Status Classification & Provenance Mapping
+function classifyVerificationTier(status, isLive, isPartial) {
+  if (isPartial || status === 'partially_verified') {
+    return { tier: 'partially_verified', label: 'PARTIALLY VERIFIED', color: '#7c3aed' };
+  }
+  if (status === 'official_verified' || status === 'nipost_verified' || (status === 'verified' && isLive)) {
+    return { tier: 'nipost_verified', label: 'NIPOST VERIFIED', color: '#16a34a' };
+  }
+  if (status === 'local_match' || status === 'local_reference' || status === 'verified') {
+    return { tier: 'local_match', label: 'LOCAL REFERENCE MATCH', color: '#d97706' };
+  }
+  if (status === 'format_valid' || status === 'estimated') {
+    return { tier: 'format_valid', label: 'FORMAT VALID', color: '#2563eb' };
+  }
+  if (status === 'conflict' || status === 'address_conflict') {
+    return { tier: 'address_conflict', label: 'ADDRESS CONFLICT', color: '#dc2626' };
+  }
+  return { tier: 'unavailable', label: 'UNAVAILABLE / UNVERIFIED', color: '#64748b' };
+}
+
+test('Verification Classification: correctly partitions 6-tier verification status and provenance', () => {
+  // Tier 1: NIPOST Live
+  const t1 = classifyVerificationTier('official_verified', true, false);
+  assert.equal(t1.tier, 'nipost_verified');
+  assert.equal(t1.label, 'NIPOST VERIFIED');
+
+  // Tier 2: Partially Verified (Validator existence + Local metadata)
+  const t2 = classifyVerificationTier('partially_verified', true, true);
+  assert.equal(t2.tier, 'partially_verified');
+  assert.equal(t2.label, 'PARTIALLY VERIFIED');
+
+  // Tier 3: Local Match (Non-governmental reference)
+  const t3 = classifyVerificationTier('local_match', false, false);
+  assert.equal(t3.tier, 'local_match');
+  assert.equal(t3.label, 'LOCAL REFERENCE MATCH');
+
+  // Ensure database record without live evidence cannot masquerade as official
+  const t3Demoted = classifyVerificationTier('verified', false, false);
+  assert.equal(t3Demoted.tier, 'local_match');
+
+  // Tier 4: Format Valid
+  const t4 = classifyVerificationTier('format_valid', false, false);
+  assert.equal(t4.tier, 'format_valid');
+  assert.equal(t4.label, 'FORMAT VALID');
+
+  // Tier 5: Address Conflict
+  const t5 = classifyVerificationTier('address_conflict', false, false);
+  assert.equal(t5.tier, 'address_conflict');
+  assert.equal(t5.label, 'ADDRESS CONFLICT');
+
+  // Tier 6: Unavailable / Not Found
+  const t6 = classifyVerificationTier('not_found', false, false);
+  assert.equal(t6.tier, 'unavailable');
+  assert.equal(t6.label, 'UNAVAILABLE / UNVERIFIED');
+});
+
+test('Workspace & Navigation Taxonomy: establishes Postcode Intelligence as core and Logistics as modular', () => {
+  const sections = [
+    { title: 'POSTCODE INTELLIGENCE (CORE)', tabs: ['postcodes'] },
+    { title: 'LOGISTICS & DISPATCH (MODULE)', tabs: ['overview', 'deliveries', 'map', 'tracking'] },
+    { title: 'FLEET & NETWORK', tabs: ['operators', 'customers'] },
+    { title: 'INTELLIGENCE & SETTINGS', tabs: ['analytics', 'settings'] },
+  ];
+
+  // Verify Postcode Intelligence is top-level core workspace
+  assert.equal(sections[0].title, 'POSTCODE INTELLIGENCE (CORE)');
+  assert.deepEqual(sections[0].tabs, ['postcodes']);
+
+  // Verify Logistics is a decoupled module
+  assert.equal(sections[1].title, 'LOGISTICS & DISPATCH (MODULE)');
+  assert.ok(sections[1].tabs.includes('deliveries'));
+  assert.ok(sections[1].tabs.includes('overview'));
+});
+

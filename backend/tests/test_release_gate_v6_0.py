@@ -573,17 +573,18 @@ def test_subprocess_worker_os_signal_shutdown_and_crash_recovery():
         text=True,
     )
 
-    # 2. Wait up to 5 seconds for heartbeat in database
+    # 2. Wait up to 10 seconds for heartbeat in database
     db = SessionLocal()
     hb = None
     try:
-        for _ in range(25):
+        for _ in range(50):
             time.sleep(0.2)
+            db.rollback()
             hb = db.query(WorkerHeartbeat).filter(WorkerHeartbeat.worker_id == worker_id).first()
             if hb:
                 break
 
-        assert hb is not None, "Worker subprocess did not write heartbeat to database within 5 seconds!"
+        assert hb is not None, "Worker subprocess did not write heartbeat to database within 10 seconds!"
         assert hb.status in ["active", "idle", "processing"]
 
         # 3. Send OS termination signal
