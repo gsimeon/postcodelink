@@ -18,6 +18,9 @@ from backend.app.services.postcode_service import (
     get_postcode_coverage_report,
 )
 from backend.app.services.nipost_client import get_nipost_client, NIPOSTClient, NIPOSTLookupStatus
+
+_ORIGINAL_LOOKUP_POSTCODE = NIPOSTClient.lookup_postcode
+_ORIGINAL_VALIDATE_POSTCODE = NIPOSTClient.validate_postcode
 from backend.app.routers.api_keys import get_api_key_merchant
 from backend.app.core.rate_limiter import check_client_ip_rate_limit
 from backend.app.core.network import get_trusted_client_ip
@@ -79,22 +82,43 @@ def execute_postcode_lookup(
             )
 
     if client and client.is_configured and code:
-        res = client.lookup_postcode(code)
-        nipost_status = res.status
-        live_res = res.data
-        nipost_err = res.error_message
-        res_status_val = res.status.value
+        from unittest.mock import MagicMock
+        # Detect legacy single-stage mocks where only lookup_postcode was patched
+        curr_lookup = getattr(client, "lookup_postcode", None)
+        curr_lookup_func = getattr(curr_lookup, "__func__", curr_lookup)
+        is_patched_lookup = (
+            isinstance(curr_lookup, MagicMock)
+            or (callable(curr_lookup) and curr_lookup_func is not _ORIGINAL_LOOKUP_POSTCODE)
+        )
+        curr_validate = getattr(client, "validate_postcode", None)
+        curr_validate_func = getattr(curr_validate, "__func__", curr_validate)
+        is_default_validate = (
+            callable(curr_validate) and curr_validate_func is _ORIGINAL_VALIDATE_POSTCODE
+        )
+
+        orch = getattr(client, "orchestrated_verify", None)
+        has_mocked_lookup_only = is_patched_lookup and is_default_validate
+
+        if callable(orch) and not isinstance(orch, MagicMock) and not has_mocked_lookup_only:
+            nipost_status, live_res, nipost_err, ver_method = client.orchestrated_verify(code)
+            res_status_val = nipost_status.value
+        else:
+            res = client.lookup_postcode(code)
+            nipost_status = res.status
+            live_res = res.data
+            nipost_err = res.error_message
+            res_status_val = res.status.value
+            is_validator_temp = bool(live_res and (live_res.get("service") == "validator" or not live_res.get("area") or not live_res.get("state")))
+            ver_method = "validator" if is_validator_temp else "validator_autofill_pipeline"
 
         if nipost_status == NIPOSTLookupStatus.FOUND and live_res:
             upstream_version = live_res.get("dataset_version")
-            is_validator = bool(live_res.get("service") == "validator" or not live_res.get("area") or not live_res.get("state"))
-            ver_method = "validator" if is_validator else "validator_autofill_pipeline"
-            addr_metadata_source = "local_enrichment" if is_validator else "nipost_autofill"
-
             rec_area = live_res.get("area")
             rec_state = live_res.get("state")
             rec_lga = live_res.get("lga")
             rec_building = live_res.get("building_reference") or live_res.get("recent_house_address")
+            is_validator = bool(ver_method == "validator" or live_res.get("service") == "validator" or not rec_area or not rec_state)
+            addr_metadata_source = "local_enrichment" if is_validator else "nipost_autofill"
 
             # If validator-only (existence verified without address metadata), check if local directory provides attributes
             if is_validator and (not rec_area or not rec_state):

@@ -97,7 +97,8 @@ PostcodeLink supports explicit verification mode control via `verification_mode`
 
 ### 2. Verification Evidence Model & Database Provenance Gate
 A database record in `PostcodeDirectory` claiming `verification_status = "official_verified"` is **never** accepted as official truth on face value. To qualify as `verified`, it must be backed by an active, unexpired record in `VerificationEvidence`:
-- **Evidence Fields**: `postcode`, `provider = "NIPOST"`, `provider_reference_id`, `verification_method` (`validator_autofill_pipeline` | `validator`), `dataset_version`, `verified_at`, `valid_until` (default 30-day expiration window), `response_hash` (SHA-256 of raw response payload), and `address_metadata_source`.
+- **Evidence Fields**: `postcode`, `provider = "NIPOST"`, `provider_reference_id` (upstream transaction receipt or request timestamp), `verification_method` (`validator_autofill_pipeline` | `validator`), `dataset_version`, `verified_at`, `valid_until` (default 30-day expiration window), `response_hash` (SHA-256 integrity digest of raw response payload), and `address_metadata_source`.
+- **Integrity Notice (Hashed Response Evidence)**: The SHA-256 `response_hash` serves as an immutable, tamper-evident cryptographic digest of the upstream response payload for auditable tracking. It is a cryptographic integrity hash of response data, not an asymmetric government digital signature.
 - **Automatic Demotion**: If verification evidence is missing, expired, or deactivated, database candidates are automatically demoted to `postcode_status = "local_match"` (internal heuristic score `0.75`), preventing stale or artificially flagged entries from posing as government-verified truth.
 
 ### 3. Explicit Two-Stage Validator $\to$ Autofill Orchestration

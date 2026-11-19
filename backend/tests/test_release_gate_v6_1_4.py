@@ -320,12 +320,18 @@ def test_coverage_valid_vs_expired_evidence():
     # Evidence: 1 unexpired, 1 expired
     ev_valid = VerificationEvidence(
         postcode="100001",
+        provider="NIPOST",
+        verification_method="validator_autofill_pipeline",
+        response_hash="a" * 64,
         status="verified",
         valid_until=now_utc + timedelta(days=15),
         is_active=True,
     )
     ev_expired = VerificationEvidence(
         postcode="100002",
+        provider="NIPOST",
+        verification_method="validator_autofill_pipeline",
+        response_hash="a" * 64,
         status="verified",
         valid_until=now_utc - timedelta(days=2),
         is_active=True,

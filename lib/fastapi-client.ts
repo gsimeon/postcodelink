@@ -143,8 +143,8 @@ export interface FastAPIAnalytics {
 
 export interface PostcodeDirectoryEntry {
   code: string;
-  area: string;
-  state: string;
+  area: string | null;
+  state: string | null;
   lga?: string;
   lat?: number;
   lng?: number;
@@ -192,8 +192,8 @@ export interface PostcodeLookupResult {
 export interface CleanseResult {
   original_address: string;
   formatted_address: string;
-  area: string;
-  state: string;
+  area: string | null;
+  state: string | null;
   lga?: string;
   postcode: string;
   postcode_type: string;
@@ -236,12 +236,19 @@ export interface CoverageReport {
   version: string;
   scope_states_count: number;
   states_covered: string[];
+  states_in_dataset_metadata?: string[];
+  states_with_active_records?: string[];
+  states_with_verified_records?: string[];
+  states_with_only_demo_records?: string[];
   total_reference_records: number;
   records_per_state: Record<string, number>;
   records_with_coordinates: number;
   records_with_verified_provenance: number;
   records_with_valid_evidence?: number;
   records_with_expired_evidence?: number;
+  records_with_rejected_evidence?: number;
+  records_with_incomplete_evidence?: number;
+  records_with_invalid_evidence?: number;
   records_with_complete_metadata?: number;
   legacy_six_digit_records?: number;
   national_digital_postcode_records?: number;

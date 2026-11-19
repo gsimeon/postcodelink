@@ -2059,7 +2059,7 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                       lineHeight: 1.5,
                     }}
                   >
-                    <strong>Provenance Integrity Disclosure:</strong> PostcodeLink guarantees strict verification separation. Local reference records are never promoted to official NIPOST verification without live upstream confirmation and cryptographically signed SHA-256 evidence.
+                    <strong>Provenance Integrity Disclosure:</strong> PostcodeLink guarantees strict verification separation. Local reference records are never promoted to official NIPOST verification without live upstream confirmation and auditable SHA-256 hashed response evidence.
                   </div>
                 </div>
               </div>

@@ -491,7 +491,7 @@ export function TrackingPortalTab({
       ) : (
         <section className="panel" style={{ textAlign: "center", padding: "48px 20px" }}>
           <Package size={40} color="#94a3b8" style={{ margin: "auto", marginBottom: "12px" }} />
-          <h3>No Shipment Found for "{searchedRef}"</h3>
+          <h3>No Shipment Found for &quot;{searchedRef}&quot;</h3>
           <p style={{ color: "#64748b", fontSize: "12px", maxWidth: "420px", margin: "auto" }}>
             Please verify the tracking reference code (e.g. <code>PL-2048</code>) sent in your merchant order confirmation.
           </p>

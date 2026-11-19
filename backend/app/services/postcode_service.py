@@ -267,56 +267,76 @@ def normalize_string(text: Optional[str]) -> str:
     return s
 
 
+def classify_verification_evidence(
+    evidence: Optional[Any],
+    expected_code: Optional[str] = None,
+) -> str:
+    """Classifies NIPOST VerificationEvidence audit record into an exact integrity state.
+
+    Fail-closed validation with zero permissive defaults:
+    - 'valid': Active, official NIPOST, verified/partial status, approved method, valid non-empty hash, unexpired, and matching code.
+    - 'expired': Otherwise valid or active evidence whose validity window has expired.
+    - 'rejected': Inactive record (is_active is False) or explicit status == 'rejected'.
+    - 'incomplete': Missing required audit fields (provider, method, status, response_hash, valid_until).
+    - 'invalid': Mismatched provider (not NIPOST), unapproved method, or mismatched postcode.
+    """
+    if evidence is None:
+        return "incomplete"
+
+    if getattr(evidence, "is_active", None) is False:
+        return "rejected"
+
+    status_raw = getattr(evidence, "status", None)
+    if not status_raw or not str(status_raw).strip():
+        return "incomplete"
+    status_val = str(status_raw).strip().lower()
+    if status_val == "rejected":
+        return "rejected"
+    if status_val not in ("verified", "partial"):
+        return "invalid"
+
+    provider_raw = getattr(evidence, "provider", None)
+    if not provider_raw or not str(provider_raw).strip():
+        return "incomplete"
+    if str(provider_raw).strip().upper() != "NIPOST":
+        return "invalid"
+
+    method_raw = getattr(evidence, "verification_method", None)
+    if not method_raw or not str(method_raw).strip():
+        return "incomplete"
+    method = str(method_raw).strip().lower()
+    if method not in ("validator_autofill_pipeline", "validator", "autofill"):
+        return "invalid"
+
+    resp_hash_raw = getattr(evidence, "response_hash", None)
+    if not resp_hash_raw or not str(resp_hash_raw).strip():
+        return "incomplete"
+
+    valid_until = getattr(evidence, "valid_until", None)
+    if valid_until is None:
+        return "incomplete"
+
+    now_utc = datetime.now(timezone.utc)
+    if valid_until.tzinfo is None:
+        valid_until = valid_until.replace(tzinfo=timezone.utc)
+    if valid_until <= now_utc or getattr(evidence, "is_expired", False):
+        return "expired"
+
+    if expected_code:
+        ev_code = str(getattr(evidence, "postcode", "") or "").strip().upper().replace("-", "").replace(" ", "")
+        exp_code = str(expected_code).strip().upper().replace("-", "").replace(" ", "")
+        if not ev_code or ev_code != exp_code:
+            return "invalid"
+
+    return "valid"
+
+
 def validate_verification_evidence(
     evidence: Optional[Any],
     expected_code: Optional[str] = None,
 ) -> bool:
-    """Canonical validation rule for NIPOST VerificationEvidence audit records.
-
-    Strictly verifies:
-    1. Evidence instance exists and is active (is_active is True).
-    2. Provider is official 'NIPOST' (case-insensitive, default table column value).
-    3. Status is either 'verified' or 'partial' (never rejected or unverified).
-    4. Verification method is an approved upstream method ('validator_autofill_pipeline', 'validator', 'autofill').
-    5. Code matches expected directory postcode (normalized comparison).
-    6. Evidence is strictly unexpired (valid_until > now in UTC).
-    """
-    if evidence is None:
-        return False
-
-    if not getattr(evidence, "is_active", True):
-        return False
-
-    provider_raw = getattr(evidence, "provider", None)
-    provider = str(provider_raw or "NIPOST").strip().upper()
-    if provider != "NIPOST":
-        return False
-
-    status_val = str(getattr(evidence, "status", "") or "").strip().lower()
-    if status_val not in ("verified", "partial"):
-        return False
-
-    method_raw = getattr(evidence, "verification_method", None)
-    method = str(method_raw or "validator_autofill_pipeline").strip().lower()
-    if method not in ("validator_autofill_pipeline", "validator", "autofill"):
-        return False
-
-    resp_hash_raw = getattr(evidence, "response_hash", None)
-    if resp_hash_raw is not None and not str(resp_hash_raw).strip():
-        return False
-
-    # Check expiration
-    if getattr(evidence, "is_expired", False):
-        return False
-
-    # Check postcode match if expected_code provided
-    if expected_code:
-        ev_code = str(getattr(evidence, "postcode", "") or "").strip().upper().replace("-", "").replace(" ", "")
-        exp_code = str(expected_code).strip().upper().replace("-", "").replace(" ", "")
-        if ev_code != exp_code:
-            return False
-
-    return True
+    """Canonical strict fail-closed validation rule for NIPOST VerificationEvidence audit records."""
+    return classify_verification_evidence(evidence, expected_code) == "valid"
 
 
 def find_postcodes(
@@ -522,8 +542,8 @@ def cleanse_address(
             return CleanseAddressResponse(
                 original_address=clean_addr,
                 formatted_address=clean_addr,
-                area=area_hint or "Invalid Location",
-                state=state_hint or "Lagos",
+                area=area_hint or None,
+                state=state_hint or None,
                 lga=None,
                 postcode=extracted_code,
                 postcode_type=postcode_type,
@@ -559,8 +579,8 @@ def cleanse_address(
             return CleanseAddressResponse(
                 original_address=clean_addr,
                 formatted_address=clean_addr,
-                area=area_hint or "Unverified Location",
-                state=state_hint or "Lagos",
+                area=area_hint or None,
+                state=state_hint or None,
                 lga=None,
                 postcode=extracted_code,
                 postcode_type=postcode_type,
@@ -1177,8 +1197,8 @@ def cleanse_address(
         return CleanseAddressResponse(
             original_address=clean_addr,
             formatted_address=clean_addr,
-            area=area_hint or "Unknown Area",
-            state=state_hint or "Lagos",
+            area=area_hint or None,
+            state=state_hint or None,
             lga=None,
             postcode="",
             postcode_type=postcode_type,
@@ -1239,12 +1259,19 @@ def get_postcode_coverage_report(
     )
 
     # 2. Gather dataset counts from DB or fallback dataset
-    states_set = set(DATASET_METADATA.get("states_covered", []))
+    states_in_dataset_metadata = sorted(list(set(DATASET_METADATA.get("states_covered", []))))
+    active_states_set = set()
+    states_with_verified_records_set = set()
+    demo_states_set = set()
+    non_demo_states_set = set()
     records_per_state: Dict[str, int] = {}
     total_records = 0
     records_with_coords = 0
     records_with_valid_evidence = 0
     records_with_expired_evidence = 0
+    records_with_rejected_evidence = 0
+    records_with_incomplete_evidence = 0
+    records_with_invalid_evidence = 0
     records_with_complete_metadata = 0
     legacy_six_digit_records = 0
     national_digital_postcode_records = 0
@@ -1253,25 +1280,50 @@ def get_postcode_coverage_report(
     if db is not None:
         try:
             from backend.app.models.verification_evidence import VerificationEvidence
-            all_evidence = db.query(VerificationEvidence).filter(VerificationEvidence.is_active == True).all()
+            q_ev = db.query(VerificationEvidence)
+            all_evidence = []
+            if hasattr(q_ev, "filter"):
+                filtered = q_ev.filter(VerificationEvidence.is_active == True)
+                if hasattr(filtered, "all"):
+                    res = filtered.all()
+                    if isinstance(res, list):
+                        all_evidence = res
+            if not all_evidence and hasattr(q_ev, "all"):
+                res = q_ev.all()
+                if isinstance(res, list):
+                    all_evidence = res
+
             valid_evidence_codes = set()
             expired_evidence_codes = set()
+            rejected_evidence_codes = set()
+            incomplete_evidence_codes = set()
+            invalid_evidence_codes = set()
 
             for ev in all_evidence:
-                code_norm = (ev.postcode or "").strip().upper().replace("-", "").replace(" ", "")
-                if validate_verification_evidence(ev):
+                code_norm = str(getattr(ev, "postcode", None) or getattr(ev, "code", "") or "").strip().upper().replace("-", "").replace(" ", "")
+                cls_result = classify_verification_evidence(ev)
+                if cls_result == "valid":
                     valid_evidence_codes.add(code_norm)
-                else:
+                elif cls_result == "expired":
                     expired_evidence_codes.add(code_norm)
+                elif cls_result == "rejected":
+                    rejected_evidence_codes.add(code_norm)
+                elif cls_result == "incomplete":
+                    incomplete_evidence_codes.add(code_norm)
+                else:
+                    invalid_evidence_codes.add(code_norm)
 
             records_with_expired_evidence = len(expired_evidence_codes)
+            records_with_rejected_evidence = len(rejected_evidence_codes)
+            records_with_incomplete_evidence = len(incomplete_evidence_codes)
+            records_with_invalid_evidence = len(invalid_evidence_codes)
 
             db_records = db.query(PostcodeDirectory).all()
             if db_records:
                 total_records = len(db_records)
                 for r in db_records:
                     st = r.state or "Other"
-                    states_set.add(st)
+                    active_states_set.add(st)
                     records_per_state[st] = records_per_state.get(st, 0) + 1
 
                     # Coordinates
@@ -1292,16 +1344,21 @@ def get_postcode_coverage_report(
                         legacy_six_digit_records += 1
 
                     # Demonstration / local fixture
-                    if (
+                    is_demo = (
                         getattr(r, "source_type", None) == "demonstration_fixture"
                         or r.verification_status in ("local_reference", "synthetic_demo", "demonstration_fixture")
                         or (r.provenance and "Demonstration" in r.provenance)
-                    ):
+                    )
+                    if is_demo:
                         local_demonstration_fixtures += 1
+                        demo_states_set.add(st)
+                    else:
+                        non_demo_states_set.add(st)
 
                     # Valid evidence-backed provenance (tied to distinct qualifying directory records)
                     if code_norm in valid_evidence_codes:
                         records_with_valid_evidence += 1
+                        states_with_verified_records_set.add(st)
 
         except Exception as db_err:
             logger.warning(f"Error querying PostcodeDirectory or VerificationEvidence for coverage report: {db_err}")
@@ -1310,7 +1367,7 @@ def get_postcode_coverage_report(
         total_records = len(OFFICIAL_POSTCODES)
         for r in OFFICIAL_POSTCODES:
             st = r.get("state") or "Other"
-            states_set.add(st)
+            active_states_set.add(st)
             records_per_state[st] = records_per_state.get(st, 0) + 1
 
             if r.get("lat") is not None and r.get("lng") is not None:
@@ -1331,20 +1388,33 @@ def get_postcode_coverage_report(
                 or (r.get("provenance") and "Demonstration" in r.get("provenance"))
             ):
                 local_demonstration_fixtures += 1
+                demo_states_set.add(st)
+            else:
+                non_demo_states_set.add(st)
 
-    states_list = sorted(list(states_set))
+    states_covered = sorted(list(active_states_set))
+    states_with_active_records = states_covered
+    states_with_verified_records = sorted(list(states_with_verified_records_set))
+    states_with_only_demo_records = sorted(list(demo_states_set - non_demo_states_set))
 
     return CoverageReportResponse(
         edition=DATASET_METADATA.get("edition", "Local Demonstration & Reference Edition"),
         version=DATASET_METADATA.get("version", "2024.2"),
-        scope_states_count=len(states_list),
-        states_covered=states_list,
+        scope_states_count=len(states_covered),
+        states_covered=states_covered,
+        states_in_dataset_metadata=states_in_dataset_metadata,
+        states_with_active_records=states_with_active_records,
+        states_with_verified_records=states_with_verified_records,
+        states_with_only_demo_records=states_with_only_demo_records,
         total_reference_records=total_records,
         records_per_state=records_per_state,
         records_with_coordinates=records_with_coords,
         records_with_verified_provenance=records_with_valid_evidence,
         records_with_valid_evidence=records_with_valid_evidence,
         records_with_expired_evidence=records_with_expired_evidence,
+        records_with_rejected_evidence=records_with_rejected_evidence,
+        records_with_incomplete_evidence=records_with_incomplete_evidence,
+        records_with_invalid_evidence=records_with_invalid_evidence,
         records_with_complete_metadata=records_with_complete_metadata,
         legacy_six_digit_records=legacy_six_digit_records,
         national_digital_postcode_records=national_digital_postcode_records,

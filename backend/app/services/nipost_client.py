@@ -94,13 +94,17 @@ class NIPOSTClient:
 
     @property
     def configuration_complete(self) -> bool:
-        """Required endpoint URL and active credentials exist for production verification."""
-        if bool(self.base_url and self.api_key) or self.transport is not None:
+        """Required endpoint URL and active credentials exist for production verification based on auth_scheme."""
+        if self.transport is not None:
             return True
         # If is_configured is explicitly mocked/patched to True in unit test suites
         if not isinstance(getattr(type(self), "is_configured", None), property) and bool(self.is_configured):
             return True
-        return False
+        if not self.base_url:
+            return False
+        if self.auth_scheme == "none":
+            return True
+        return bool(self.api_key)
 
     def get_integration_status(self) -> Dict[str, Any]:
         """Provides structured integration status separating code presence, configuration, health, and commercial authorization."""
@@ -111,7 +115,7 @@ class NIPOSTClient:
         if configured:
             status = "configured"
             display_status = "Adapter Configured - NIPOST Two-Stage (Awaiting Live Verification)"
-        elif has_url:
+        elif has_url and self.auth_scheme != "none":
             status = "awaiting_credentials"
             display_status = "Adapter Installed (Awaiting Production Credentials)"
         else:
@@ -135,9 +139,10 @@ class NIPOSTClient:
     def check_health(self) -> Dict[str, Any]:
         """Performs a lightweight health check on the configured NIPOST endpoint."""
         if not self.configuration_complete:
+            missing_reason = "base URL missing" if not self.base_url else "API key missing for authentication scheme"
             return {
                 "healthy": False,
-                "reason": "Configuration incomplete: base URL or API key missing",
+                "reason": f"Configuration incomplete: {missing_reason}",
                 "status_code": None,
             }
         try:
@@ -592,7 +597,7 @@ class NIPOSTClient:
                     return NIPOSTLookupResult(
                         status=NIPOSTLookupStatus.UNAVAILABLE,
                         http_status=404,
-                        error_message="NIPOST Validator endpoint not found (HTTP 404).",
+                        error_message="Upstream NIPOST API routing error: Validator endpoint not found (HTTP 404).",
                     )
                 elif resp.status_code in (401, 403):
                     return NIPOSTLookupResult(

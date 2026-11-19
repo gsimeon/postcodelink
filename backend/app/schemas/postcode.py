@@ -152,12 +152,19 @@ class CoverageReportResponse(BaseModel):
     version: str = "2024.2"
     scope_states_count: int
     states_covered: List[str]
+    states_in_dataset_metadata: List[str] = []
+    states_with_active_records: List[str] = []
+    states_with_verified_records: List[str] = []
+    states_with_only_demo_records: List[str] = []
     total_reference_records: int
     records_per_state: Dict[str, int]
     records_with_coordinates: int
     records_with_verified_provenance: int = 0
     records_with_valid_evidence: int = 0
     records_with_expired_evidence: int = 0
+    records_with_rejected_evidence: int = 0
+    records_with_incomplete_evidence: int = 0
+    records_with_invalid_evidence: int = 0
     records_with_complete_metadata: int = 0
     legacy_six_digit_records: int = 0
     national_digital_postcode_records: int = 0

@@ -272,3 +272,66 @@ test('Workspace & Navigation Taxonomy: establishes Postcode Intelligence as core
   assert.ok(sections[1].tabs.includes('overview'));
 });
 
+// 5. Test Null Metadata & Subtitle Formatting
+function formatAddressSubtitle(area, state) {
+  if (area && state) return `${area}, ${state}`;
+  if (area) return `${area} (State Pending)`;
+  if (state) return `Area Pending, ${state}`;
+  return 'Incomplete Administrative Metadata';
+}
+
+test('Frontend Formatting: preserves null area and state without synthetic defaults', () => {
+  assert.equal(formatAddressSubtitle('Ikeja', 'Lagos'), 'Ikeja, Lagos');
+  assert.equal(formatAddressSubtitle(null, 'Lagos'), 'Area Pending, Lagos');
+  assert.equal(formatAddressSubtitle('Ikeja', null), 'Ikeja (State Pending)');
+  assert.equal(formatAddressSubtitle(null, null), 'Incomplete Administrative Metadata');
+  assert.equal(formatAddressSubtitle('', ''), 'Incomplete Administrative Metadata');
+});
+
+// 6. Test Scheme-Aware Upstream Integration Display
+function computeIntegrationDisplay(integration) {
+  if (integration.configuration_complete) {
+    return {
+      status: 'configured',
+      color: '#2563eb',
+      badge: 'Adapter Configured - NIPOST Two-Stage (Awaiting Live Verification)',
+    };
+  }
+  if (integration.base_url_set && integration.auth_scheme !== 'none') {
+    return {
+      status: 'awaiting_credentials',
+      color: '#d97706',
+      badge: 'Adapter Installed (Awaiting Production Credentials)',
+    };
+  }
+  return {
+    status: 'unconfigured',
+    color: '#64748b',
+    badge: 'Adapter Installed (Unconfigured)',
+  };
+}
+
+test('Integration Display: scheme-aware display honors none scheme without credentials alert', () => {
+  // Scheme 'none' with base_url
+  const noneConfigured = computeIntegrationDisplay({
+    adapter_installed: true,
+    configuration_complete: true,
+    base_url_set: true,
+    credentials_set: false,
+    auth_scheme: 'none',
+  });
+  assert.equal(noneConfigured.status, 'configured');
+  assert.equal(noneConfigured.badge, 'Adapter Configured - NIPOST Two-Stage (Awaiting Live Verification)');
+
+  // Scheme 'bearer' without credentials
+  const bearerAwaiting = computeIntegrationDisplay({
+    adapter_installed: true,
+    configuration_complete: false,
+    base_url_set: true,
+    credentials_set: false,
+    auth_scheme: 'bearer',
+  });
+  assert.equal(bearerAwaiting.status, 'awaiting_credentials');
+  assert.equal(bearerAwaiting.badge, 'Adapter Installed (Awaiting Production Credentials)');
+});
+

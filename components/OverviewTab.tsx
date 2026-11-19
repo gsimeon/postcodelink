@@ -95,7 +95,7 @@ export function OverviewTab({
               .toUpperCase()}
           </p>
           <h1>
-            Good day, {profile?.full_name ? profile.full_name.split(" ")[0] : "Godwin"} <span>✦</span>
+            Good day{profile?.full_name ? `, ${profile.full_name.split(" ")[0]}` : ""} <span>✦</span>
           </h1>
           <p className="sub">
             Monitoring deliveries, digital postcodes, and courier dispatches across Nigeria.
