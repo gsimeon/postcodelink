@@ -20,11 +20,13 @@ import {
   Sparkles
 } from "lucide-react";
 import { DeliveryDetailModal } from "./DeliveryDetailModal";
+import { FastAPIProfile } from "@/lib/fastapi-client";
 
 interface OverviewTabProps {
   deliveries: Delivery[];
   operators: Operator[];
   settings: AppSettings;
+  profile?: FastAPIProfile | null;
   onOpenCreate: () => void;
   onNavigateTab: (tab: "deliveries" | "postcodes" | "operators" | "settings") => void;
   onUpdateStatus: (deliveryId: string, newStatus: DeliveryStatus, note: string) => void;
@@ -36,6 +38,7 @@ export function OverviewTab({
   deliveries,
   operators,
   settings,
+  profile,
   onOpenCreate,
   onNavigateTab,
   onUpdateStatus,
@@ -81,9 +84,18 @@ export function OverviewTab({
       {/* Welcome Banner */}
       <div className="welcome">
         <div>
-          <p className="eyebrow">WEDNESDAY, NOVEMBER 4, 2026</p>
+          <p className="eyebrow">
+            {new Date()
+              .toLocaleDateString("en-US", {
+                weekday: "long",
+                month: "long",
+                day: "numeric",
+                year: "numeric",
+              })
+              .toUpperCase()}
+          </p>
           <h1>
-            Good day, Godwin <span>✦</span>
+            Good day, {profile?.full_name ? profile.full_name.split(" ")[0] : "Godwin"} <span>✦</span>
           </h1>
           <p className="sub">
             Monitoring deliveries, digital postcodes, and courier dispatches across Nigeria.
