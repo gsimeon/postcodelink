@@ -199,6 +199,7 @@ export interface CleanseResult {
   resolution_level: string;
   postcode_status: string;
   verification_status?: string;
+  verification_mode?: string;
   confidence: number;
   postcode_valid: boolean;
   address_consistent: boolean;
@@ -531,12 +532,14 @@ export const fastApiClient = {
           postcode?: string;
           strict?: boolean;
           live_verify?: boolean;
+          verification_mode?: "local_standardization" | "nipost_validate" | "nipost_strict";
         },
     state?: string,
     area?: string,
     postcode?: string,
     strict?: boolean,
-    live_verify?: boolean
+    live_verify?: boolean,
+    verification_mode?: "local_standardization" | "nipost_validate" | "nipost_strict"
   ): Promise<CleanseResult> {
     const payload =
       typeof addressOrPayload === 'string'
@@ -547,6 +550,7 @@ export const fastApiClient = {
             postcode: postcode || undefined,
             strict: !!strict,
             live_verify: !!live_verify,
+            verification_mode: verification_mode || undefined,
           }
         : addressOrPayload;
 

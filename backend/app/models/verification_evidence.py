@@ -19,7 +19,7 @@ class VerificationEvidence(Base):
     provider = Column(String(64), nullable=False, default="NIPOST")
     provider_reference_id = Column(String(128), nullable=True)  # Upstream transaction or receipt ID
     verification_method = Column(String(64), nullable=False, default="validator_autofill_pipeline")  # validator | autofill | validator_autofill_pipeline
-    dataset_version = Column(String(32), nullable=True, default="2026.1")
+    dataset_version = Column(String(32), nullable=True, default=None)
     verified_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     valid_until = Column(DateTime, nullable=False, default=default_valid_until)
     response_hash = Column(String(64), nullable=False)  # SHA-256 of raw response data

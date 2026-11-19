@@ -141,10 +141,15 @@ def execute_postcode_lookup(
                             detail="Verification evidence audit record could not be persisted. Strict verification failed closed.",
                         )
                     evidence_persisted = False
+            elif strict:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Database session required for official verification evidence persistence. Strict verification failed closed.",
+                )
 
-            if db is not None and not evidence_persisted:
+            if not evidence_persisted:
                 prov_text = (
-                    "NIPOST Live Gateway responded, but audit evidence persistence failed; "
+                    "NIPOST Live Gateway responded, but audit evidence persistence failed or database unavailable; "
                     "downgraded to local reference per verification integrity policy."
                 )
                 ver_status = "local_reference"
@@ -173,31 +178,31 @@ def execute_postcode_lookup(
                 verification_status=ver_status,
                 provenance=prov_text,
                 dataset_version=upstream_version,
-                source_owner="NIPOST" if (evidence_persisted or db is None) else "PostcodeLink",
-                source_type="official_national_directory" if (evidence_persisted or db is None) else "local_reference",
+                source_owner="NIPOST" if evidence_persisted else "PostcodeLink",
+                source_type="official_national_directory" if evidence_persisted else "local_reference",
                 evidence_id=ev_id,
-                verification_method=ver_method if (evidence_persisted or db is None) else "unverified_fallback",
+                verification_method=ver_method if evidence_persisted else "unverified_fallback",
                 address_metadata_source=addr_metadata_source,
                 valid_until=ev_valid_until,
             )
             return PostcodeLookupResponse(
-                source="live_nipost_api" if (evidence_persisted or db is None) else "local_reference_fallback",
+                source="live_nipost_api" if evidence_persisted else "local_reference_fallback",
                 count=1,
                 matches=[schema_rec],
-                is_live_nipost=bool(evidence_persisted or db is None),
+                is_live_nipost=bool(evidence_persisted),
                 is_partial_verification=is_validator,
                 service_type=service_type_val,
                 dataset_version=upstream_version,
                 api_integration_version="2026.1",
                 provenance=prov_text,
                 lookup_status=lookup_status_val,
-                verification_source="live_nipost_api" if (evidence_persisted or db is None) else "local_nipost_reference_dataset",
+                verification_source="live_nipost_api" if evidence_persisted else "local_nipost_reference_dataset",
                 verification_status=ver_status,
-                fallback_used=bool(db is not None and not evidence_persisted),
-                fallback_reason="Verification evidence could not be recorded" if (db is not None and not evidence_persisted) else None,
+                fallback_used=bool(not evidence_persisted),
+                fallback_reason="Verification evidence could not be recorded" if not evidence_persisted else None,
                 upstream_status=res_status_val,
                 evidence_id=ev_id,
-                verification_method=ver_method if (evidence_persisted or db is None) else "unverified_fallback",
+                verification_method=ver_method if evidence_persisted else "unverified_fallback",
                 address_metadata_source=addr_metadata_source,
                 valid_until=ev_valid_until,
             )
@@ -342,6 +347,7 @@ def api_cleanse_address(
         postcode_hint=request.postcode,
         strict=request.strict,
         live_verify=request.live_verify,
+        verification_mode=request.verification_mode,
         client=client,
         db=db,
     )
@@ -397,6 +403,7 @@ def api_commercial_cleanse_address(
         postcode_hint=request.postcode,
         strict=request.strict,
         live_verify=request.live_verify,
+        verification_mode=request.verification_mode,
         client=client,
         db=db,
     )

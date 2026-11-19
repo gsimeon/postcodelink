@@ -8,7 +8,6 @@ import {
   PostcodeLookupResult,
 } from "@/lib/fastapi-client";
 import {
-  NIGERIA_POSTCODES,
   STATES_LIST,
 } from "@/lib/nigeria-postcodes";
 import {
@@ -194,48 +193,16 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
         setDirectoryItems(res.matches || []);
         setDirectorySourceInfo(
           res.is_live_nipost
-            ? `NIPOST Live Gateway (${res.dataset_version || "2026.1"}) · ${res.matches.length} matches`
+            ? (res.dataset_version ? `NIPOST Live Gateway (${res.dataset_version}) · ${res.matches.length} matches` : `NIPOST Live Gateway · ${res.matches.length} matches`)
             : `${res.provenance} · ${res.matches.length} matches`
         );
       } catch (err: any) {
-        // Fallback to client-side dataset if FastAPI is offline or fails closed
-        if (strict) {
-          setDirectoryError(err.message || "Strict verification failed. Upstream gateway unavailable.");
-          setDirectoryItems([]);
-          setDirectorySourceInfo("Strict Mode: Fail-Closed Enforced");
-        } else {
-          // Graceful local demonstration fallback
-          let local = NIGERIA_POSTCODES;
-          if (state !== "All") {
-            local = local.filter((item) => item.state.toLowerCase() === state.toLowerCase());
-          }
-          if (trimmed) {
-            const q = trimmed.toLowerCase();
-            local = local.filter(
-              (item) =>
-                item.postcode.includes(q) ||
-                item.districtOrArea.toLowerCase().includes(q) ||
-                item.lga.toLowerCase().includes(q) ||
-                item.state.toLowerCase().includes(q)
-            );
-          }
-          const mapped: PostcodeDirectoryEntry[] = local.map((l) => ({
-            code: l.postcode,
-            area: l.districtOrArea,
-            state: l.state,
-            lga: l.lga,
-            postcode_type: "conventional_area",
-            postcode_category: "local_address_reference",
-            verification_status: "local_reference",
-            provenance: "PostcodeLink Local Reference Dataset (Offline Fallback)",
-            source_owner: "PostcodeLink",
-            source_type: "local_reference",
-          }));
-          setDirectoryItems(mapped);
-          setDirectorySourceInfo(
-            `PostcodeLink Local Reference (Offline Demonstration) · ${mapped.length} records`
-          );
-        }
+        setDirectoryError(
+          err.message ||
+            "Unable to reach FastAPI Postcode Registry. Postcode exploration is managed exclusively by FastAPI to prevent split-brain datasets."
+        );
+        setDirectoryItems([]);
+        setDirectorySourceInfo(strict ? "Strict Mode: Fail-Closed Enforced" : "Registry Service Unavailable");
       } finally {
         setIsLoadingDirectory(false);
       }
@@ -270,6 +237,7 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
           postcode: postcodeHint.trim() || undefined,
           strict: isStrict,
           live_verify: isLive,
+          verification_mode: activeMode,
         });
         setCleanseResult(result);
       } catch (err: any) {
@@ -316,17 +284,18 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
       {/* Top Banner / Intelligence Header */}
       <div
         style={{
-          background: "linear-gradient(135deg, #1e293b 0%, #0f172a 100%)",
-          color: "#fff",
-          padding: "24px 28px",
+          background: "#ffffff",
+          color: "var(--ink)",
+          padding: "20px 24px",
           borderRadius: "var(--radius-md)",
+          border: "1px solid var(--line)",
           marginBottom: "20px",
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
           flexWrap: "wrap",
           gap: "16px",
-          boxShadow: "var(--shadow-md)",
+          boxShadow: "var(--shadow-sm)",
         }}
       >
         <div>
@@ -335,9 +304,9 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
               display: "inline-flex",
               alignItems: "center",
               gap: "6px",
-              background: "rgba(59, 130, 246, 0.2)",
-              border: "1px solid rgba(59, 130, 246, 0.4)",
-              color: "#93c5fd",
+              background: "#eff6ff",
+              border: "1px solid #bfdbfe",
+              color: "#1d4ed8",
               padding: "3px 10px",
               borderRadius: "20px",
               fontSize: "11px",
@@ -346,7 +315,7 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
               marginBottom: "8px",
             }}
           >
-            <ShieldCheck size={14} /> OFFICIAL NATIONAL POSTCODE INTELLIGENCE
+            <ShieldCheck size={14} /> POSTCODE INTELLIGENCE PLATFORM
           </div>
           <h1
             style={{
@@ -354,29 +323,29 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
               fontWeight: 800,
               fontFamily: "'Manrope', sans-serif",
               margin: "0 0 6px",
-              color: "#fff",
+              color: "var(--ink)",
             }}
           >
-            Postcode Explorer & Address Cleansing Engine
+            Postcode Explorer & Address Verification
           </h1>
-          <p style={{ margin: 0, fontSize: "13px", color: "#94a3b8", maxWidth: "680px" }}>
-            Authoritative Nigerian postal codes, digital address resolution, and fail-closed validation powered by direct FastAPI and NIPOST gateway integration.
+          <p style={{ margin: 0, fontSize: "13px", color: "#64748b", maxWidth: "680px" }}>
+            Standardized Nigerian postal codes, digital address resolution, and verification adapter powered by FastAPI with NIPOST gateway integration.
           </p>
         </div>
 
         <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
           <div
             style={{
-              background: "rgba(255, 255, 255, 0.08)",
-              border: "1px solid rgba(255, 255, 255, 0.12)",
+              background: "#f8fafc",
+              border: "1px solid var(--line)",
               borderRadius: "8px",
               padding: "8px 14px",
               textAlign: "right",
             }}
           >
-            <div style={{ fontSize: "10px", color: "#94a3b8", fontWeight: 700 }}>VERIFICATION ARCHITECTURE</div>
-            <div style={{ fontSize: "12px", color: "#38bdf8", fontWeight: 600, display: "flex", alignItems: "center", gap: "6px" }}>
-              <Globe size={13} /> Two-Stage Live Orchestration
+            <div style={{ fontSize: "10px", color: "#64748b", fontWeight: 700 }}>GATEWAY STATUS</div>
+            <div style={{ fontSize: "12px", color: "#0f766e", fontWeight: 600, display: "flex", alignItems: "center", gap: "6px" }}>
+              <Globe size={13} /> Adapter Active (NIPOST Two-Stage)
             </div>
           </div>
         </div>
@@ -617,13 +586,27 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                   {directoryItems.length === 0 && !isLoadingDirectory && (
                     <tr>
                       <td colSpan={6} className="empty" style={{ padding: "36px", textAlign: "center" }}>
-                        <Compass size={28} color="#94a3b8" style={{ margin: "0 auto 8px" }} />
-                        <div style={{ fontWeight: 600, color: "#475569" }}>
-                          No postcode records match your query "{searchQuery}".
-                        </div>
-                        <div style={{ fontSize: "12px", color: "#94a3b8", marginTop: "4px" }}>
-                          Try searching by state capital (e.g. Ikeja, Garki, Port Harcourt) or 6-digit prefix.
-                        </div>
+                        {directoryError ? (
+                          <>
+                            <AlertCircle size={28} color="#dc2626" style={{ margin: "0 auto 8px" }} />
+                            <div style={{ fontWeight: 600, color: "#991b1b" }}>
+                              FastAPI Directory Query Failed
+                            </div>
+                            <div style={{ fontSize: "12px", color: "#64748b", marginTop: "4px" }}>
+                              {directoryError}. Verify FastAPI backend connectivity and configuration.
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <Compass size={28} color="#94a3b8" style={{ margin: "0 auto 8px" }} />
+                            <div style={{ fontWeight: 600, color: "#475569" }}>
+                              {searchQuery ? `No postcode records match "${searchQuery}".` : "No postcode records found."}
+                            </div>
+                            <div style={{ fontSize: "12px", color: "#94a3b8", marginTop: "4px" }}>
+                              Try searching by state capital (e.g. Ikeja, Garki, Port Harcourt) or 6-digit prefix.
+                            </div>
+                          </>
+                        )}
                       </td>
                     </tr>
                   )}
@@ -746,6 +729,7 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
           {/* 3-Way Explicit Verification Mode Selector */}
           <div style={{ marginBottom: "18px" }}>
             <label
+              id="verification-mode-label"
               style={{
                 fontSize: "12px",
                 fontWeight: 700,
@@ -757,6 +741,8 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
               Verification & Cleansing Mode:
             </label>
             <div
+              role="radiogroup"
+              aria-labelledby="verification-mode-label"
               style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
@@ -764,7 +750,11 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
               }}
             >
               {/* Option 1: Local Standardisation */}
-              <div
+              <button
+                type="button"
+                role="radio"
+                aria-checked={verificationMode === "local_standardization"}
+                tabIndex={0}
                 onClick={() => setVerificationMode("local_standardization")}
                 style={{
                   border: `2px solid ${
@@ -775,7 +765,11 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                   borderRadius: "var(--radius-sm)",
                   padding: "12px 14px",
                   cursor: "pointer",
+                  textAlign: "left",
+                  width: "100%",
+                  fontFamily: "inherit",
                   transition: "all 0.15s ease",
+                  outline: "none",
                 }}
               >
                 <div
@@ -819,10 +813,14 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                 <div style={{ fontSize: "11px", color: "#64748b", lineHeight: 1.4 }}>
                   Format address syntax & match against local reference dataset (offline; zero external network calls).
                 </div>
-              </div>
+              </button>
 
               {/* Option 2: NIPOST Validation & Autofill */}
-              <div
+              <button
+                type="button"
+                role="radio"
+                aria-checked={verificationMode === "nipost_validate"}
+                tabIndex={0}
                 onClick={() => setVerificationMode("nipost_validate")}
                 style={{
                   border: `2px solid ${
@@ -833,7 +831,11 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                   borderRadius: "var(--radius-sm)",
                   padding: "12px 14px",
                   cursor: "pointer",
+                  textAlign: "left",
+                  width: "100%",
+                  fontFamily: "inherit",
                   transition: "all 0.15s ease",
+                  outline: "none",
                 }}
               >
                 <div
@@ -877,10 +879,14 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                 <div style={{ fontSize: "11px", color: "#64748b", lineHeight: 1.4 }}>
                   Live upstream check with graceful fallback to local reference data if gateway is offline.
                 </div>
-              </div>
+              </button>
 
               {/* Option 3: Strict Fail-Closed Verification */}
-              <div
+              <button
+                type="button"
+                role="radio"
+                aria-checked={verificationMode === "nipost_strict"}
+                tabIndex={0}
                 onClick={() => setVerificationMode("nipost_strict")}
                 style={{
                   border: `2px solid ${
@@ -891,7 +897,11 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                   borderRadius: "var(--radius-sm)",
                   padding: "12px 14px",
                   cursor: "pointer",
+                  textAlign: "left",
+                  width: "100%",
+                  fontFamily: "inherit",
                   transition: "all 0.15s ease",
+                  outline: "none",
                 }}
               >
                 <div
@@ -935,7 +945,7 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                 <div style={{ fontSize: "11px", color: "#64748b", lineHeight: 1.4 }}>
                   Authoritative NIPOST evidence required. Fails closed with error if upstream rejects or fails.
                 </div>
-              </div>
+              </button>
             </div>
           </div>
 
@@ -1198,82 +1208,160 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                 );
               })()}
 
-              {/* Three-Dimension Validation Metrics */}
+              {/* Five-Dimension Verification & Trust Metrics */}
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-                  gap: "12px",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
+                  gap: "10px",
                   marginBottom: "16px",
                 }}
               >
+                {/* 1. Address Syntax */}
                 <div
                   style={{
                     background: "#f8fafc",
                     border: "1px solid #e2e8f0",
                     borderRadius: "6px",
-                    padding: "12px",
+                    padding: "10px 12px",
                   }}
                 >
                   <div style={{ fontSize: "10px", color: "#64748b", fontWeight: 700 }}>
-                    1. POSTCODE SYNTAX VALIDITY
+                    1. ADDRESS SYNTAX
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" }}>
                     {cleanseResult.postcode_valid ? (
-                      <CheckCheck size={16} color="#16a34a" />
+                      <CheckCheck size={15} color="#16a34a" />
                     ) : (
-                      <AlertCircle size={16} color="#dc2626" />
+                      <AlertCircle size={15} color="#dc2626" />
                     )}
-                    <b style={{ fontSize: "13px", color: cleanseResult.postcode_valid ? "#16a34a" : "#dc2626" }}>
+                    <b style={{ fontSize: "12px", color: cleanseResult.postcode_valid ? "#16a34a" : "#dc2626" }}>
                       {cleanseResult.postcode_valid ? "Valid Postal Code" : "Invalid Syntax"}
                     </b>
                   </div>
                   <small style={{ color: "#64748b", fontSize: "11px", display: "block", marginTop: "2px" }}>
                     {cleanseResult.postcode_type === "digital_location"
-                      ? "5-Component Digital Location"
-                      : "Standard 6-Digit Zone"}
+                      ? "5-Part Digital Code"
+                      : "6-Digit Postal Zone"}
                   </small>
                 </div>
 
+                {/* 2. Local Reference Match */}
                 <div
                   style={{
                     background: "#f8fafc",
                     border: "1px solid #e2e8f0",
                     borderRadius: "6px",
-                    padding: "12px",
+                    padding: "10px 12px",
                   }}
                 >
                   <div style={{ fontSize: "10px", color: "#64748b", fontWeight: 700 }}>
-                    2. GEOGRAPHIC CONSISTENCY
+                    2. LOCAL MATCH
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" }}>
-                    {cleanseResult.address_consistent ? (
-                      <CheckCheck size={16} color="#16a34a" />
+                    {cleanseResult.postcode_status !== "unverified" ? (
+                      <CheckCheck size={15} color="#16a34a" />
                     ) : (
-                      <AlertTriangle size={16} color="#d97706" />
+                      <AlertCircle size={15} color="#dc2626" />
                     )}
-                    <b style={{ fontSize: "13px", color: cleanseResult.address_consistent ? "#16a34a" : "#d97706" }}>
-                      {cleanseResult.address_consistent ? "Consistent Area & State" : "Potential Boundary Mismatch"}
+                    <b style={{ fontSize: "12px", color: cleanseResult.postcode_status !== "unverified" ? "#16a34a" : "#dc2626" }}>
+                      {cleanseResult.postcode_status !== "unverified" ? "Matched in Registry" : "Unmatched"}
                     </b>
                   </div>
                   <small style={{ color: "#64748b", fontSize: "11px", display: "block", marginTop: "2px" }}>
-                    Area: {cleanseResult.area} · State: {cleanseResult.state}
+                    {cleanseResult.resolution_level === "building_location"
+                      ? "Building Location"
+                      : "Area Dispatch District"}
                   </small>
                 </div>
 
+                {/* 3. NIPOST Upstream Verification */}
                 <div
                   style={{
                     background: "#f8fafc",
                     border: "1px solid #e2e8f0",
                     borderRadius: "6px",
-                    padding: "12px",
+                    padding: "10px 12px",
                   }}
                 >
                   <div style={{ fontSize: "10px", color: "#64748b", fontWeight: 700 }}>
-                    3. DISPATCH CONFIDENCE SCORE
+                    3. NIPOST GATEWAY
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" }}>
+                    {cleanseResult.is_live_nipost ? (
+                      <CheckCheck size={15} color="#2563eb" />
+                    ) : cleanseResult.fallback_used ? (
+                      <AlertTriangle size={15} color="#d97706" />
+                    ) : (
+                      <Compass size={15} color="#64748b" />
+                    )}
+                    <b
+                      style={{
+                        fontSize: "12px",
+                        color: cleanseResult.is_live_nipost
+                          ? "#2563eb"
+                          : cleanseResult.fallback_used
+                          ? "#d97706"
+                          : "#475569",
+                      }}
+                    >
+                      {cleanseResult.is_live_nipost
+                        ? cleanseResult.is_partial_verification
+                          ? "Validated (Two-Stage)"
+                          : "Official Verified"
+                        : cleanseResult.fallback_used
+                        ? "Fallback to Local"
+                        : "Reference Only"}
+                    </b>
+                  </div>
+                  <small style={{ color: "#64748b", fontSize: "11px", display: "block", marginTop: "2px" }}>
+                    {cleanseResult.evidence_id
+                      ? `Ev: ${cleanseResult.evidence_id.slice(0, 8)}`
+                      : "No Upstream Evidence"}
+                  </small>
+                </div>
+
+                {/* 4. Geographic Consistency */}
+                <div
+                  style={{
+                    background: "#f8fafc",
+                    border: "1px solid #e2e8f0",
+                    borderRadius: "6px",
+                    padding: "10px 12px",
+                  }}
+                >
+                  <div style={{ fontSize: "10px", color: "#64748b", fontWeight: 700 }}>
+                    4. BOUNDARY CONSISTENCY
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" }}>
+                    {cleanseResult.address_consistent ? (
+                      <CheckCheck size={15} color="#16a34a" />
+                    ) : (
+                      <AlertTriangle size={15} color="#d97706" />
+                    )}
+                    <b style={{ fontSize: "12px", color: cleanseResult.address_consistent ? "#16a34a" : "#d97706" }}>
+                      {cleanseResult.address_consistent ? "Consistent Area" : "Boundary Discrepancy"}
+                    </b>
+                  </div>
+                  <small style={{ color: "#64748b", fontSize: "11px", display: "block", marginTop: "2px" }}>
+                    {cleanseResult.area || "Area"}, {cleanseResult.state || "State"}
+                  </small>
+                </div>
+
+                {/* 5. Dispatch Confidence Score */}
+                <div
+                  style={{
+                    background: "#f8fafc",
+                    border: "1px solid #e2e8f0",
+                    borderRadius: "6px",
+                    padding: "10px 12px",
+                  }}
+                >
+                  <div style={{ fontSize: "10px", color: "#64748b", fontWeight: 700 }}>
+                    5. DISPATCH CONFIDENCE
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "4px" }}>
-                    <b style={{ fontSize: "15px", color: "var(--ink)", fontFamily: "'JetBrains Mono', monospace" }}>
+                    <b style={{ fontSize: "14px", color: "var(--ink)", fontFamily: "'JetBrains Mono', monospace" }}>
                       {Math.round(cleanseResult.dispatch_confidence * 100)}%
                     </b>
                     <div style={{ flex: 1, background: "#e2e8f0", height: "6px", borderRadius: "3px", overflow: "hidden" }}>
@@ -1292,7 +1380,7 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                     </div>
                   </div>
                   <small style={{ color: "#64748b", fontSize: "11px", display: "block", marginTop: "2px" }}>
-                    Source Confidence: {cleanseResult.confidence}
+                    Score: {cleanseResult.confidence}
                   </small>
                 </div>
               </div>

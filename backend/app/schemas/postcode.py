@@ -66,6 +66,7 @@ class CleanseAddressRequest(BaseModel):
     postcode: Optional[str] = None
     strict: bool = False
     live_verify: bool = False
+    verification_mode: Optional[str] = None  # "local_standardization" | "nipost_validate" | "nipost_strict"
 
 
 class CleanseAddressResponse(BaseModel):
@@ -80,6 +81,7 @@ class CleanseAddressResponse(BaseModel):
     resolution_level: str = "area_district"  # area_district | building_location
     postcode_status: str  # verified | local_match | unverified | estimated | conflict | invalid
     verification_status: Optional[str] = "local_reference"
+    verification_mode: str = "nipost_validate"  # Effective mode applied: "local_standardization" | "nipost_validate" | "nipost_strict"
     confidence: float
     # Explicit three-dimension validation
     postcode_valid: bool = False
