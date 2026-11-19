@@ -2,12 +2,15 @@
 import hmac
 import hashlib
 import secrets
+import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, Tuple
 import bcrypt
 import jwt
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from backend.app.config import settings
+
+logger = logging.getLogger("security")
 
 
 def hash_password(password: str) -> str:
@@ -25,22 +28,55 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         return False
 
 
-def hash_otp(otp: str, salt: Optional[str] = None) -> str:
-    """Hash a delivery OTP using HMAC-SHA256 with server SECRET_KEY."""
-    key = settings.SECRET_KEY.encode("utf-8")
+def get_otp_secret_key() -> str:
+    """Return active secret key for OTP HMAC hashing (enforces domain separation from JWT).
+    
+    In production, OTP_SECRET_KEY must be explicitly set. Fallback to SECRET_KEY is strictly forbidden.
+    """
+    key = (getattr(settings, "OTP_SECRET_KEY", None) or "").strip()
+    if key:
+        return key
+    if getattr(settings, "ENVIRONMENT", "development") == "production":
+        raise RuntimeError(
+            "Fatal Security Error: OTP_SECRET_KEY must be explicitly configured in production. "
+            "Fallback to SECRET_KEY is strictly forbidden in production."
+        )
+    return settings.SECRET_KEY.strip()
+
+
+def hash_otp(otp: str, salt: Optional[str] = None, key: Optional[str] = None) -> str:
+    """Hash a delivery OTP using HMAC-SHA256 with dedicated OTP_SECRET_KEY."""
+    raw_key = (key or get_otp_secret_key()).encode("utf-8")
     salt_val = salt or "postcodelink_otp_salt"
     msg = f"{salt_val}:{otp.strip()}".encode("utf-8")
-    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+    return hmac.new(raw_key, msg, hashlib.sha256).hexdigest()
 
 
 def verify_otp_hash(plain_otp: str, stored_hash: str, salt: Optional[str] = None) -> bool:
-    """Constant-time comparison for delivery PIN verification."""
-    computed = hash_otp(plain_otp, salt)
-    return hmac.compare_digest(computed, stored_hash)
+    """Constant-time comparison for delivery PIN verification supporting zero-downtime key rotation.
+    
+    Tries current OTP_SECRET_KEY first; falls back to configured OTP_PREVIOUS_SECRETS to allow
+    in-flight deliveries created before rotation to verify successfully.
+    """
+    if not plain_otp or not stored_hash:
+        return False
+
+    # 1. Test with current active key
+    computed = hash_otp(plain_otp, salt, key=get_otp_secret_key())
+    if hmac.compare_digest(computed, stored_hash):
+        return True
+
+    # 2. Key rotation fallback: test with previous OTP verification keys
+    prev_keys = getattr(settings, "OTP_PREVIOUS_SECRETS", []) or []
+    for prev_key in prev_keys:
+        if prev_key and hmac.compare_digest(hash_otp(plain_otp, salt, key=prev_key), stored_hash):
+            return True
+
+    return False
 
 
 def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
-    """Generate a signed JWT access token."""
+    """Generate a signed JWT access token with key identifier (kid) header."""
     to_encode = data.copy()
     now = datetime.now(timezone.utc)
     if expires_delta:
@@ -48,12 +84,45 @@ def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta]
     else:
         expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire, "iat": now})
-    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+    headers = {"kid": getattr(settings, "JWT_KEY_ID", "v1")}
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM, headers=headers)
 
 
 def decode_access_token(token: str) -> Dict[str, Any]:
-    """Decode and validate a signed JWT access token."""
-    return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+    """Decode and validate a signed JWT access token using versioned key selection (kid).
+    
+    1. Inspects the unverified JWT header to extract 'kid'.
+    2. If 'kid' is present:
+       - Maps directly to the corresponding key in configured verification keys.
+       - Rejects unknown, retired, or mismatched key identifiers immediately.
+    3. If 'kid' is absent (unversioned legacy token):
+       - Validates against active SECRET_KEY, falling back to JWT_PREVIOUS_SECRETS for backwards compatibility.
+    """
+    try:
+        header = jwt.get_unverified_header(token)
+    except Exception as exc:
+        raise jwt.PyJWTError("Malformed JWT header") from exc
+
+    token_kid = header.get("kid")
+    verification_keys = settings.get_jwt_verification_keys()
+
+    if token_kid:
+        if token_kid not in verification_keys:
+            raise jwt.PyJWTError(f"Unknown or retired JWT key identifier: '{token_kid}'")
+        selected_key = verification_keys[token_kid]
+        return jwt.decode(token, selected_key, algorithms=[settings.JWT_ALGORITHM])
+
+    # Legacy unversioned token fallback
+    try:
+        return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+    except jwt.InvalidSignatureError as exc:
+        for prev_key in getattr(settings, "JWT_PREVIOUS_SECRETS", []) or []:
+            val = prev_key.split(":", 1)[1].strip() if ":" in prev_key and len(prev_key.split(":", 1)[0]) < 16 else prev_key.strip()
+            try:
+                return jwt.decode(token, val, algorithms=[settings.JWT_ALGORITHM])
+            except jwt.InvalidSignatureError:
+                continue
+        raise exc
 
 
 def _derive_aes_key(master_key: str) -> bytes:
@@ -108,18 +177,27 @@ def decrypt_authenticated_pin(
     master_key: Optional[str] = None,
     delivery_id: Optional[str] = None,
     aad: Optional[bytes] = None,
+    allow_legacy: bool = False,
+    allow_unbound: bool = False,
 ) -> Optional[str]:
     """Decrypt and verify authenticated delivery PIN envelope using AES-256-GCM with key rotation.
     
     Supports:
-    - Primary format v2: AES-256-GCM with AAD and key rotation (OUTBOX_PREVIOUS_ENCRYPTION_KEYS).
-    - Controlled migration for v1: HMAC-SHA256 authenticated envelope.
-    - Controlled migration for legacy unversioned hex stream cipher.
+    - Primary format v2: AES-256-GCM with strict context-bound AAD and key rotation (OUTBOX_PREVIOUS_ENCRYPTION_KEYS).
+    - Context enforcement: Active delivery decryption requires delivery context (delivery_id or aad).
+      Empty-AAD envelopes are strictly rejected unless allow_unbound=True is explicitly set for recovery.
+    - Optional legacy migration: v1 HMAC-SHA256 and unversioned hex stream cipher ONLY when allow_legacy=True.
     
     Returns the plaintext PIN if valid and authentic.
-    Returns None if the payload has been tampered with or uses an invalid key/AAD.
+    Returns None if the payload has been tampered with or fails strict AAD verification.
     """
     if not payload or not isinstance(payload, str):
+        return None
+
+    # Normal delivery PIN decryption strictly requires context
+    expected_aad = aad if aad is not None else (f"delivery:{delivery_id}".encode("utf-8") if delivery_id else None)
+    if not allow_unbound and expected_aad is None and not allow_legacy:
+        logger.warning("Decryption rejected: delivery context is required for active PIN decryption")
         return None
 
     primary_key = master_key or settings.OUTBOX_ENCRYPTION_KEY or settings.SECRET_KEY
@@ -139,7 +217,7 @@ def decrypt_authenticated_pin(
                 candidate_keys.append(clean_k)
 
     # =========================================================================
-    # 1. Primary Format v2: AES-256-GCM
+    # 1. Primary Format v2: Standard AES-256-GCM AEAD Envelope
     # =========================================================================
     if payload.startswith("v2:"):
         parts = payload.split(":")
@@ -160,9 +238,17 @@ def decrypt_authenticated_pin(
         else:
             return None
 
-        # Verify AAD binding: if payload was bound to an AAD, require matching expected AAD
-        expected_aad = aad if aad is not None else (f"delivery:{delivery_id}".encode("utf-8") if delivery_id else None)
-        if expected_aad is not None and payload_aad != b"" and payload_aad != expected_aad:
+        # Context enforcement: Empty-AAD envelopes are strictly rejected in delivery workflows
+        if not allow_unbound and payload_aad == b"":
+            logger.warning("Decryption rejected: payload envelope has empty AAD; unbound envelopes are rejected in delivery workflows")
+            return None
+
+        # Strict bidirectional AAD binding:
+        # 1. If payload was encrypted with AAD, caller MUST supply the matching delivery context.
+        # 2. If caller expects a delivery ID / AAD, payload AAD MUST match exactly.
+        if payload_aad != b"" and (expected_aad is None or payload_aad != expected_aad):
+            return None
+        if expected_aad is not None and (payload_aad == b"" or payload_aad != expected_aad):
             return None
 
         for cand_key in candidate_keys:
@@ -177,8 +263,12 @@ def decrypt_authenticated_pin(
         # If all keys failed or tag verification failed due to tampering
         return None
 
+    # If legacy fallback is disabled, strictly reject all non-v2 envelopes
+    if not allow_legacy:
+        return None
+
     # =========================================================================
-    # 2. Controlled Migration Path: v1 HMAC-SHA256 Envelope
+    # 2. Controlled Legacy Migration Path: v1 HMAC-SHA256 Envelope (allow_legacy=True only)
     # =========================================================================
     if payload.startswith("v1:"):
         parts = payload.split(":")
@@ -204,7 +294,7 @@ def decrypt_authenticated_pin(
         return None
 
     # =========================================================================
-    # 3. Controlled Migration Path: Legacy unversioned hex stream cipher
+    # 3. Controlled Legacy Migration Path: Unversioned hex stream cipher (allow_legacy=True only)
     # =========================================================================
     try:
         raw = bytes.fromhex(payload)
@@ -218,5 +308,32 @@ def decrypt_authenticated_pin(
         return pin_bytes.decode("utf-8")
     except Exception:
         return None
+
+
+def migrate_legacy_transit_pin(
+    payload: str,
+    delivery_id: str,
+    master_key: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Explicit migration pathway: decrypts legacy v1: or unversioned payload and re-encrypts to v2: with delivery AAD.
+    
+    Returns (plaintext_pin, upgraded_v2_envelope).
+    If payload is invalid or already tampered, returns (None, None).
+    """
+    plain = decrypt_authenticated_pin(
+        payload=payload,
+        master_key=master_key,
+        delivery_id=delivery_id,
+        allow_legacy=True,
+        allow_unbound=True,
+    )
+    if not plain:
+        return None, None
+    new_v2 = encrypt_authenticated_pin(
+        pin=plain,
+        master_key=master_key,
+        delivery_id=delivery_id,
+    )
+    return plain, new_v2
 
 

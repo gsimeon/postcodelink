@@ -20,6 +20,7 @@ from backend.app.schemas.auth import (
 )
 from backend.app.core.security import hash_password, verify_password, create_access_token
 from backend.app.core.auth_deps import get_current_user, require_roles
+from backend.app.core.network import is_ip_in_trusted_proxy, get_trusted_client_ip
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -27,40 +28,6 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 LOGIN_ATTEMPTS: Dict[str, Tuple[int, float]] = {}
 MAX_LOGIN_ATTEMPTS = 5
 LOCKOUT_DURATION_MINUTES = 15
-
-
-def is_ip_in_trusted_proxy(ip_str: str, trusted_spec: str) -> bool:
-    """Check if an IP string belongs to a trusted proxy host or CIDR subnet."""
-    try:
-        ip = ipaddress.ip_address(ip_str)
-        if "/" in trusted_spec:
-            return ip in ipaddress.ip_network(trusted_spec, strict=False)
-        return ip == ipaddress.ip_address(trusted_spec)
-    except ValueError:
-        return ip_str.lower() == trusted_spec.lower()
-
-
-def get_trusted_client_ip(request: Request) -> str:
-    """Extract real client IP only trusting X-Forwarded-For when direct request arrives via a configured trusted proxy."""
-    direct_ip = request.client.host if request.client else "127.0.0.1"
-    trusted_list = getattr(settings, "TRUSTED_PROXIES", ["127.0.0.1", "::1", "localhost", "testclient"])
-
-    # If the direct peer is NOT in trusted proxies, completely ignore X-Forwarded-For to defeat header spoofing
-    is_trusted = any(is_ip_in_trusted_proxy(direct_ip, proxy) for proxy in trusted_list)
-    if not is_trusted:
-        return direct_ip
-
-    # Peer is a trusted proxy: parse X-Forwarded-For chain from right to left
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        ips = [ip.strip() for ip in forwarded.split(",") if ip.strip()]
-        for ip in reversed(ips):
-            if not any(is_ip_in_trusted_proxy(ip, proxy) for proxy in trusted_list):
-                return ip
-        if ips:
-            return ips[0]
-
-    return direct_ip
 
 
 def cleanup_expired_login_attempts(db: Session, retention_days: int = 30) -> int:
