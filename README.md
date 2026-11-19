@@ -46,15 +46,18 @@ graph TD
 
 ---
 
-## Data Sources, System Taxonomy & Regulatory Governance (Release Gate v6.0.9 Standard)
+## Data Sources, System Taxonomy & Regulatory Governance (Release Gate v6.0.10 Standard)
 
 PostcodeLink strictly differentiates between four tiers of postcode data and enforces clear data governance in compliance with the [NIPOST Terms of Service](https://www.postcode.gov.ng/terms):
 
-### 1. Three-State Verification Taxonomy & Provenance Enforcement
-To prevent fabricated test fixtures or local reference data from being misrepresented as official government verifications, PostcodeLink enforces strict three-state categorization:
-1. **Format Valid (Syntax Level)**: The postcode string adheres to official structural specifications (either the 11-character 5-component `SS-LL-DDD-AA-BB` national digital standard or the 6-digit legacy format). Validated by `is_well_formed_postcode()`.
-2. **Local Reference Match (Reference Level)**: Matched against PostcodeLink's local demonstration registry or database directory (`PostcodeDirectory`). Returns `postcode_status: "local_match"` (confidence `0.75`). Demonstration fixtures (e.g. `FC-02-A09-DB-09` and `LA-01-A04-IK-02`) carry `source_type: "demonstration_fixture"` and explicitly log `(unverified with official NIPOST)`. Even database-backed reference entries remain `local_reference` unless authoritatively verified.
-3. **Official NIPOST Verified (Authoritative Level)**: Verified in real time against the live official NIPOST digital address directory service. Returns `postcode_status: "verified"` (confidence `0.95+`). Only live upstream verification confers official verification status.
+### 1. Six-Tier Verification Taxonomy & Provenance Enforcement
+To prevent fabricated test fixtures or local reference data from being misrepresented as official government verifications, PostcodeLink enforces strict six-tier categorization across API contracts, database persistence, and UI indicators:
+1. **Format Valid (`format_valid`)**: The postcode adheres to official syntax specifications (either the 11-character 5-component `SS-LL-DDD-AA-BB` national digital standard or the 6-digit legacy format). Validated by `is_well_formed_postcode()`.
+2. **Local Reference Match (`local_match`)**: Matched against PostcodeLink's local demonstration registry or database directory (`PostcodeDirectory`). Returns `postcode_status: "local_match"` (confidence `0.75`). Demonstration fixtures (e.g. `FC-02-A09-DB-09` and `LA-01-A04-IK-02`) carry `source_type: "demonstration_fixture"` and explicitly disclose `(unverified with official NIPOST)`. Even database-backed reference entries remain `local_reference` unless authoritatively verified.
+3. **Partially Verified (`partially_verified`)**: Postcode existence confirmed by official NIPOST Validator (`/v1/validate`), but address metadata is absent from NIPOST and enriched from local reference datasets. Tagged with `address_metadata_source = "local_enrichment"` (confidence `0.80`). Enriched addresses are never falsely described as officially verified.
+4. **Officially Verified (`nipost_verified`)**: Both postcode existence and address administrative metadata are verified in real time against the live official NIPOST national digital directory (`/v1/lookup`). Returns `postcode_status: "verified"` (confidence `0.95+`).
+5. **Address Conflict (`address_conflict`)**: Postcode exists in the directory, but the caller-supplied area or state contradicts the official geographic zone assignment (confidence `0.40`).
+6. **Verification Unavailable (`unavailable`)**: Upstream official NIPOST gateway is unreachable or timed out; non-strict local fallback applied with full transparent disclosure (`fallback_used: true`, `upstream_status: "UNAVAILABLE"`).
 
 | Data Source Tier | Scope & Format | Verification Status | Provenance Attributes |
 | :--- | :--- | :--- | :--- |
@@ -67,7 +70,17 @@ To prevent fabricated test fixtures or local reference data from being misrepres
 > [!IMPORTANT]
 > **No Conflation of Local Data with Official Verification**: Local reference data and demonstration fixtures are strictly tagged as demonstration and fallback data. In strict verification mode (`strict=true`), local fallback is disabled; unverified postcodes return HTTP 503 rather than asserting local demonstration data as government truth.
 
-### 2. NIPOST Terms of Service, Commercial Usage & Official Integration Status
+### 2. Verification Evidence Model & Database Provenance Gate
+A database record in `PostcodeDirectory` claiming `verification_status = "official_verified"` is **never** accepted as official truth on face value. To qualify as `verified`, it must be backed by an active, unexpired record in `VerificationEvidence`:
+- **Evidence Fields**: `postcode`, `provider = "NIPOST"`, `provider_reference_id`, `verification_method` (`validator_autofill_pipeline` | `validator`), `dataset_version`, `verified_at`, `valid_until` (default 30-day expiration window), `response_hash` (SHA-256 of raw response payload), and `address_metadata_source`.
+- **Automatic Demotion**: If verification evidence is missing, expired, or deactivated, database candidates are automatically demoted to `postcode_status = "local_match"` (confidence `0.75`), preventing stale or artificially flagged entries from posing as government-verified truth.
+
+### 3. Explicit Two-Stage Validator $\to$ Autofill Orchestration
+1. **Stage 1 (Validator)**: Queries `/v1/validate` to verify existence. If rejected or not found, halts immediately (failing closed with HTTP 404/422 in strict mode).
+2. **Stage 2 (Autofill)**: Queries `/v1/lookup` to retrieve authoritative administrative address metadata (area, state, LGA, building unit).
+3. **Stage 3 (Local Enrichment Boundary)**: If Autofill is absent but Validator confirms existence, the platform enriches missing address attributes from local reference datasets, explicitly returning `is_partial_verification: true`, `postcode_status: "partially_verified"`, `address_metadata_source: "local_enrichment"`, and notes the local enrichment in `changes_made`.
+
+### 4. NIPOST Terms of Service, Commercial Usage & Official Integration Status
 - **Adapter Verification Status**: The NIPOST integration client in PostcodeLink is structured as an integration adapter pending authorized external contract verification against official National Digital Postcode API references and sandbox credentials. (Note: NIPOST's public e-commerce shipping API documentation describes merchant logistics, not the National Digital Postcode directory service).
 - **Software Service Model**: PostcodeLink provides address disambiguation, algorithmic landmark cleansing, and last-mile delivery tracking software. It does not claim ownership of the national postal directory, nor does it engage in unauthorized wholesale resale or bulk redistribution of raw government databases.
 - **Operational Caching Limits**: Stored lookup metadata is restricted to operational verification audit logs and merchant delivery records. Commercial API consumers are prohibited from building independent derivative national postal databases without a direct commercial agreement with NIPOST.
@@ -93,10 +106,12 @@ To prevent fabricated test fixtures or local reference data from being misrepres
 
 3. **Zero-Downtime Key Rotation Procedures**:
    - **JWT Secret Rotation**:
-     1. Add current active `SECRET_KEY` to `JWT_PREVIOUS_SECRETS`.
-     2. Generate a new secret and assign to `SECRET_KEY`, incrementing `JWT_KEY_ID` (e.g., `v1` $\to$ `v2`).
-     3. Deploy API services. New tokens are signed with the new secret; existing active tokens decode and verify via `JWT_PREVIOUS_SECRETS` until expiration.
-     4. Remove the old secret from `JWT_PREVIOUS_SECRETS` after the access token validity window (`ACCESS_TOKEN_EXPIRE_MINUTES`) has elapsed.
+     1. Add previous key mapping using either:
+        - `JWT_PREVIOUS_SECRETS=v1:<old_v1_secret>`
+        - `JWT_PREVIOUS_KEYS_MAP='{"v1": "<old_v1_secret>"}'`
+     2. Generate a new authentic secret and assign to `SECRET_KEY`, incrementing `JWT_KEY_ID` (e.g. `v1` $\to$ `v2`).
+     3. Deploy API services. New tokens are signed with `kid: v2`; existing in-flight tokens signed with `kid: v1` decode cleanly via `get_jwt_verification_keys()` until expiration.
+     4. After the token validity window (`ACCESS_TOKEN_EXPIRE_MINUTES`) has elapsed, remove the retired secret from `JWT_PREVIOUS_SECRETS` or `JWT_PREVIOUS_KEYS_MAP`.
    - **Delivery PIN / OTP Key Rotation**:
      1. Add current active `OTP_SECRET_KEY` to `OTP_PREVIOUS_SECRETS`.
      2. Set `OTP_SECRET_KEY` to the new secret and deploy.

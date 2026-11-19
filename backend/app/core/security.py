@@ -117,8 +117,9 @@ def decode_access_token(token: str) -> Dict[str, Any]:
         return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
     except jwt.InvalidSignatureError as exc:
         for prev_key in getattr(settings, "JWT_PREVIOUS_SECRETS", []) or []:
+            val = prev_key.split(":", 1)[1].strip() if ":" in prev_key and len(prev_key.split(":", 1)[0]) < 16 else prev_key.strip()
             try:
-                return jwt.decode(token, prev_key, algorithms=[settings.JWT_ALGORITHM])
+                return jwt.decode(token, val, algorithms=[settings.JWT_ALGORITHM])
             except jwt.InvalidSignatureError:
                 continue
         raise exc

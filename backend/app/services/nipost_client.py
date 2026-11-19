@@ -497,6 +497,57 @@ class NIPOSTClient:
                 error_message=f"NIPOST Validator connection failed: {type(exc).__name__}.",
             )
 
+    def orchestrated_verify(self, code: str) -> Tuple[NIPOSTLookupStatus, Optional[Dict[str, Any]], Optional[str], str]:
+        """Execute explicit two-stage verification pipeline:
+        Stage 1: NIPOST Validator -> verifies directory existence.
+        Stage 2: NIPOST Autofill -> retrieves official administrative metadata.
+
+        Returns:
+            (status, record_data, error_message, verification_method)
+            where verification_method is one of:
+            - 'validator_autofill_pipeline': existence AND metadata verified by NIPOST
+            - 'validator': existence verified by NIPOST, but metadata absent
+            - 'failed': verification did not succeed
+        """
+        clean_code = (code or "").strip().upper()
+        if not self.is_configured or not clean_code:
+            return NIPOSTLookupStatus.UNAVAILABLE, None, "NIPOST API base URL is not configured.", "failed"
+
+        # Stage 1: Existence check via Validator
+        val_res = self.validate_postcode(clean_code)
+
+        # Authoritative failure at Stage 1 fails immediately
+        if val_res.status in (NIPOSTLookupStatus.NOT_FOUND, NIPOSTLookupStatus.INVALID_INPUT):
+            return val_res.status, val_res.data, val_res.error_message, "validator"
+
+        # Stage 2: Metadata retrieval via Autofill / Lookup
+        lookup_res = self.lookup_postcode(clean_code)
+
+        if val_res.status == NIPOSTLookupStatus.FOUND:
+            if lookup_res.status == NIPOSTLookupStatus.FOUND and lookup_res.data:
+                data = dict(lookup_res.data)
+                if data.get("area") and data.get("state"):
+                    data["service"] = "autofill"
+                    data["verification_method"] = "validator_autofill_pipeline"
+                    return NIPOSTLookupStatus.FOUND, data, None, "validator_autofill_pipeline"
+            # Validator verified existence, but Autofill did not return full metadata
+            data = dict(val_res.data or {"code": clean_code})
+            data["service"] = "validator"
+            data["verification_method"] = "validator"
+            data["valid"] = True
+            return NIPOSTLookupStatus.FOUND, data, None, "validator"
+
+        # If validator returned UNAVAILABLE/UNAUTHORIZED/INVALID_RESPONSE (e.g. mock or endpoint fallback)
+        if lookup_res.status == NIPOSTLookupStatus.FOUND and lookup_res.data:
+            data = dict(lookup_res.data)
+            method = "validator_autofill_pipeline" if (data.get("area") and data.get("state")) else "validator"
+            data["verification_method"] = method
+            return NIPOSTLookupStatus.FOUND, data, None, method
+
+        status = val_res.status if val_res.status != NIPOSTLookupStatus.UNAVAILABLE else lookup_res.status
+        err = lookup_res.error_message or val_res.error_message
+        return status, None, err, "failed"
+
 
     def validate_address(
         self,

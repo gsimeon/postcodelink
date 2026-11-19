@@ -70,10 +70,16 @@ def execute_postcode_lookup(
 
     if client and client.is_configured and code:
         res = client.lookup_postcode(code)
-        if res.status == NIPOSTLookupStatus.FOUND and res.data:
-            live_res = res.data
+        nipost_status = res.status
+        live_res = res.data
+        nipost_err = res.error_message
+        res_status_val = res.status.value
+
+        if nipost_status == NIPOSTLookupStatus.FOUND and live_res:
             upstream_version = live_res.get("dataset_version")
-            is_validator = (live_res.get("service") == "validator" or not live_res.get("area") or not live_res.get("state"))
+            is_validator = bool(live_res.get("service") == "validator" or not live_res.get("area") or not live_res.get("state"))
+            ver_method = "validator" if is_validator else "validator_autofill_pipeline"
+            addr_metadata_source = "local_enrichment" if is_validator else "nipost_autofill"
 
             rec_area = live_res.get("area")
             rec_state = live_res.get("state")
@@ -93,6 +99,41 @@ def execute_postcode_lookup(
                     rec_area = rec_area or "Unspecified Location"
                     rec_state = rec_state or "Nigeria"
 
+            # Create VerificationEvidence if db available
+            ev_id = None
+            ev_valid_until = None
+            if db is not None:
+                try:
+                    import hashlib
+                    import json
+                    from backend.app.models.verification_evidence import VerificationEvidence, default_valid_until
+                    raw_bytes = json.dumps(live_res or {}, sort_keys=True).encode("utf-8")
+                    resp_hash = hashlib.sha256(raw_bytes).hexdigest()
+                    ev_valid_until = default_valid_until()
+                    ev_rec = VerificationEvidence(
+                        postcode=live_res.get("code") or code,
+                        provider="NIPOST",
+                        provider_reference_id=live_res.get("reference_id") or live_res.get("transaction_id"),
+                        verification_method=ver_method,
+                        dataset_version=upstream_version or "2026.1",
+                        response_hash=resp_hash,
+                        status="verified" if not is_validator else "partial",
+                        address_metadata_source=addr_metadata_source,
+                        valid_until=ev_valid_until,
+                    )
+                    db.add(ev_rec)
+                    db.commit()
+                    db.refresh(ev_rec)
+                    ev_id = ev_rec.id
+                except Exception:
+                    pass
+
+            prov_text = (
+                "NIPOST Official Directory (Existence Verified by Validator; Local Enrichment for Address Attributes)"
+                if is_validator
+                else "NIPOST Official National Directory (Live API)"
+            )
+
             schema_rec = PostcodeRecordSchema(
                 code=live_res.get("code") or code,
                 area=rec_area,
@@ -103,11 +144,15 @@ def execute_postcode_lookup(
                 postcode_type=live_res.get("postcode_type", "digital_location" if len(code.replace("-", "")) > 6 else "conventional_area"),
                 postcode_category="official_digital_postcode" if len(code.replace("-", "")) > 6 else "legacy_postal_code",
                 building_reference=rec_building,
-                verification_status="official_verified",
-                provenance="NIPOST Official National Directory (Live API - Existence Verified)" if is_validator else "NIPOST Official National Directory (Live API)",
+                verification_status="official_verified" if not is_validator else "local_reference",
+                provenance=prov_text,
                 dataset_version=upstream_version,
                 source_owner="NIPOST",
                 source_type="official_national_directory",
+                evidence_id=ev_id,
+                verification_method=ver_method,
+                address_metadata_source=addr_metadata_source,
+                valid_until=ev_valid_until,
             )
             return PostcodeLookupResponse(
                 source="live_nipost_api",
@@ -118,17 +163,21 @@ def execute_postcode_lookup(
                 service_type="validator" if is_validator else "autofill",
                 dataset_version=upstream_version,
                 api_integration_version="2026.1",
-                provenance="NIPOST Official National Directory (Live API - Existence Verified)" if is_validator else "NIPOST Official National Directory (Live API)",
-                lookup_status="official_verified",
+                provenance=prov_text,
+                lookup_status="official_verified" if not is_validator else "partially_verified",
                 verification_source="live_nipost_api",
-                verification_status="official_verified",
+                verification_status="official_verified" if not is_validator else "local_reference",
                 fallback_used=False,
-                upstream_status=res.status.value,
+                upstream_status=res_status_val,
+                evidence_id=ev_id,
+                verification_method=ver_method,
+                address_metadata_source=addr_metadata_source,
+                valid_until=ev_valid_until,
             )
-        elif res.status == NIPOSTLookupStatus.NOT_FOUND:
+        elif nipost_status == NIPOSTLookupStatus.NOT_FOUND:
             # Authoritative response: code does not exist in NIPOST directory. Do NOT fall back to local data.
-            err_msg = res.error_message or getattr(res, "error", None) or "Postcode not found in official national directory."
-            upstream_version = res.data.get("dataset_version") if (res.data and isinstance(res.data, dict)) else None
+            err_msg = nipost_err or "Postcode not found in official national directory."
+            upstream_version = live_res.get("dataset_version") if (live_res and isinstance(live_res, dict)) else None
             return PostcodeLookupResponse(
                 source="live_nipost_api",
                 count=0,
@@ -141,41 +190,41 @@ def execute_postcode_lookup(
                 verification_source="live_nipost_api",
                 verification_status="unverified",
                 fallback_used=False,
-                upstream_status=res.status.value,
+                upstream_status=res_status_val,
                 upstream_error=err_msg,
             )
         else:
             # Invalid caller input is not an upstream outage and must not fall back
             # to local reference data or be reported as a missing postcode.
-            if res.status == NIPOSTLookupStatus.INVALID_INPUT:
+            if nipost_status == NIPOSTLookupStatus.INVALID_INPUT:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=res.error_message or "NIPOST rejected the postcode input.",
+                    detail=nipost_err or "NIPOST rejected the postcode input.",
                 )
 
             # Upstream error: UNAUTHORIZED, UNAVAILABLE, or INVALID_RESPONSE
-            err_msg = res.error_message or getattr(res, "error", None)
-            upstream_status = res.status.value
+            err_msg = nipost_err
+            upstream_status = res_status_val
             upstream_error = err_msg
 
             if strict:
-                if res.status == NIPOSTLookupStatus.INVALID_INPUT:
+                if nipost_status == NIPOSTLookupStatus.INVALID_INPUT:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"NIPOST API validation error ({res.status.value}): {err_msg or 'Invalid postcode format'}.",
+                        detail=f"NIPOST API validation error ({res_status_val}): {err_msg or 'Invalid postcode format'}.",
                     )
-                elif res.status == NIPOSTLookupStatus.UNAUTHORIZED:
+                elif nipost_status == NIPOSTLookupStatus.UNAUTHORIZED:
                     raise HTTPException(
                         status_code=status.HTTP_502_BAD_GATEWAY,
-                        detail=f"Official NIPOST API authorization failed ({res.status.value}): {err_msg or 'Invalid or expired credentials'}. Fallback disabled in strict verification mode.",
+                        detail=f"Official NIPOST API authorization failed ({res_status_val}): {err_msg or 'Invalid or expired credentials'}. Fallback disabled in strict verification mode.",
                     )
                 else:
                     raise HTTPException(
                         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                        detail=f"Official NIPOST API unavailable ({res.status.value}): {err_msg or 'Service unreachable'}. Fallback disabled in strict verification mode.",
+                        detail=f"Official NIPOST API unavailable ({res_status_val}): {err_msg or 'Service unreachable'}. Fallback disabled in strict verification mode.",
                     )
 
-            fallback_reason = f"Upstream NIPOST {res.status.value}: {err_msg or 'Check authorization credentials or service availability.'}. Displaying local demonstration reference."
+            fallback_reason = f"Upstream NIPOST {res_status_val}: {err_msg or 'Check authorization credentials or service availability.'}. Displaying local demonstration reference."
 
     if strict:
         raise HTTPException(

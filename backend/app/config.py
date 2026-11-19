@@ -138,6 +138,19 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Parse JSON environment variable for explicit key-to-secret mapping if provided
+        raw_map = os.getenv("JWT_PREVIOUS_KEYS_MAP")
+        if raw_map and isinstance(raw_map, str) and raw_map.strip().startswith("{"):
+            try:
+                import json
+                parsed = json.loads(raw_map.strip())
+                if isinstance(parsed, dict):
+                    self.JWT_PREVIOUS_KEYS_MAP.update({str(k): str(v) for k, v in parsed.items()})
+            except Exception:
+                pass
+
     def get_jwt_verification_keys(self) -> Dict[str, str]:
         """Return complete mapping of key ID (kid) -> secret key for versioned JWT verification."""
         keys: Dict[str, str] = {}
@@ -146,7 +159,7 @@ class Settings(BaseSettings):
         if self.JWT_PREVIOUS_KEYS_MAP:
             for kid, sec in self.JWT_PREVIOUS_KEYS_MAP.items():
                 if sec:
-                    keys[kid] = sec.strip()
+                    keys[str(kid).strip()] = str(sec).strip()
         for idx, sec in enumerate(self.JWT_PREVIOUS_SECRETS):
             if sec:
                 sec_clean = sec.strip()
@@ -156,6 +169,18 @@ class Settings(BaseSettings):
                 else:
                     keys[f"v_prev_{idx+1}"] = sec_clean
         return keys
+
+    def get_all_jwt_verification_secrets(self) -> List[str]:
+        """Return list of all candidate secrets for decoding tokens during transition."""
+        secrets = []
+        for s in self.get_jwt_verification_keys().values():
+            if s and s not in secrets:
+                secrets.append(s)
+        for s in self.JWT_PREVIOUS_SECRETS:
+            val = s.split(":", 1)[1].strip() if ":" in s and len(s.split(":", 1)[0]) < 16 else s.strip()
+            if val and val not in secrets:
+                secrets.append(val)
+        return secrets
 
     # Delivery PIN / OTP Hashing Key (Cryptographic Domain Separation from JWT)
     OTP_SECRET_KEY: str = os.getenv("OTP_SECRET_KEY", "")

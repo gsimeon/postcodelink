@@ -18,6 +18,10 @@ class PostcodeRecordSchema(BaseModel):
     provenance: Optional[str] = "PostcodeLink Local Reference Dataset"
     dataset_version: Optional[str] = None
     verified_at: Optional[datetime] = None
+    valid_until: Optional[datetime] = None
+    evidence_id: Optional[str] = None
+    verification_method: Optional[str] = None
+    address_metadata_source: Optional[str] = None
     source_owner: Optional[str] = "PostcodeLink"
     source_type: Optional[str] = "local_reference"
     national_components: Optional[dict] = None
@@ -48,6 +52,15 @@ class PostcodeLookupResponse(BaseModel):
     fallback_reason: Optional[str] = None
     upstream_status: Optional[str] = None
     upstream_error: Optional[str] = None
+    is_partial_verification: bool = False
+    evidence_id: Optional[str] = None
+    verification_method: Optional[str] = None
+    address_metadata_source: Optional[str] = None
+    valid_until: Optional[datetime] = None
+    evidence_id: Optional[str] = None
+    verification_method: Optional[str] = None
+    address_metadata_source: Optional[str] = None
+    valid_until: Optional[datetime] = None
 
 
 class CleanseAddressRequest(BaseModel):
@@ -89,3 +102,8 @@ class CleanseAddressResponse(BaseModel):
     fallback_used: bool = False
     upstream_status: Optional[str] = None
     upstream_error: Optional[str] = None
+    is_partial_verification: bool = False
+    evidence_id: Optional[str] = None
+    verification_method: Optional[str] = None
+    address_metadata_source: Optional[str] = None
+    valid_until: Optional[datetime] = None
