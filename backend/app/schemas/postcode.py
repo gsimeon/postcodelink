@@ -8,8 +8,8 @@ VerificationMode = Literal["local_standardization", "nipost_validate", "nipost_s
 
 class PostcodeRecordSchema(BaseModel):
     code: str
-    area: Optional[str] = "Unspecified Area"
-    state: Optional[str] = "Nigeria"
+    area: Optional[str] = None
+    state: Optional[str] = None
     lga: Optional[str] = None
     lat: Optional[float] = None
     lng: Optional[float] = None
@@ -102,8 +102,8 @@ class CleanseAddressRequest(BaseModel):
 class CleanseAddressResponse(BaseModel):
     original_address: str
     formatted_address: str
-    area: str
-    state: str
+    area: Optional[str] = None
+    state: Optional[str] = None
     lga: Optional[str] = None
     postcode: str
     postcode_type: str = "conventional_area"  # conventional_area | digital_location

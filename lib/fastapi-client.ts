@@ -253,6 +253,10 @@ export interface CoverageReport {
     base_url_set: boolean;
     credentials_set: boolean;
     auth_scheme: string;
+    connectivity_healthy?: boolean;
+    authentication_verified?: boolean;
+    contract_verified?: boolean;
+    production_authorized?: boolean;
     status: string;
     display_status: string;
   };

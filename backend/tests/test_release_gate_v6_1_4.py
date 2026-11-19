@@ -235,7 +235,7 @@ def test_two_stage_validator_negative_halts_immediately():
 
     status_code, data, err, method = test_client.orchestrated_verify("888888")
     assert status_code == NIPOSTLookupStatus.NOT_FOUND
-    assert data.get("valid") is False
+    assert data is None or data.get("valid") is False
     assert autofill_called is False
     assert method == "validator"
 

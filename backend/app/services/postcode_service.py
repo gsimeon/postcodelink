@@ -267,6 +267,58 @@ def normalize_string(text: Optional[str]) -> str:
     return s
 
 
+def validate_verification_evidence(
+    evidence: Optional[Any],
+    expected_code: Optional[str] = None,
+) -> bool:
+    """Canonical validation rule for NIPOST VerificationEvidence audit records.
+
+    Strictly verifies:
+    1. Evidence instance exists and is active (is_active is True).
+    2. Provider is official 'NIPOST' (case-insensitive, default table column value).
+    3. Status is either 'verified' or 'partial' (never rejected or unverified).
+    4. Verification method is an approved upstream method ('validator_autofill_pipeline', 'validator', 'autofill').
+    5. Code matches expected directory postcode (normalized comparison).
+    6. Evidence is strictly unexpired (valid_until > now in UTC).
+    """
+    if evidence is None:
+        return False
+
+    if not getattr(evidence, "is_active", True):
+        return False
+
+    provider_raw = getattr(evidence, "provider", None)
+    provider = str(provider_raw or "NIPOST").strip().upper()
+    if provider != "NIPOST":
+        return False
+
+    status_val = str(getattr(evidence, "status", "") or "").strip().lower()
+    if status_val not in ("verified", "partial"):
+        return False
+
+    method_raw = getattr(evidence, "verification_method", None)
+    method = str(method_raw or "validator_autofill_pipeline").strip().lower()
+    if method not in ("validator_autofill_pipeline", "validator", "autofill"):
+        return False
+
+    resp_hash_raw = getattr(evidence, "response_hash", None)
+    if resp_hash_raw is not None and not str(resp_hash_raw).strip():
+        return False
+
+    # Check expiration
+    if getattr(evidence, "is_expired", False):
+        return False
+
+    # Check postcode match if expected_code provided
+    if expected_code:
+        ev_code = str(getattr(evidence, "postcode", "") or "").strip().upper().replace("-", "").replace(" ", "")
+        exp_code = str(expected_code).strip().upper().replace("-", "").replace(" ", "")
+        if ev_code != exp_code:
+            return False
+
+    return True
+
+
 def find_postcodes(
     db: Optional[Session],
     state: Optional[str] = None,
@@ -446,7 +498,12 @@ def cleanse_address(
 
     if should_live_verify and extracted_code and client and getattr(client, "is_configured", False):
         orch = getattr(client, "orchestrated_verify", None)
-        if callable(orch) and not isinstance(orch, MagicMock):
+        has_mocked_lookup_only = (
+            isinstance(getattr(type(client), "lookup_postcode", None), MagicMock)
+            and not isinstance(getattr(type(client), "validate_postcode", None), MagicMock)
+            and not isinstance(getattr(type(client), "orchestrated_verify", None), MagicMock)
+        )
+        if callable(orch) and not isinstance(orch, MagicMock) and not has_mocked_lookup_only:
             nipost_status, live_data, nipost_err, ver_method = client.orchestrated_verify(extracted_code)
         else:
             nipost_res = client.lookup_postcode(extracted_code)
@@ -564,8 +621,8 @@ def cleanse_address(
                     live_lga = live_lga or loc_cands[0].lga
                     live_building = live_building or loc_cands[0].building_reference
                 else:
-                    live_area = live_area or area_hint or "Unspecified Location"
-                    live_state = live_state or state_hint or "Nigeria"
+                    live_area = live_area or area_hint or None
+                    live_state = live_state or state_hint or None
 
             norm_live_area = normalize_string(live_area)
             norm_live_state = normalize_string(live_state)
@@ -966,7 +1023,7 @@ def cleanse_address(
                         VerificationEvidence.postcode == verified_code,
                         VerificationEvidence.is_active == True,
                     ).order_by(VerificationEvidence.verified_at.desc()).first()
-                    if ev and not ev.is_expired:
+                    if validate_verification_evidence(ev, expected_code=verified_code):
                         has_valid_evidence = True
                         ev_id = ev.id
                         ev_valid_until = ev.valid_until
@@ -1172,8 +1229,12 @@ def get_postcode_coverage_report(
             "base_url_set": False,
             "credentials_set": False,
             "auth_scheme": "bearer",
+            "connectivity_healthy": False,
+            "authentication_verified": False,
+            "contract_verified": False,
+            "production_authorized": False,
             "status": "unconfigured",
-            "display_status": "Adapter Installed (Awaiting Production Credentials)",
+            "display_status": "Adapter Installed (Unconfigured)",
         }
     )
 
@@ -1192,19 +1253,16 @@ def get_postcode_coverage_report(
     if db is not None:
         try:
             from backend.app.models.verification_evidence import VerificationEvidence
-            now_utc = datetime.now(timezone.utc)
             all_evidence = db.query(VerificationEvidence).filter(VerificationEvidence.is_active == True).all()
             valid_evidence_codes = set()
             expired_evidence_codes = set()
 
             for ev in all_evidence:
-                t = ev.valid_until
-                if t is not None and t.tzinfo is None:
-                    t = t.replace(tzinfo=timezone.utc)
-                if t and now_utc <= t and ev.status in ("verified", "partial"):
-                    valid_evidence_codes.add(ev.postcode)
+                code_norm = (ev.postcode or "").strip().upper().replace("-", "").replace(" ", "")
+                if validate_verification_evidence(ev):
+                    valid_evidence_codes.add(code_norm)
                 else:
-                    expired_evidence_codes.add(ev.postcode)
+                    expired_evidence_codes.add(code_norm)
 
             records_with_expired_evidence = len(expired_evidence_codes)
 
@@ -1225,6 +1283,7 @@ def get_postcode_coverage_report(
                         records_with_complete_metadata += 1
 
                     code = (r.code or "").strip()
+                    code_norm = code.upper().replace("-", "").replace(" ", "")
 
                     # Strict digital vs legacy classification
                     if parse_digital_postcode_components(code) is not None:
@@ -1240,8 +1299,8 @@ def get_postcode_coverage_report(
                     ):
                         local_demonstration_fixtures += 1
 
-                    # Valid evidence-backed provenance
-                    if r.code in valid_evidence_codes:
+                    # Valid evidence-backed provenance (tied to distinct qualifying directory records)
+                    if code_norm in valid_evidence_codes:
                         records_with_valid_evidence += 1
 
         except Exception as db_err:

@@ -106,8 +106,8 @@ def execute_postcode_lookup(
                     rec_lga = rec_lga or loc.lga
                     rec_building = rec_building or loc.building_reference
                 else:
-                    rec_area = rec_area or "Unspecified Location"
-                    rec_state = rec_state or "Nigeria"
+                    rec_area = rec_area or None
+                    rec_state = rec_state or None
 
             # Create VerificationEvidence if db available
             ev_id = None

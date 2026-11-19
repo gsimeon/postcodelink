@@ -1467,7 +1467,13 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                       </b>
                     </div>
                     <small style={{ color: "#64748b", fontSize: "11px", display: "block", marginTop: "2px" }}>
-                      {cleanseResult.area || "Area"}, {cleanseResult.state || "State"}
+                      {cleanseResult.area && cleanseResult.state
+                        ? `${cleanseResult.area}, ${cleanseResult.state}`
+                        : cleanseResult.area
+                        ? `${cleanseResult.area} (State Pending)`
+                        : cleanseResult.state
+                        ? `Area Pending, ${cleanseResult.state}`
+                        : "Incomplete Administrative Metadata"}
                     </small>
                   </div>
 
@@ -2001,16 +2007,23 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                     </div>
 
                     <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid #f1f5f9", paddingBottom: "6px" }}>
-                      <span style={{ color: "#64748b" }}>Gateway Endpoint (Base URL):</span>
-                      <span style={{ fontWeight: 600, color: coverageReport.upstream_integration.base_url_set ? "#16a34a" : "#dc2626" }}>
-                        {coverageReport.upstream_integration.base_url_set ? "Configured" : "Not Set"}
+                      <span style={{ color: "#64748b" }}>Endpoint Connectivity:</span>
+                      <span style={{ fontWeight: 600, color: coverageReport.upstream_integration.connectivity_healthy ? "#16a34a" : "#64748b" }}>
+                        {coverageReport.upstream_integration.connectivity_healthy ? "Online & Responsive" : "Configured (Probe Pending)"}
                       </span>
                     </div>
 
                     <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid #f1f5f9", paddingBottom: "6px" }}>
-                      <span style={{ color: "#64748b" }}>Production API Key:</span>
-                      <span style={{ fontWeight: 600, color: coverageReport.upstream_integration.credentials_set ? "#16a34a" : "#dc2626" }}>
-                        {coverageReport.upstream_integration.credentials_set ? "Configured (Protected)" : "Missing / Unconfigured"}
+                      <span style={{ color: "#64748b" }}>Contract Verification:</span>
+                      <span style={{ fontWeight: 600, color: coverageReport.upstream_integration.contract_verified ? "#16a34a" : "#d97706" }}>
+                        {coverageReport.upstream_integration.contract_verified ? "Verified Upstream" : "Pending Sandbox Verification"}
+                      </span>
+                    </div>
+
+                    <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid #f1f5f9", paddingBottom: "6px" }}>
+                      <span style={{ color: "#64748b" }}>Commercial Authorization:</span>
+                      <span style={{ fontWeight: 600, color: coverageReport.upstream_integration.production_authorized ? "#16a34a" : "#d97706" }}>
+                        {coverageReport.upstream_integration.production_authorized ? "Authorized Enterprise Data-Use" : "Pending NIPOST Commercial Agreement"}
                       </span>
                     </div>
 
@@ -2022,6 +2035,8 @@ export function PostcodeLookupTab({ onStartDeliveryWithAddress }: PostcodeLookup
                           color:
                             coverageReport.upstream_integration.status === "ready"
                               ? "#16a34a"
+                              : coverageReport.upstream_integration.status === "configured"
+                              ? "#2563eb"
                               : coverageReport.upstream_integration.status === "awaiting_credentials"
                               ? "#d97706"
                               : "#64748b",

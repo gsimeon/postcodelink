@@ -72,7 +72,14 @@ class NIPOSTClient:
         self.timeout = timeout or getattr(settings, "NIPOST_TIMEOUT_SECONDS", 5.0)
         self.transport = transport
         self.lookup_path = lookup_path or getattr(settings, "NIPOST_LOOKUP_PATH", "/v1/lookup")
-        self.auth_scheme = (auth_scheme or getattr(settings, "NIPOST_AUTH_SCHEME", "bearer")).lower()
+        raw_scheme = (auth_scheme or getattr(settings, "NIPOST_AUTH_SCHEME", "bearer")).lower().strip()
+        supported_schemes = {"bearer", "api_key", "x-api-key", "api_key_header", "both", "none"}
+        if raw_scheme not in supported_schemes:
+            raise ValueError(
+                f"Unsupported NIPOST authentication scheme '{raw_scheme}'. "
+                f"Supported schemes: 'bearer', 'api_key', 'none'."
+            )
+        self.auth_scheme = raw_scheme
         self.query_param = query_param or getattr(settings, "NIPOST_QUERY_PARAM", "code")
 
     @property
@@ -96,18 +103,33 @@ class NIPOSTClient:
         return False
 
     def get_integration_status(self) -> Dict[str, Any]:
-        """Provides structured integration status separating code presence, configuration, and health."""
+        """Provides structured integration status separating code presence, configuration, health, and commercial authorization."""
         has_url = bool(self.base_url)
         has_key = bool(self.api_key)
-        configured = bool(has_url and has_key)
+        configured = bool(self.configuration_complete)
+
+        if configured:
+            status = "configured"
+            display_status = "Adapter Configured - NIPOST Two-Stage (Awaiting Live Verification)"
+        elif has_url:
+            status = "awaiting_credentials"
+            display_status = "Adapter Installed (Awaiting Production Credentials)"
+        else:
+            status = "unconfigured"
+            display_status = "Adapter Installed (Unconfigured)"
+
         return {
             "adapter_installed": True,
             "configuration_complete": configured,
             "base_url_set": has_url,
             "credentials_set": has_key,
             "auth_scheme": self.auth_scheme,
-            "status": "ready" if configured else ("awaiting_credentials" if has_url else "unconfigured"),
-            "display_status": "Adapter Configured - NIPOST Two-Stage" if configured else "Adapter Installed (Awaiting Production Credentials)",
+            "connectivity_healthy": False,
+            "authentication_verified": False,
+            "contract_verified": False,
+            "production_authorized": False,
+            "status": status,
+            "display_status": display_status,
         }
 
     def check_health(self) -> Dict[str, Any]:
@@ -135,13 +157,16 @@ class NIPOSTClient:
             "Accept": "application/json",
             "User-Agent": f"PostcodeLink-Nigeria/{settings.VERSION}",
         }
+        if self.auth_scheme == "none":
+            return headers
+
         if self.api_key:
             if self.auth_scheme in ("api_key", "api_key_header", "x-api-key"):
                 headers["x-api-key"] = self.api_key
             elif self.auth_scheme == "both":
                 headers["Authorization"] = f"Bearer {self.api_key}"
                 headers["x-api-key"] = self.api_key
-            else:
+            elif self.auth_scheme == "bearer":
                 headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
@@ -529,28 +554,41 @@ class NIPOSTClient:
                     except Exception:
                         data = None
 
-                    # If response is machine-readable JSON indicating a postcode was not found
+                    # Strict machine-readable postcode-not-found contract
                     if isinstance(data, dict):
-                        is_not_found = (
-                            data.get("valid") is False
-                            or data.get("status") in ("NOT_FOUND", "not_found", "error")
-                            or "not found" in str(data.get("error", "")).lower()
-                            or "not found" in str(data.get("message", "")).lower()
-                            or "unregistered" in str(data.get("message", "")).lower()
-                        )
-                        p_field = str(data.get("postcode") or data.get("code") or "")
-                        norm_req = clean_code.replace("-", "").replace(" ", "").upper()
-                        norm_p = p_field.replace("-", "").replace(" ", "").upper()
-                        # If echoed postcode matches or is explicitly stated as invalid/absent
-                        if is_not_found and (not norm_p or norm_p == norm_req):
-                            return NIPOSTLookupResult(
-                                status=NIPOSTLookupStatus.NOT_FOUND,
-                                http_status=404,
-                                data=data,
-                                error_message=data.get("message") or f"Postcode '{clean_code}' not found in official national directory.",
+                        raw_msg = str(data.get("message") or data.get("error") or "").lower()
+                        is_generic_route_error = any(phrase in raw_msg for phrase in [
+                            "route not found", "endpoint not found", "path not found",
+                            "cannot get", "cannot post", "cannot find /", "url not found",
+                            "resource not found", "no route to", "not found: /"
+                        ])
+
+                        if not is_generic_route_error:
+                            err_code = str(data.get("error_code") or data.get("error") or data.get("code") or "").strip().upper()
+                            status_val = str(data.get("status", "")).strip().upper()
+
+                            p_field = data.get("postcode") or data.get("code")
+                            norm_req = clean_code.replace("-", "").replace(" ", "").upper()
+                            norm_p = str(p_field).replace("-", "").replace(" ", "").upper() if isinstance(p_field, str) and p_field else None
+
+                            has_valid_false = (data.get("valid") is False and (norm_p == norm_req or norm_p is None))
+                            has_doc_err_code = (
+                                err_code in ("POSTCODE_NOT_FOUND", "ERR_POSTCODE_NOT_FOUND")
+                                or (err_code == "NOT_FOUND" and (norm_p == norm_req or norm_p is None))
+                                or (status_val in ("POSTCODE_NOT_FOUND", "NOT_FOUND") and (norm_p == norm_req or norm_p is None))
+                                or ("postcode" in raw_msg and "not found" in raw_msg and (norm_p == norm_req or norm_p is None))
+                                or ("unregistered" in raw_msg and (norm_p == norm_req or norm_p is None))
                             )
 
-                    # Otherwise, it's a generic HTML 404 or missing route error
+                            if (has_valid_false or has_doc_err_code) and (norm_p == norm_req or data.get("valid") is False):
+                                return NIPOSTLookupResult(
+                                    status=NIPOSTLookupStatus.NOT_FOUND,
+                                    http_status=404,
+                                    data=data,
+                                    error_message=data.get("message") or f"Postcode '{clean_code}' not found in official national directory.",
+                                )
+
+                    # Otherwise, it's a generic HTML 404, ambiguous error, or missing route error
                     return NIPOSTLookupResult(
                         status=NIPOSTLookupStatus.UNAVAILABLE,
                         http_status=404,
@@ -585,15 +623,13 @@ class NIPOSTClient:
         Stage 1: NIPOST Validator -> verifies directory existence.
         Stage 2: NIPOST Autofill -> retrieves official administrative metadata.
 
-        Returns:
-            (status, record_data, error_message, verification_method)
-            where verification_method is one of:
-            - 'validator_autofill_pipeline': existence AND metadata verified by NIPOST
-            - 'validator': existence verified by NIPOST, but metadata absent
-            - 'failed': verification did not succeed
+        Strict contract:
+        - Validator MUST succeed (status=FOUND) before Autofill is ever queried or can contribute to verification.
+        - If Validator returns NOT_FOUND, INVALID_INPUT, UNAUTHORIZED, UNAVAILABLE, or INVALID_RESPONSE,
+          the pipeline halts immediately and fails closed with Validator's exact status.
+        - Autofill cannot override or bypass a failed Validator stage.
         """
         clean_code = (code or "").strip().upper()
-        # Enforce configuration completeness (base_url AND api_key, or mock transport)
         is_ready = bool(self.configuration_complete or self.transport is not None)
         if not is_ready or not clean_code:
             return (
@@ -606,37 +642,27 @@ class NIPOSTClient:
         # Stage 1: Existence check via Validator
         val_res = self.validate_postcode(clean_code)
 
-        # Authoritative failure at Stage 1 fails immediately
-        if val_res.status in (NIPOSTLookupStatus.NOT_FOUND, NIPOSTLookupStatus.INVALID_INPUT):
-            return val_res.status, val_res.data, val_res.error_message, "validator"
+        # Fail closed immediately if Stage 1 does not return FOUND
+        if val_res.status != NIPOSTLookupStatus.FOUND:
+            ret_data = val_res.data if val_res.status == NIPOSTLookupStatus.INVALID_INPUT else None
+            return val_res.status, ret_data, val_res.error_message, "validator"
 
-        # Stage 2: Metadata retrieval via Autofill / Lookup
+        # Stage 2: Metadata retrieval via Autofill (ONLY invoked after Validator confirms existence)
         lookup_res = self.lookup_postcode(clean_code)
 
-        if val_res.status == NIPOSTLookupStatus.FOUND:
-            if lookup_res.status == NIPOSTLookupStatus.FOUND and lookup_res.data:
-                data = dict(lookup_res.data)
-                if data.get("area") and data.get("state"):
-                    data["service"] = "autofill"
-                    data["verification_method"] = "validator_autofill_pipeline"
-                    return NIPOSTLookupStatus.FOUND, data, None, "validator_autofill_pipeline"
-            # Validator verified existence, but Autofill did not return full metadata
-            data = dict(val_res.data or {"code": clean_code})
-            data["service"] = "validator"
-            data["verification_method"] = "validator"
-            data["valid"] = True
-            return NIPOSTLookupStatus.FOUND, data, None, "validator"
-
-        # If validator returned UNAVAILABLE/UNAUTHORIZED/INVALID_RESPONSE (e.g. mock or endpoint fallback)
         if lookup_res.status == NIPOSTLookupStatus.FOUND and lookup_res.data:
             data = dict(lookup_res.data)
-            method = "validator_autofill_pipeline" if (data.get("area") and data.get("state")) else "validator"
-            data["verification_method"] = method
-            return NIPOSTLookupStatus.FOUND, data, None, method
+            if data.get("area") and data.get("state"):
+                data["service"] = "autofill"
+                data["verification_method"] = "validator_autofill_pipeline"
+                return NIPOSTLookupStatus.FOUND, data, None, "validator_autofill_pipeline"
 
-        status = val_res.status if val_res.status != NIPOSTLookupStatus.UNAVAILABLE else lookup_res.status
-        err = lookup_res.error_message or val_res.error_message
-        return status, None, err, "failed"
+        # Validator confirmed existence, but Autofill did not return complete metadata -> Partial Verification
+        data = dict(val_res.data or {"code": clean_code})
+        data["service"] = "validator"
+        data["verification_method"] = "validator"
+        data["valid"] = True
+        return NIPOSTLookupStatus.FOUND, data, None, "validator"
 
 
     def validate_address(
