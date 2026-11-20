@@ -50,8 +50,10 @@ def test_evidence_persistence_failure_strict_mode_cleanse_raises_503():
     )
 
     try:
+        orch_res = (NIPOSTLookupStatus.FOUND, mock_live_result.data, None, "validator_autofill_pipeline")
         with patch.object(NIPOSTClient, "is_configured", True), \
-             patch.object(NIPOSTClient, "lookup_postcode", return_value=mock_live_result):
+             patch.object(NIPOSTClient, "lookup_postcode", return_value=mock_live_result), \
+             patch.object(NIPOSTClient, "orchestrated_verify", return_value=orch_res):
             with patch.object(db, "commit", side_effect=RuntimeError("Disk I/O error or constraint failure")):
                 with patch.object(db, "rollback") as mock_rollback:
                     with pytest.raises(HTTPException) as exc_info:
@@ -92,8 +94,10 @@ def test_evidence_persistence_failure_non_strict_cleanse_demotes_to_local_refere
     )
 
     try:
+        orch_res = (NIPOSTLookupStatus.FOUND, mock_live_result.data, None, "validator_autofill_pipeline")
         with patch.object(NIPOSTClient, "is_configured", True), \
-             patch.object(NIPOSTClient, "lookup_postcode", return_value=mock_live_result):
+             patch.object(NIPOSTClient, "lookup_postcode", return_value=mock_live_result), \
+             patch.object(NIPOSTClient, "orchestrated_verify", return_value=orch_res):
             with patch.object(db, "commit", side_effect=RuntimeError("Transient DB connection drop")):
                 with patch.object(db, "rollback") as mock_rollback:
                     res = cleanse_address(
@@ -141,8 +145,10 @@ def test_evidence_persistence_failure_strict_mode_lookup_raises_503():
     )
 
     try:
+        orch_res = (NIPOSTLookupStatus.FOUND, mock_live_result.data, None, "validator_autofill_pipeline")
         with patch.object(NIPOSTClient, "is_configured", True), \
-             patch.object(NIPOSTClient, "lookup_postcode", return_value=mock_live_result):
+             patch.object(NIPOSTClient, "lookup_postcode", return_value=mock_live_result), \
+             patch.object(NIPOSTClient, "orchestrated_verify", return_value=orch_res):
             with patch.object(db, "commit", side_effect=RuntimeError("DB write failure")):
                 with patch.object(db, "rollback") as mock_rollback:
                     with pytest.raises(HTTPException) as exc_info:
@@ -180,8 +186,10 @@ def test_evidence_persistence_failure_non_strict_lookup_demotes_to_local_referen
     )
 
     try:
+        orch_res = (NIPOSTLookupStatus.FOUND, mock_live_result.data, None, "validator_autofill_pipeline")
         with patch.object(NIPOSTClient, "is_configured", True), \
-             patch.object(NIPOSTClient, "lookup_postcode", return_value=mock_live_result):
+             patch.object(NIPOSTClient, "lookup_postcode", return_value=mock_live_result), \
+             patch.object(NIPOSTClient, "orchestrated_verify", return_value=orch_res):
             with patch.object(db, "commit", side_effect=RuntimeError("DB write failure")):
                 with patch.object(db, "rollback") as mock_rollback:
                     res = execute_postcode_lookup(
@@ -225,8 +233,10 @@ def test_dataset_version_integrity_cleanse_omits_fabricated_version():
     )
 
     try:
+        orch_res = (NIPOSTLookupStatus.FOUND, mock_live_result.data, None, "validator_autofill_pipeline")
         with patch.object(NIPOSTClient, "is_configured", True), \
-             patch.object(NIPOSTClient, "lookup_postcode", return_value=mock_live_result):
+             patch.object(NIPOSTClient, "lookup_postcode", return_value=mock_live_result), \
+             patch.object(NIPOSTClient, "orchestrated_verify", return_value=orch_res):
             res = cleanse_address(
                 address="Plot 10 Adeola Odeku, Victoria Island, Lagos",
                 postcode_hint="101233",
@@ -266,8 +276,10 @@ def test_dataset_version_integrity_lookup_omits_fabricated_version():
     )
 
     try:
+        orch_res = (NIPOSTLookupStatus.FOUND, mock_live_result.data, None, "validator_autofill_pipeline")
         with patch.object(NIPOSTClient, "is_configured", True), \
-             patch.object(NIPOSTClient, "lookup_postcode", return_value=mock_live_result):
+             patch.object(NIPOSTClient, "lookup_postcode", return_value=mock_live_result), \
+             patch.object(NIPOSTClient, "orchestrated_verify", return_value=orch_res):
             res = execute_postcode_lookup(
                 db=db,
                 code="101233",
@@ -301,8 +313,10 @@ def test_dataset_version_preserved_when_provided_by_upstream():
     )
 
     try:
+        orch_res = (NIPOSTLookupStatus.FOUND, mock_live_result.data, None, "validator_autofill_pipeline")
         with patch.object(NIPOSTClient, "is_configured", True), \
-             patch.object(NIPOSTClient, "lookup_postcode", return_value=mock_live_result):
+             patch.object(NIPOSTClient, "lookup_postcode", return_value=mock_live_result), \
+             patch.object(NIPOSTClient, "orchestrated_verify", return_value=orch_res):
             cleanse_res = cleanse_address(
                 address="Plot 10 Adeola Odeku, Victoria Island, Lagos",
                 postcode_hint="101233",

@@ -356,9 +356,9 @@ def test_coverage_evidence_deduplication():
     r1 = PostcodeDirectory(code="100001", area="Ikeja", state="Lagos", lga="Ikeja", lat=6.61, lng=3.35)
 
     # 3 duplicate valid evidence rows for the same code
-    ev1 = VerificationEvidence(postcode="100001", provider="NIPOST", status="verified", verification_method="validator", response_hash="a"*64, valid_until=now_utc + timedelta(days=5), is_active=True)
-    ev2 = VerificationEvidence(postcode="100001", provider="NIPOST", status="verified", verification_method="validator", response_hash="b"*64, valid_until=now_utc + timedelta(days=10), is_active=True)
-    ev3 = VerificationEvidence(postcode="100001", provider="NIPOST", status="verified", verification_method="validator", response_hash="c"*64, valid_until=now_utc + timedelta(days=15), is_active=True)
+    ev1 = VerificationEvidence(postcode="100001", provider="NIPOST", status="verified", verification_method="validator_autofill_pipeline", response_hash="a"*64, valid_until=now_utc + timedelta(days=5), is_active=True)
+    ev2 = VerificationEvidence(postcode="100001", provider="NIPOST", status="verified", verification_method="validator_autofill_pipeline", response_hash="b"*64, valid_until=now_utc + timedelta(days=10), is_active=True)
+    ev3 = VerificationEvidence(postcode="100001", provider="NIPOST", status="verified", verification_method="validator_autofill_pipeline", response_hash="c"*64, valid_until=now_utc + timedelta(days=15), is_active=True)
 
     def mock_query(model):
         q = MagicMock()

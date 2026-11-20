@@ -54,7 +54,7 @@ export function Sidebar({
         .join("")
         .toUpperCase()
         .slice(0, 2)
-    : "PL";
+    : "AU";
 
   const workspaceInitial = profile?.business_name
     ? profile.business_name[0].toUpperCase()
@@ -183,7 +183,7 @@ export function Sidebar({
       <div className="profile">
         <div className="avatar">{userInitials}</div>
         <div>
-          <b>{profile?.full_name || "Godwin Simeon"}</b>
+          <b>{profile?.full_name || "Account User"}</b>
           <small>{profile?.role ? `${profile.role.toUpperCase()} User` : "Operations Admin"}</small>
         </div>
         <ChevronDown size={14} color="#94a3b8" />

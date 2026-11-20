@@ -109,22 +109,21 @@ def test_database_backed_official_verified_record_returns_verified():
             db.commit()
 
         # Provide valid audit evidence backing the official record
-        ev = db.query(VerificationEvidence).filter(VerificationEvidence.postcode == official_code).first()
-        if not ev:
-            ev = VerificationEvidence(
-                postcode=official_code,
-                provider="NIPOST",
-                provider_reference_id="NIPOST-REF-109777-TEST",
-                verification_method="validator_autofill_pipeline",
-                dataset_version="2026.1",
-                response_hash="abc123hash",
-                status="verified",
-                address_metadata_source="nipost_autofill",
-                valid_until=default_valid_until(),
-                is_active=True,
-            )
-            db.add(ev)
-            db.commit()
+        db.query(VerificationEvidence).filter(VerificationEvidence.postcode == official_code).delete()
+        ev = VerificationEvidence(
+            postcode=official_code,
+            provider="NIPOST",
+            provider_reference_id="NIPOST-REF-109777-TEST",
+            verification_method="validator_autofill_pipeline",
+            dataset_version="2026.1",
+            response_hash="a" * 64,
+            status="verified",
+            address_metadata_source="nipost_autofill",
+            valid_until=default_valid_until(),
+            is_active=True,
+        )
+        db.add(ev)
+        db.commit()
 
         res = cleanse_address(
             address="Plot 10, Official FMCIDE Pilot Tech Zone, Lagos",
@@ -369,6 +368,17 @@ def test_execute_postcode_lookup_handles_validator_only_payload_without_key_erro
             "service": "validator",
         },
     )
+    mock_client.orchestrated_verify.return_value = (
+        NIPOSTLookupStatus.FOUND,
+        {
+            "code": "100001",
+            "valid": True,
+            "dataset_version": "2026.1",
+            "service": "validator",
+        },
+        None,
+        "validator",
+    )
 
     db = SessionLocal()
     try:
@@ -409,8 +419,15 @@ def test_cleanse_address_invokes_nipost_and_discloses_live_verification():
         },
     )
 
+    orch_live = (
+        NIPOSTLookupStatus.FOUND,
+        live_result.data,
+        None,
+        "validator_autofill_pipeline",
+    )
     with patch("backend.app.services.nipost_client.NIPOSTClient.is_configured", True), \
-         patch("backend.app.services.nipost_client.NIPOSTClient.lookup_postcode", return_value=live_result):
+         patch("backend.app.services.nipost_client.NIPOSTClient.lookup_postcode", return_value=live_result), \
+         patch("backend.app.services.nipost_client.NIPOSTClient.orchestrated_verify", return_value=orch_live):
         resp = client.post("/api/v1/postcodes/cleanse", json={
             "address": "12 Broad Street, Marina, Lagos",
             "postcode": "100001",
@@ -441,8 +458,15 @@ def test_cleanse_address_strict_mode_fails_closed_when_nipost_unavailable():
         error_message="Gateway timeout connecting to upstream NIPOST.",
     )
 
+    orch_unavailable = (
+        NIPOSTLookupStatus.UNAVAILABLE,
+        None,
+        "Official NIPOST API unavailable: Gateway timeout connecting to upstream NIPOST.",
+        "failed",
+    )
     with patch("backend.app.services.nipost_client.NIPOSTClient.is_configured", True), \
-         patch("backend.app.services.nipost_client.NIPOSTClient.lookup_postcode", return_value=unavailable_result):
+         patch("backend.app.services.nipost_client.NIPOSTClient.lookup_postcode", return_value=unavailable_result), \
+         patch("backend.app.services.nipost_client.NIPOSTClient.orchestrated_verify", return_value=orch_unavailable):
         resp = client.post("/api/v1/postcodes/cleanse", json={
             "address": "12 Broad Street, Marina, Lagos",
             "postcode": "100001",
@@ -465,8 +489,15 @@ def test_cleanse_address_fallback_discloses_upstream_failure():
         error_message="Gateway connection reset.",
     )
 
+    orch_unavailable = (
+        NIPOSTLookupStatus.UNAVAILABLE,
+        None,
+        "Official NIPOST API unavailable: Gateway timeout connecting to upstream NIPOST.",
+        "failed",
+    )
     with patch("backend.app.services.nipost_client.NIPOSTClient.is_configured", True), \
-         patch("backend.app.services.nipost_client.NIPOSTClient.lookup_postcode", return_value=unavailable_result):
+         patch("backend.app.services.nipost_client.NIPOSTClient.lookup_postcode", return_value=unavailable_result), \
+         patch("backend.app.services.nipost_client.NIPOSTClient.orchestrated_verify", return_value=orch_unavailable):
         resp = client.post("/api/v1/postcodes/cleanse", json={
             "address": "12 Broad Street, Marina, Lagos",
             "postcode": "100001",

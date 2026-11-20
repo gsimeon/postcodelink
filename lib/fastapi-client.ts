@@ -141,6 +141,8 @@ export interface FastAPIAnalytics {
   total_customers: number;
 }
 
+export type PostcodeRecord = PostcodeDirectoryEntry;
+
 export interface PostcodeDirectoryEntry {
   code: string;
   area: string | null;
@@ -188,6 +190,8 @@ export interface PostcodeLookupResult {
   address_metadata_source?: string;
   valid_until?: string;
 }
+
+export type VerificationMode = "local_standardization" | "nipost_validate" | "nipost_strict";
 
 export interface CleanseResult {
   original_address: string;
@@ -254,6 +258,8 @@ export interface CoverageReport {
   national_digital_postcode_records?: number;
   local_demonstration_fixtures?: number;
   digital_building_level_records: number;
+  dataset_source?: string;
+  source?: string;
   upstream_integration: {
     adapter_installed: boolean;
     configuration_complete: boolean;

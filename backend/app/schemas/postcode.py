@@ -170,4 +170,6 @@ class CoverageReportResponse(BaseModel):
     national_digital_postcode_records: int = 0
     local_demonstration_fixtures: int = 0
     digital_building_level_records: int = 0
+    dataset_source: str = "database_directory"
+    source: Optional[str] = "database_directory"
     upstream_integration: Dict[str, Any]

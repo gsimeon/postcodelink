@@ -16,11 +16,9 @@ from backend.app.services.postcode_service import (
     find_postcodes,
     cleanse_address,
     get_postcode_coverage_report,
+    record_verification_evidence,
 )
 from backend.app.services.nipost_client import get_nipost_client, NIPOSTClient, NIPOSTLookupStatus
-
-_ORIGINAL_LOOKUP_POSTCODE = NIPOSTClient.lookup_postcode
-_ORIGINAL_VALIDATE_POSTCODE = NIPOSTClient.validate_postcode
 from backend.app.routers.api_keys import get_api_key_merchant
 from backend.app.core.rate_limiter import check_client_ip_rate_limit
 from backend.app.core.network import get_trusted_client_ip
@@ -82,25 +80,10 @@ def execute_postcode_lookup(
             )
 
     if client and client.is_configured and code:
-        from unittest.mock import MagicMock
-        # Detect legacy single-stage mocks where only lookup_postcode was patched
-        curr_lookup = getattr(client, "lookup_postcode", None)
-        curr_lookup_func = getattr(curr_lookup, "__func__", curr_lookup)
-        is_patched_lookup = (
-            isinstance(curr_lookup, MagicMock)
-            or (callable(curr_lookup) and curr_lookup_func is not _ORIGINAL_LOOKUP_POSTCODE)
-        )
-        curr_validate = getattr(client, "validate_postcode", None)
-        curr_validate_func = getattr(curr_validate, "__func__", curr_validate)
-        is_default_validate = (
-            callable(curr_validate) and curr_validate_func is _ORIGINAL_VALIDATE_POSTCODE
-        )
-
         orch = getattr(client, "orchestrated_verify", None)
-        has_mocked_lookup_only = is_patched_lookup and is_default_validate
-
-        if callable(orch) and not isinstance(orch, MagicMock) and not has_mocked_lookup_only:
-            nipost_status, live_res, nipost_err, ver_method = client.orchestrated_verify(code)
+        orch_res = orch(code) if callable(orch) else None
+        if isinstance(orch_res, tuple) and len(orch_res) == 4:
+            nipost_status, live_res, nipost_err, ver_method = orch_res
             res_status_val = nipost_status.value
         else:
             res = client.lookup_postcode(code)
@@ -133,47 +116,25 @@ def execute_postcode_lookup(
                     rec_area = rec_area or None
                     rec_state = rec_state or None
 
-            # Create VerificationEvidence if db available
-            ev_id = None
-            ev_valid_until = None
-            evidence_persisted = False
-            if db is not None:
-                try:
-                    import hashlib
-                    import json
-                    from backend.app.models.verification_evidence import VerificationEvidence, default_valid_until
-                    raw_bytes = json.dumps(live_res or {}, sort_keys=True).encode("utf-8")
-                    resp_hash = hashlib.sha256(raw_bytes).hexdigest()
-                    ev_valid_until = default_valid_until()
-                    ev_rec = VerificationEvidence(
-                        postcode=live_res.get("code") or code,
-                        provider="NIPOST",
-                        provider_reference_id=live_res.get("reference_id") or live_res.get("transaction_id"),
-                        verification_method=ver_method,
-                        dataset_version=upstream_version,
-                        response_hash=resp_hash,
-                        status="verified" if not is_validator else "partial",
-                        address_metadata_source=addr_metadata_source,
-                        valid_until=ev_valid_until,
+            # Record VerificationEvidence via dedicated transactional service
+            evidence_persisted, ev_id, ev_valid_until = record_verification_evidence(
+                db=db,
+                code=code,
+                live_res=live_res,
+                ver_method=ver_method,
+                upstream_version=upstream_version,
+                is_validator=is_validator,
+                addr_metadata_source=addr_metadata_source,
+            )
+            if strict and not evidence_persisted:
+                if db is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Database session required for official verification evidence persistence. Strict verification failed closed.",
                     )
-                    db.add(ev_rec)
-                    db.commit()
-                    db.refresh(ev_rec)
-                    ev_id = ev_rec.id
-                    evidence_persisted = True
-                except Exception as ev_err:
-                    db.rollback()
-                    logger.warning(f"Failed to persist VerificationEvidence audit record in lookup: {ev_err}")
-                    if strict:
-                        raise HTTPException(
-                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                            detail="Verification evidence audit record could not be persisted. Strict verification failed closed.",
-                        )
-                    evidence_persisted = False
-            elif strict:
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Database session required for official verification evidence persistence. Strict verification failed closed.",
+                    detail="Verification evidence audit record could not be persisted. Strict verification failed closed.",
                 )
 
             if not evidence_persisted:

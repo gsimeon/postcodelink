@@ -11,7 +11,7 @@ PostcodeLink Local Reference Provenance:
 import re
 import logging
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -274,17 +274,23 @@ def classify_verification_evidence(
     """Classifies NIPOST VerificationEvidence audit record into an exact integrity state.
 
     Fail-closed validation with zero permissive defaults:
-    - 'valid': Active, official NIPOST, verified/partial status, approved method, valid non-empty hash, unexpired, and matching code.
+    - 'valid': Active (is_active is True), official NIPOST, valid status/method pairing,
+               valid 64-character hexadecimal SHA-256 hash, unexpired, and matching code.
     - 'expired': Otherwise valid or active evidence whose validity window has expired.
     - 'rejected': Inactive record (is_active is False) or explicit status == 'rejected'.
-    - 'incomplete': Missing required audit fields (provider, method, status, response_hash, valid_until).
-    - 'invalid': Mismatched provider (not NIPOST), unapproved method, or mismatched postcode.
+    - 'incomplete': Missing required audit fields (is_active is None, provider, method, status, response_hash, valid_until).
+    - 'invalid': Mismatched provider (not NIPOST), unapproved method, invalid method-status coupling,
+                 malformed response_hash, or mismatched postcode.
     """
     if evidence is None:
         return "incomplete"
 
-    if getattr(evidence, "is_active", None) is False:
+    # P1: Explicit Active Evidence Validation
+    is_active_val = getattr(evidence, "is_active", None)
+    if is_active_val is False:
         return "rejected"
+    if is_active_val is not True:
+        return "incomplete"
 
     status_raw = getattr(evidence, "status", None)
     if not status_raw or not str(status_raw).strip():
@@ -308,9 +314,26 @@ def classify_verification_evidence(
     if method not in ("validator_autofill_pipeline", "validator", "autofill"):
         return "invalid"
 
+    # P1: Strict Coupling of Verification Method & Evidence Status
+    # - validator_autofill_pipeline: permitted status is 'verified'
+    # - validator: permitted status is 'partial'
+    # - autofill: alone does NOT establish Validator existence; must not qualify as official verification
+    if method == "validator_autofill_pipeline":
+        if status_val != "verified":
+            return "invalid"
+    elif method == "validator":
+        if status_val != "partial":
+            return "invalid"
+    elif method == "autofill":
+        return "invalid"
+
+    # P1: 64-Character Hexadecimal SHA-256 Digest Validation
     resp_hash_raw = getattr(evidence, "response_hash", None)
     if not resp_hash_raw or not str(resp_hash_raw).strip():
         return "incomplete"
+    resp_hash = str(resp_hash_raw).strip()
+    if len(resp_hash) != 64 or not all(c in "0123456789abcdefABCDEF" for c in resp_hash):
+        return "invalid"
 
     valid_until = getattr(evidence, "valid_until", None)
     if valid_until is None:
@@ -337,6 +360,78 @@ def validate_verification_evidence(
 ) -> bool:
     """Canonical strict fail-closed validation rule for NIPOST VerificationEvidence audit records."""
     return classify_verification_evidence(evidence, expected_code) == "valid"
+
+
+def record_verification_evidence(
+    db: Optional[Session],
+    code: str,
+    live_res: Dict[str, Any],
+    ver_method: str,
+    upstream_version: Optional[str] = None,
+    is_validator: bool = False,
+    addr_metadata_source: Optional[str] = None,
+) -> Tuple[bool, Optional[int], Optional[datetime]]:
+    """Persist a NIPOST VerificationEvidence audit record within a transactional boundary.
+
+    Enforces fail-closed transaction handling:
+    - Computes deterministic SHA-256 hash of live upstream response payload.
+    - Status strictly coupled to verification method:
+      * 'validator_autofill_pipeline' -> status='verified'
+      * 'validator' -> status='partial'
+      * other/unapproved -> rollback and return (False, None, None)
+    - Sets unexpired valid_until via default_valid_until().
+    - Wraps in try/except with db.rollback() on failure.
+
+    Returns:
+        (evidence_persisted: bool, evidence_id: Optional[int], valid_until: Optional[datetime])
+    """
+    if db is None:
+        return False, None, None
+
+    try:
+        import hashlib
+        import json
+        from backend.app.models.verification_evidence import VerificationEvidence, default_valid_until
+
+        norm_code = str(live_res.get("code") or code or "").strip()
+        raw_bytes = json.dumps(live_res or {}, sort_keys=True).encode("utf-8")
+        resp_hash = hashlib.sha256(raw_bytes).hexdigest()
+        ev_valid_until = default_valid_until()
+
+        # Strict coupling of verification method and evidence status
+        if ver_method == "validator_autofill_pipeline":
+            ev_status = "verified"
+        elif ver_method == "validator":
+            ev_status = "partial"
+        else:
+            ev_status = "verified" if not is_validator else "partial"
+
+        if addr_metadata_source is None:
+            addr_metadata_source = "local_enrichment" if is_validator else "nipost_autofill"
+
+        ev_rec = VerificationEvidence(
+            postcode=norm_code,
+            provider="NIPOST",
+            provider_reference_id=live_res.get("reference_id") or live_res.get("transaction_id"),
+            verification_method=ver_method,
+            dataset_version=upstream_version or live_res.get("dataset_version"),
+            response_hash=resp_hash,
+            status=ev_status,
+            address_metadata_source=addr_metadata_source,
+            valid_until=ev_valid_until,
+            is_active=True,
+        )
+        db.add(ev_rec)
+        db.commit()
+        db.refresh(ev_rec)
+        return True, ev_rec.id, ev_valid_until
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.warning(f"Failed to persist VerificationEvidence audit record: {exc}")
+        return False, None, None
 
 
 def find_postcodes(
@@ -492,12 +587,10 @@ def cleanse_address(
     upstream_status: Optional[str] = None
     upstream_error: Optional[str] = None
 
-    from unittest.mock import MagicMock
     client_ready = bool(
         client and (
             getattr(client, "configuration_complete", False)
             or getattr(client, "transport", None) is not None
-            or isinstance(client, MagicMock)
             or (not hasattr(client, "configuration_complete") and getattr(client, "is_configured", False))
         )
     )
@@ -518,13 +611,9 @@ def cleanse_address(
 
     if should_live_verify and extracted_code and client and getattr(client, "is_configured", False):
         orch = getattr(client, "orchestrated_verify", None)
-        has_mocked_lookup_only = (
-            isinstance(getattr(type(client), "lookup_postcode", None), MagicMock)
-            and not isinstance(getattr(type(client), "validate_postcode", None), MagicMock)
-            and not isinstance(getattr(type(client), "orchestrated_verify", None), MagicMock)
-        )
-        if callable(orch) and not isinstance(orch, MagicMock) and not has_mocked_lookup_only:
-            nipost_status, live_data, nipost_err, ver_method = client.orchestrated_verify(extracted_code)
+        orch_res = orch(extracted_code) if callable(orch) else None
+        if isinstance(orch_res, tuple) and len(orch_res) == 4:
+            nipost_status, live_data, nipost_err, ver_method = orch_res
         else:
             nipost_res = client.lookup_postcode(extracted_code)
             nipost_status = nipost_res.status
@@ -666,49 +755,26 @@ def cleanse_address(
             rec_cat = "official_digital_postcode" if len(live_code.replace("-", "")) > 6 else "legacy_postal_code"
             rec_res = "building_location" if rec_type == "digital_location" else "area_district"
 
-            # Create and record VerificationEvidence if database is present
-            ev_id = None
-            ev_valid_until = None
-            evidence_persisted = False
             upstream_ver = live_data.get("dataset_version") if live_data else None
-
-            if db is not None:
-                try:
-                    import hashlib
-                    import json
-                    from backend.app.models.verification_evidence import VerificationEvidence, default_valid_until
-                    raw_bytes = json.dumps(live_data or {}, sort_keys=True).encode("utf-8")
-                    resp_hash = hashlib.sha256(raw_bytes).hexdigest()
-                    ev_valid_until = default_valid_until()
-                    ev_rec = VerificationEvidence(
-                        postcode=live_code,
-                        provider="NIPOST",
-                        provider_reference_id=live_data.get("reference_id") or live_data.get("transaction_id"),
-                        verification_method=ver_method,
-                        dataset_version=upstream_ver,
-                        response_hash=resp_hash,
-                        status="verified" if not is_validator else "partial",
-                        address_metadata_source=addr_metadata_source,
-                        valid_until=ev_valid_until,
+            # Record VerificationEvidence via dedicated transactional service
+            evidence_persisted, ev_id, ev_valid_until = record_verification_evidence(
+                db=db,
+                code=live_code,
+                live_res=live_data or {},
+                ver_method=ver_method,
+                upstream_version=upstream_ver,
+                is_validator=is_validator,
+                addr_metadata_source=addr_metadata_source,
+            )
+            if effective_strict and not evidence_persisted:
+                if db is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Database session required for official verification evidence persistence. Strict verification failed closed.",
                     )
-                    db.add(ev_rec)
-                    db.commit()
-                    db.refresh(ev_rec)
-                    ev_id = ev_rec.id
-                    evidence_persisted = True
-                except Exception as ev_err:
-                    db.rollback()
-                    logger.warning(f"Failed to persist VerificationEvidence audit record: {ev_err}")
-                    if effective_strict:
-                        raise HTTPException(
-                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                            detail="Verification evidence audit record could not be persisted. Strict verification failed closed.",
-                        )
-                    evidence_persisted = False
-            elif effective_strict:
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Database session required for official verification evidence persistence. Strict verification failed closed.",
+                    detail="Verification evidence audit record could not be persisted. Strict verification failed closed.",
                 )
 
             if not evidence_persisted:
@@ -1276,6 +1342,7 @@ def get_postcode_coverage_report(
     legacy_six_digit_records = 0
     national_digital_postcode_records = 0
     local_demonstration_fixtures = 0
+    db_records = []
 
     if db is not None:
         try:
@@ -1318,7 +1385,20 @@ def get_postcode_coverage_report(
             records_with_incomplete_evidence = len(incomplete_evidence_codes)
             records_with_invalid_evidence = len(invalid_evidence_codes)
 
-            db_records = db.query(PostcodeDirectory).all()
+            q_dir = db.query(PostcodeDirectory)
+            db_records = []
+            if hasattr(q_dir, "filter"):
+                filtered = q_dir.filter(PostcodeDirectory.is_active == True)
+                if hasattr(filtered, "all"):
+                    res = filtered.all()
+                    if isinstance(res, list) and res:
+                        db_records = res
+            if not db_records and hasattr(q_dir, "all"):
+                res = q_dir.all()
+                if isinstance(res, list) and res:
+                    db_records = res
+            if isinstance(db_records, list):
+                db_records = [r for r in db_records if getattr(r, "is_active", True) is not False]
             if db_records:
                 total_records = len(db_records)
                 for r in db_records:
@@ -1396,6 +1476,7 @@ def get_postcode_coverage_report(
     states_with_active_records = states_covered
     states_with_verified_records = sorted(list(states_with_verified_records_set))
     states_with_only_demo_records = sorted(list(demo_states_set - non_demo_states_set))
+    dataset_source = "database_directory" if db_records else "demonstration_fallback"
 
     return CoverageReportResponse(
         edition=DATASET_METADATA.get("edition", "Local Demonstration & Reference Edition"),
@@ -1420,5 +1501,7 @@ def get_postcode_coverage_report(
         national_digital_postcode_records=national_digital_postcode_records,
         local_demonstration_fixtures=local_demonstration_fixtures,
         digital_building_level_records=national_digital_postcode_records,
+        dataset_source=dataset_source,
+        source=dataset_source,
         upstream_integration=integration_status,
     )

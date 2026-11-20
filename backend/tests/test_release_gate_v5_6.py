@@ -444,8 +444,18 @@ def test_strict_nipost_verification_fails_closed(monkeypatch):
             error_message="Invalid API Key credentials",
         )
 
+    def mock_orchestrated_unauthorized(self, code: str):
+        return (
+            NIPOSTLookupStatus.UNAUTHORIZED,
+            None,
+            "Invalid API Key credentials",
+            "failed",
+        )
+
     monkeypatch.setattr(NIPOSTClient, "is_configured", True)
     monkeypatch.setattr(NIPOSTClient, "lookup_postcode", mock_lookup_unauthorized)
+    monkeypatch.setattr(NIPOSTClient, "validate_postcode", mock_lookup_unauthorized)
+    monkeypatch.setattr(NIPOSTClient, "orchestrated_verify", mock_orchestrated_unauthorized)
 
     # With strict=true: must return HTTP 502 Bad Gateway
     res_strict = client.get("/api/v1/postcodes/lookup?code=FC-02-A09-DB-09&strict=true")

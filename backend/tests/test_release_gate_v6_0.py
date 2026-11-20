@@ -1709,8 +1709,16 @@ def test_nipost_upstream_error_sanitization_prevents_leakage():
         assert "The official NIPOST verification gateway timed out." in res_timeout.error_message
 
     # 3. API endpoint integration test: ensure public JSON response does not leak internal info
+    orch_err_res = (
+        NIPOSTLookupStatus.UNAVAILABLE,
+        None,
+        "The official NIPOST verification gateway is temporarily unavailable.",
+        "failed",
+    )
     with patch.object(NIPOSTClient, "is_configured", True):
-        with patch.object(NIPOSTClient, "lookup_postcode", return_value=res):
+        with patch.object(NIPOSTClient, "lookup_postcode", return_value=res), \
+             patch.object(NIPOSTClient, "validate_postcode", return_value=res), \
+             patch.object(NIPOSTClient, "orchestrated_verify", return_value=orch_err_res):
             # Normal lookup endpoint (with fallback)
             resp = client.get("/api/v1/postcodes/lookup?code=100001")
             assert resp.status_code == 200
