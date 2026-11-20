@@ -108,7 +108,7 @@ export function CreateDeliveryModal({
   // Trigger evaluation when address or state changes
   useEffect(() => {
     evaluateVerification(destinationAddress, state, postcode);
-  }, [destinationAddress, state, evaluateVerification]);
+  }, [destinationAddress, state, postcode, evaluateVerification]);
 
   // Handle area selector change
   const handleAreaChange = (selectedArea: string) => {

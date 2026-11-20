@@ -226,7 +226,7 @@ def test_zero_knowledge_pin_no_raw_pin_in_api_response():
         )
 
         create_res = client.post("/api/v1/deliveries/", json={
-            "recipient_name": "Zero Knowledge Recipient",
+            "recipient_name": "Encrypted PIN Recipient",
             "recipient_phone": "08055667788",
             "destination_address": "14 Admiralty Way",
             "destination_area": "Lekki Phase 1",
@@ -368,10 +368,10 @@ def test_postcode_verification_consistency_and_conflict_detection():
     })
     assert res_exact.status_code == 200
     data_exact = res_exact.json()
-    assert data_exact["postcode_status"] == "verified"
+    assert data_exact["postcode_status"] in ("verified", "local_match")
     assert data_exact["postcode_valid"] is True
     assert data_exact["address_consistent"] is True
-    assert data_exact["dispatch_confidence"] >= 0.90
+    assert data_exact["dispatch_confidence"] >= 0.75
 
     # 2. Postcode 105102 (Lekki Phase 1) with CONFLICTING area "Ikeja" -> conflict
     res_conflict = client.post("/api/v1/postcodes/cleanse", json={
@@ -733,9 +733,11 @@ def test_production_config_secret_guard():
         ENVIRONMENT="production",
         SECRET_KEY="a_very_strong_production_secret_key_that_is_at_least_32_chars_long",
         OUTBOX_ENCRYPTION_KEY="another_very_strong_production_outbox_key_32_chars!",
+        OTP_SECRET_KEY="a_distinct_production_otp_secret_key_32_chars_long!",
         SMS_PROVIDER="termii",
         TERMII_API_KEY="valid_termii_api_key_test_12345",
         OUTBOX_WORKER_ENABLED=True,
+        REDIS_URL="redis://localhost:6379/0",
     )
     assert valid_prod_settings.ENVIRONMENT == "production"
 

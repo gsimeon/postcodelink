@@ -54,6 +54,10 @@ class Delivery(Base):
     # Concurrency control & optimistic locking
     version = Column(Integer, nullable=False, default=1)
     
+    # Soft deletion & compliance retention
+    is_deleted = Column(Boolean, default=False, nullable=False, index=True)
+    deleted_at = Column(DateTime, nullable=True)
+
     estimated_delivery_time = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
@@ -61,5 +65,6 @@ class Delivery(Base):
     # Relationships
     merchant = relationship("Profile", back_populates="deliveries", foreign_keys=[merchant_id])
     assigned_operator = relationship("Operator", back_populates="deliveries", foreign_keys=[operator_id])
-    events = relationship("DeliveryEvent", back_populates="delivery", cascade="all, delete-orphan", order_by="DeliveryEvent.occurred_at.asc()")
+    # Permanent immutable audit retention: events are preserved independently of delivery lifecycle
+    events = relationship("DeliveryEvent", back_populates="delivery", cascade="save-update, merge", order_by="DeliveryEvent.occurred_at.asc()")
     outbox_notifications = relationship("NotificationOutbox", back_populates="delivery", cascade="all, delete-orphan")
