@@ -32,6 +32,7 @@ interface OverviewTabProps {
   onUpdateStatus: (deliveryId: string, newStatus: DeliveryStatus, note: string) => void;
   onAssignOperator: (deliveryId: string, operatorId: string, operatorName: string) => void;
   notice: string;
+  onVerifyOtp: (deliveryId: string, otp: string) => Promise<{ success: boolean; message: string }> | { success: boolean; message: string };
 }
 
 export function OverviewTab({
@@ -44,6 +45,7 @@ export function OverviewTab({
   onUpdateStatus,
   onAssignOperator,
   notice,
+  onVerifyOtp,
 }: OverviewTabProps) {
   const [query, setQuery] = useState("");
   const [selectedDelivery, setSelectedDelivery] = useState<Delivery | null>(null);
@@ -408,6 +410,7 @@ export function OverviewTab({
             const updated = deliveries.find((x) => x.id === id);
             if (updated) setSelectedDelivery({ ...updated, operatorId: opId, operatorName: opName });
           }}
+          onVerifyOtp={onVerifyOtp}
         />
       )}
     </div>

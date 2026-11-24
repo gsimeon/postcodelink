@@ -21,28 +21,37 @@ PostcodeLink is architected as two decoupled, enterprise-ready product modules s
 graph TD
     subgraph Foundation [Shared Postcode Intelligence Foundation]
         NIPOST[Official NIPOST Verification Gateway]
-        TAX[National Taxonomy & Address Cleanser]
-        SEC[Cryptographic Security Engine & Distributed Redis Cluster]
+        TAX[National Taxonomy & Address Standardisation]
+        SEC[Cryptographic Evidence Engine & Distributed Redis Cluster]
     end
 
-    subgraph ModuleA [Module 1: Postcode Intelligence Platform]
-        API_SUB[API Subscriptions & Tiered Metering]
-        MERCH_SDK[Merchant E-Commerce Plugins & Autocomplete]
-        ADDR_CLEAN[Address Standardization & Spatial Classification]
+    subgraph Domain1 [Domain 1: Postcode Intelligence Platform]
+        POSTCODE_SEARCH[Postcode Explorer & Address Cleanser]
+        BULK_VALIDATE[Bulk CSV Address Validation & Geo-Enrichment]
+        CHECKOUT_SDK[E-Commerce Checkout & Autocomplete Plugins]
     end
 
-    subgraph ModuleB [Module 2: Last-Mile Logistics Platform]
+    subgraph Domain2 [Domain 2: Developer Platform]
+        API_KEYS[Self-Service API Key Management]
+        QUOTAS[Tiered Monthly Quotas & Usage Telemetry]
+        DOCS[Developer Documentation & Integration Guides]
+    end
+
+    subgraph Domain3 [Domain 3: Last-Mile Logistics Operations]
         ORDER_DISP[Durable Outbox Dispatch & Fleet Assignment]
         COURIER_APP[Rider Manifest, Waybills & Live Dispatch Radar]
         POD[6-Digit OTP Proof-of-Delivery Verification]
     end
 
-    Foundation --> ModuleA
-    Foundation --> ModuleB
+    Foundation --> Domain1
+    Foundation --> Domain2
+    Foundation --> Domain3
 ```
 
-1. **Postcode Intelligence Platform**: Standalone API subscriptions, national digital postcode autocomplete, address standardization, and enterprise integration for e-commerce checkouts, banks, and utility providers without logistics overhead.
-2. **Last-Mile Delivery Platform**: Dedicated courier fleet management, merchant dispatch queues, interactive radar tracking, and fraud-proof PIN verification.
+1. **Shared Postcode Intelligence Foundation**: Core national address register, two-stage NIPOST gateway integration, spatial classification, cryptographic evidence generation, and distributed caching/rate-limiting infrastructure.
+2. **Developer Platform**: Independent commercial API product offering self-service registration, API key provisioning, versioned key rotation, monthly quota management, usage analytics, and interactive integration guides for enterprise software, fintech, and banking systems.
+3. **Postcode Intelligence & Address Validation**: Standalone web explorer, CSV bulk validation, address standardisation, and e-commerce checkout widgets for data verification without logistics overhead.
+4. **Last-Mile Logistics Operations**: Specialized delivery dispatch, courier fleet workload management, real-time customer tracking portal, and fraud-proof recipient PIN verification.
 
 ---
 

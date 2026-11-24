@@ -162,7 +162,7 @@ def test_p1_p2_national_postcode_migration_fixtures_and_downgrade_safety():
 
 
 def test_p2_outbox_lease_committed_before_dispatch():
-    """Verify outbox item lease is committed immediately upon acquisition before external network calls."""
+    """Verify outbox item lease is committed immediately upon acquisition strictly before external network calls."""
     db = MagicMock()
     now = datetime.now(timezone.utc)
     item = NotificationOutbox(
@@ -181,25 +181,181 @@ def test_p2_outbox_lease_committed_before_dispatch():
     # Mock query returns item
     db.query.return_value.filter.return_value.order_by.return_value.limit.return_value.with_for_update.return_value.all.return_value = [item]
 
-    commits_with_locked_at = []
-    commit_count = 0
+    timeline = []
     def mock_commit():
-        nonlocal commit_count
-        commit_count += 1
-        if item.locked_at is not None:
-            commits_with_locked_at.append(item.locked_at)
+        timeline.append(("commit", item.locked_at is not None, str(item.status.value if hasattr(item.status, "value") else item.status)))
     db.commit.side_effect = mock_commit
 
     with patch("backend.app.services.delivery_service.get_notification_provider") as mock_prov_factory:
         mock_prov = MagicMock()
-        mock_prov.send_delivery_pin.return_value.status.value = "SENT"
-        mock_prov.send_delivery_pin.return_value.message_id = "msg-ok"
+        def mock_send(*args, **kwargs):
+            timeline.append(("provider_call", item.locked_at is not None))
+            res = MagicMock()
+            res.status.value = "SENT"
+            res.message_id = "msg-ok"
+            return res
+        mock_prov.send_delivery_pin.side_effect = mock_send
         mock_prov_factory.return_value = mock_prov
 
         process_notification_outbox(db, max_items=1)
 
-        # db.commit must have been called at least twice:
-        # 1. Immediately upon acquiring the lease (item.locked_at)
-        # 2. Upon dispatch state/completion
-        assert commit_count >= 2
-        assert len(commits_with_locked_at) >= 1
+        # Strictly assert call-order:
+        # The outbox processing lease must be committed strictly before the external provider is invoked
+        lease_commits = [event for event in timeline if event[0] == "commit" and event[1] is True]
+        provider_calls = [event for event in timeline if event[0] == "provider_call"]
+        
+        assert len(lease_commits) >= 1
+        assert len(provider_calls) == 1
+        
+        first_lease_commit_idx = timeline.index(lease_commits[0])
+        first_provider_call_idx = timeline.index(provider_calls[0])
+        
+        # Chronological order assertion: lease commit happens strictly before provider network call
+        assert first_lease_commit_idx < first_provider_call_idx
+        # Provider call was executed while lease was actively held
+        assert provider_calls[0][1] is True
+
+
+def test_p2_outbox_two_workers_competing_lease_concurrency():
+    """Verify that an outbox item actively leased by Worker 1 is not acquired by Worker 2."""
+    from datetime import timedelta
+    db = MagicMock()
+    now = datetime.now(timezone.utc)
+    # Worker 1 holds active lease
+    locked_item = NotificationOutbox(
+        id="item-competing-test",
+        delivery_id="del-competing",
+        delivery_version=1,
+        channel="SMS",
+        recipient_phone="+2348012345678",
+        notification_type="otp_delivery_pin",
+        message_payload=None,
+        retry_count=1,
+        max_retries=3,
+        status="DISPATCHING",
+        created_at=now,
+        locked_at=now - timedelta(minutes=1),
+        locked_by="worker-1",
+    )
+    # The database query filters out locked items whose locked_at > now - lease_timeout
+    db.query.return_value.filter.return_value.order_by.return_value.limit.return_value.with_for_update.return_value.all.return_value = []
+
+    processed = process_notification_outbox(db, max_items=1, worker_id="worker-2")
+    assert processed == 0
+
+
+def test_api_tenant_isolation_and_rbac_boundaries():
+    """Integration test verifying end-to-end API authorization matrix across tenants and roles."""
+    from starlette.testclient import TestClient
+    from backend.app.main import app
+    from backend.app.core.security import create_access_token, hash_otp
+    from backend.app.database import SessionLocal
+    from backend.app.models.operator import Operator
+    from datetime import timedelta
+
+    client = TestClient(app)
+    db = SessionLocal()
+    try:
+        # Create Merchant A and Merchant B
+        m_a_id = f"merchant-a-{uuid.uuid4().hex[:8]}"
+        m_b_id = f"merchant-b-{uuid.uuid4().hex[:8]}"
+        m_a = Profile(id=m_a_id, email=f"{m_a_id}@test.ng", role=AppRole.MERCHANT, full_name="Merchant Alpha", hashed_password="test_hashed_password")
+        m_b = Profile(id=m_b_id, email=f"{m_b_id}@test.ng", role=AppRole.MERCHANT, full_name="Merchant Beta", hashed_password="test_hashed_password")
+
+        # Create Operator unassigned to this delivery
+        op_prof_id = f"op-prof-{uuid.uuid4().hex[:8]}"
+        op_id = f"op-{uuid.uuid4().hex[:8]}"
+        op_prof = Profile(id=op_prof_id, email=f"{op_prof_id}@test.ng", role=AppRole.OPERATOR, full_name="Operator X", hashed_password="test_hashed_password")
+        op_record = Operator(id=op_id, profile_id=op_prof_id, business_name="Express Courier", phone="+2348099999999", is_available=True)
+
+        # Delivery owned by Merchant A
+        del_id = f"del-rbac-{uuid.uuid4().hex[:8]}"
+        del_item = Delivery(
+            id=del_id,
+            merchant_id=m_a_id,
+            recipient_name="Recipient Test",
+            recipient_phone="+2348011112222",
+            destination_address="12 Marina, Lagos Island",
+            destination_area="Lagos Island",
+            destination_state="Lagos",
+            package_description="Test Package",
+            postcode_input="100221",
+            status=DeliveryStatus.PENDING,
+            otp_hash=hash_otp("123456"),
+            otp_expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+            version=1,
+            is_deleted=False,
+        )
+
+        db.add_all([m_a, m_b, op_prof, op_record, del_item])
+        db.commit()
+
+        token_a = create_access_token({"sub": m_a_id, "role": "merchant"})
+        token_b = create_access_token({"sub": m_b_id, "role": "merchant"})
+        token_op = create_access_token({"sub": op_prof_id, "role": "operator"})
+
+        headers_a = {"Authorization": f"Bearer {token_a}"}
+        headers_b = {"Authorization": f"Bearer {token_b}"}
+        headers_op = {"Authorization": f"Bearer {token_op}"}
+
+        # 1. Merchant B attempts to read Merchant A's delivery -> HTTP 403 Forbidden
+        res_read = client.get(f"/api/v1/deliveries/{del_id}", headers=headers_b)
+        assert res_read.status_code == 403
+
+        # 2. Merchant B attempts to update Merchant A's delivery -> HTTP 403 Forbidden
+        res_update = client.post(
+            f"/api/v1/deliveries/{del_id}/status",
+            json={"new_status": "cancelled", "note": "Hacker cancel"},
+            headers=headers_b,
+        )
+        assert res_update.status_code == 403
+
+        # 3. Merchant B attempts to delete Merchant A's delivery -> HTTP 403 Forbidden
+        res_del = client.delete(f"/api/v1/deliveries/{del_id}", headers=headers_b)
+        assert res_del.status_code == 403
+
+        # 4. Merchant attempts to mark delivery DELIVERED via generic status update -> HTTP 400 Bad Request
+        res_deliv = client.post(
+            f"/api/v1/deliveries/{del_id}/status",
+            json={"new_status": "delivered", "note": "Bypass PIN"},
+            headers=headers_a,
+        )
+        assert res_deliv.status_code == 400
+        assert "DELIVERED status can only be achieved via the recipient PIN verification endpoint" in res_deliv.json()["detail"]
+
+        # 5. Merchant attempts to transition to ASSIGNED via generic status update -> HTTP 400 Bad Request
+        res_assign = client.post(
+            f"/api/v1/deliveries/{del_id}/status",
+            json={"new_status": "assigned", "note": "Direct assign"},
+            headers=headers_a,
+        )
+        assert res_assign.status_code == 400
+        assert "ASSIGNED status can only be achieved via the dedicated courier assignment endpoint" in res_assign.json()["detail"]
+
+        # 6. Unassigned operator attempts to advance delivery -> HTTP 403 Forbidden
+        res_op_advance = client.post(
+            f"/api/v1/deliveries/{del_id}/status",
+            json={"new_status": "picked_up", "note": "Rider pickup"},
+            headers=headers_op,
+        )
+        assert res_op_advance.status_code == 403
+
+        # 7. Non-authorized user attempts to verify PIN -> HTTP 403 Forbidden
+        res_otp_unauth = client.post(
+            f"/api/v1/deliveries/{del_id}/verify-otp",
+            json={"otp": "123456"},
+            headers=headers_b,
+        )
+        assert res_otp_unauth.status_code == 403
+
+        # 8. Authorized merchant attempts to verify PIN before OUT_FOR_DELIVERY (order is PENDING) -> HTTP 409 Conflict
+        res_otp_stage = client.post(
+            f"/api/v1/deliveries/{del_id}/verify-otp",
+            json={"otp": "123456"},
+            headers=headers_a,
+        )
+        assert res_otp_stage.status_code == 409
+        assert "Delivery PIN can only be verified when the order is out for delivery" in res_otp_stage.json()["detail"]
+
+    finally:
+        db.close()

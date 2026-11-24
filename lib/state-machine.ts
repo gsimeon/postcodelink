@@ -50,3 +50,52 @@ export function validateStateTransition(
   return { valid: true };
 }
 
+export function mapFrontendToBackendStatus(status: DeliveryStatus): string {
+  switch (status) {
+    case 'pending':
+    case 'pending_assignment':
+    case 'draft':
+      return 'pending';
+    case 'assigned':
+      return 'assigned';
+    case 'picked_up':
+      return 'picked_up';
+    case 'in_transit':
+      return 'in_transit';
+    case 'out_for_delivery':
+      return 'out_for_delivery';
+    case 'delivered':
+      return 'delivered';
+    case 'cancelled':
+      return 'cancelled';
+    case 'failed':
+      return 'failed';
+    default:
+      throw new Error(`Unsupported delivery status: ${status}`);
+  }
+}
+
+export function mapBackendToFrontendStatus(apiStatus: string): DeliveryStatus {
+  switch (apiStatus) {
+    case 'pending':
+      return 'pending_assignment';
+    case 'assigned':
+      return 'assigned';
+    case 'picked_up':
+      return 'picked_up';
+    case 'in_transit':
+      return 'in_transit';
+    case 'out_for_delivery':
+      return 'out_for_delivery';
+    case 'delivered':
+      return 'delivered';
+    case 'cancelled':
+      return 'cancelled';
+    case 'failed':
+      return 'failed';
+    default:
+      return 'draft';
+  }
+}
+
+

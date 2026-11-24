@@ -34,6 +34,7 @@ interface DeliveriesTabProps {
   onUpdateStatus: (deliveryId: string, newStatus: DeliveryStatus, note: string) => void;
   onAssignOperator: (deliveryId: string, operatorId: string, operatorName: string) => void;
   onDeleteDelivery: (deliveryId: string) => void;
+  onVerifyOtp: (deliveryId: string, otp: string) => Promise<{ success: boolean; message: string }> | { success: boolean; message: string };
 }
 
 export function DeliveriesTab({
@@ -45,6 +46,7 @@ export function DeliveriesTab({
   onUpdateStatus,
   onAssignOperator,
   onDeleteDelivery,
+  onVerifyOtp,
 }: DeliveriesTabProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -442,6 +444,7 @@ export function DeliveriesTab({
             const updated = deliveries.find((x) => x.id === id);
             if (updated) setSelectedDelivery({ ...updated, operatorId: opId, operatorName: opName });
           }}
+          onVerifyOtp={onVerifyOtp}
         />
       )}
 

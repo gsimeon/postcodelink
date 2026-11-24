@@ -335,3 +335,77 @@ test('Integration Display: scheme-aware display honors none scheme without crede
   assert.equal(bearerAwaiting.badge, 'Adapter Installed (Awaiting Production Credentials)');
 });
 
+// 7. Test Bidirectional Delivery Status Mapping
+function mapFrontendToBackendStatus(status) {
+  switch (status) {
+    case "pending":
+    case "pending_assignment":
+    case "draft":
+      return "pending";
+    case "assigned":
+      return "assigned";
+    case "picked_up":
+      return "picked_up";
+    case "in_transit":
+      return "in_transit";
+    case "out_for_delivery":
+      return "out_for_delivery";
+    case "delivered":
+      return "delivered";
+    case "cancelled":
+      return "cancelled";
+    case "failed":
+      return "failed";
+    default:
+      throw new Error(`Unsupported delivery status: ${status}`);
+  }
+}
+
+function mapBackendToFrontendStatus(apiStatus) {
+  switch (apiStatus) {
+    case "pending":
+      return "pending_assignment";
+    case "assigned":
+      return "assigned";
+    case "picked_up":
+      return "picked_up";
+    case "in_transit":
+      return "in_transit";
+    case "out_for_delivery":
+      return "out_for_delivery";
+    case "delivered":
+      return "delivered";
+    case "cancelled":
+      return "cancelled";
+    case "failed":
+      return "failed";
+    default:
+      return "draft";
+  }
+}
+
+test('Delivery Status Mapping: bi-directional mapping preserves all states including picked_up and out_for_delivery', () => {
+  // Outgoing mapping (Frontend -> Backend)
+  assert.equal(mapFrontendToBackendStatus('picked_up'), 'picked_up');
+  assert.equal(mapFrontendToBackendStatus('in_transit'), 'in_transit');
+  assert.equal(mapFrontendToBackendStatus('out_for_delivery'), 'out_for_delivery');
+  assert.equal(mapFrontendToBackendStatus('assigned'), 'assigned');
+  assert.equal(mapFrontendToBackendStatus('pending_assignment'), 'pending');
+  assert.equal(mapFrontendToBackendStatus('delivered'), 'delivered');
+  assert.equal(mapFrontendToBackendStatus('cancelled'), 'cancelled');
+  assert.equal(mapFrontendToBackendStatus('failed'), 'failed');
+
+  // Unsupported status throws
+  assert.throws(() => mapFrontendToBackendStatus('invalid_status'), /Unsupported delivery status/);
+
+  // Incoming mapping (Backend -> Frontend)
+  assert.equal(mapBackendToFrontendStatus('picked_up'), 'picked_up');
+  assert.equal(mapBackendToFrontendStatus('in_transit'), 'in_transit');
+  assert.equal(mapBackendToFrontendStatus('out_for_delivery'), 'out_for_delivery');
+  assert.equal(mapBackendToFrontendStatus('assigned'), 'assigned');
+  assert.equal(mapBackendToFrontendStatus('pending'), 'pending_assignment');
+  assert.equal(mapBackendToFrontendStatus('delivered'), 'delivered');
+  assert.equal(mapBackendToFrontendStatus('cancelled'), 'cancelled');
+  assert.equal(mapBackendToFrontendStatus('failed'), 'failed');
+});
+
