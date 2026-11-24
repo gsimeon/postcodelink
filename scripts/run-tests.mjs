@@ -409,3 +409,81 @@ test('Delivery Status Mapping: bi-directional mapping preserves all states inclu
   assert.equal(mapBackendToFrontendStatus('failed'), 'failed');
 });
 
+// 7. Canonical Postcode Format & 5-Tier Trust Classification
+function isWellFormedPostcode(code) {
+  if (!code || typeof code !== 'string') return false;
+  const trimmed = code.trim();
+  const isNumeric = /^\d{6}$/.test(trimmed);
+  const isDigital = /^[A-Z]{2}-\d{2}-[A-Z0-9]{3}-[A-Z0-9]{2}-\d{2}$/i.test(trimmed);
+  return isNumeric || isDigital;
+}
+
+function classifyPostcodeTrustTier(data, inputState) {
+  if (!data || !data.exists) {
+    return { status: 'unavailable', is_official: false };
+  }
+  if (data.source === 'live_nipost') {
+    if (inputState && data.state && !data.state.toLowerCase().includes(inputState.toLowerCase())) {
+      return { status: 'address_conflict', is_official: true };
+    }
+    if (!data.state || !data.lga) {
+      return { status: 'partial_verification', is_official: true };
+    }
+    return { status: 'officially_verified', is_official: true };
+  }
+  if (data.source === 'local_reference') {
+    if (inputState && data.state && !data.state.toLowerCase().includes(inputState.toLowerCase())) {
+      return { status: 'address_conflict', is_official: false };
+    }
+    return { status: 'local_match', is_official: false };
+  }
+  return { status: 'unavailable', is_official: false };
+}
+
+test('Canonical Postcode: validates 6-digit numeric and 15-character digital formats', () => {
+  // Conventional 6-digit codes
+  assert.equal(isWellFormedPostcode('100001'), true);
+  assert.equal(isWellFormedPostcode('900001'), true);
+  assert.equal(isWellFormedPostcode(' 500261 '), true);
+
+  // 15-character National Digital Postcodes
+  assert.equal(isWellFormedPostcode('FC-02-A09-DB-09'), true);
+  assert.equal(isWellFormedPostcode('LA-01-A04-IK-02'), true);
+
+  // Invalid formats
+  assert.equal(isWellFormedPostcode('12345'), false);
+  assert.equal(isWellFormedPostcode('1234567'), false);
+  assert.equal(isWellFormedPostcode('ABCDEF'), false);
+  assert.equal(isWellFormedPostcode('FC-02-INVALID'), false);
+  assert.equal(isWellFormedPostcode(''), false);
+  assert.equal(isWellFormedPostcode(null), false);
+});
+
+test('Trust Tier Classification: correctly evaluates 5-tier trust states and rejects synthetic defaults', () => {
+  // 1. Officially Verified
+  const t1 = classifyPostcodeTrustTier({ exists: true, source: 'live_nipost', state: 'Lagos', lga: 'Ikeja' }, 'Lagos');
+  assert.equal(t1.status, 'officially_verified');
+  assert.equal(t1.is_official, true);
+
+  // 2. Partial Verification (missing LGA or state - must NOT invent defaults)
+  const t2 = classifyPostcodeTrustTier({ exists: true, source: 'live_nipost', state: 'Lagos', lga: null });
+  assert.equal(t2.status, 'partial_verification');
+  assert.equal(t2.is_official, true);
+
+  // 3. Address Conflict (postcode maps to Lagos, but user input Abuja)
+  const t3 = classifyPostcodeTrustTier({ exists: true, source: 'live_nipost', state: 'Lagos', lga: 'Ikeja' }, 'Abuja');
+  assert.equal(t3.status, 'address_conflict');
+  assert.equal(t3.is_official, true);
+
+  // 4. Local Match (PostcodeLink reference dataset, not official government validation)
+  const t4 = classifyPostcodeTrustTier({ exists: true, source: 'local_reference', state: 'Lagos', lga: 'Ikeja' });
+  assert.equal(t4.status, 'local_match');
+  assert.equal(t4.is_official, false);
+
+  // 5. Unavailable / Not Found
+  const t5 = classifyPostcodeTrustTier({ exists: false });
+  assert.equal(t5.status, 'unavailable');
+  assert.equal(t5.is_official, false);
+});
+
+
