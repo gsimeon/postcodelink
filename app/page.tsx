@@ -56,7 +56,9 @@ function mapFastAPIDelivery(fd: FastAPIDelivery): Delivery {
   let mappedStatus: DeliveryStatus = "draft";
   if (fd.status === "pending") mappedStatus = "pending_assignment";
   else if (fd.status === "assigned") mappedStatus = "assigned";
-  else if (fd.status === "picked_up" || fd.status === "in_transit" || fd.status === "out_for_delivery") mappedStatus = "in_transit";
+  else if (fd.status === "picked_up") mappedStatus = "picked_up";
+  else if (fd.status === "in_transit") mappedStatus = "in_transit";
+  else if (fd.status === "out_for_delivery") mappedStatus = "out_for_delivery";
   else if (fd.status === "delivered") mappedStatus = "delivered";
   else if (fd.status === "cancelled") mappedStatus = "cancelled";
   else if (fd.status === "failed") mappedStatus = "failed";
@@ -643,6 +645,7 @@ export default function Home() {
           onClose={() => setSelectedInspectDelivery(null)}
           onUpdateStatus={handleUpdateStatus}
           onAssignOperator={handleAssignOperator}
+          onVerifyOtp={handleVerifyOtp}
         />
       )}
 

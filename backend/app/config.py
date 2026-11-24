@@ -3,7 +3,7 @@ import os
 import math
 import secrets
 from collections import Counter
-from typing import List, Any, Optional, Dict
+from typing import List, Any, Optional, Dict, ClassVar, Set
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -114,7 +114,7 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "PostcodeLink Nigeria API"
     VERSION: str = "1.2.0"
     API_V1_STR: str = "/api/v1"
-    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
+    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development").strip().lower()
     
     # Database URL: default SQLite, switchable to PostgreSQL via DATABASE_URL
     DATABASE_URL: str = "sqlite:///./postcodelink.db"
@@ -230,7 +230,7 @@ class Settings(BaseSettings):
     TRUSTED_PROXIES: List[str] = (
         [p.strip() for p in os.getenv("TRUSTED_PROXIES").split(",") if p.strip()]
         if os.getenv("TRUSTED_PROXIES") is not None
-        else (["127.0.0.1", "::1", "localhost", "testclient"] if os.getenv("ENVIRONMENT", "development") != "production" else [])
+        else (["127.0.0.1", "::1", "localhost", "testclient"] if os.getenv("ENVIRONMENT", "development").strip().lower() != "production" else [])
     )
 
     # SMS & WhatsApp Out-of-band Dispatch Gateway
@@ -238,6 +238,7 @@ class Settings(BaseSettings):
     TERMII_API_KEY: str = ""
     TERMII_SENDER_ID: str = "PostcodeLnk"
     TERMII_BASE_URL: str = os.getenv("TERMII_BASE_URL", "https://api.ng.termii.com")
+    TERMII_CHANNEL: str = os.getenv("TERMII_CHANNEL", "dnd")
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_FROM_NUMBER: str = ""
@@ -255,13 +256,24 @@ class Settings(BaseSettings):
     ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION: bool = os.getenv("ALLOW_IN_MEMORY_RATE_LIMIT_IN_PRODUCTION", "false").lower() in ["true", "1"]
     PUBLIC_DEMO_RATE_LIMIT_PER_MINUTE: int = int(os.getenv("PUBLIC_DEMO_RATE_LIMIT_PER_MINUTE", "15"))
 
+    ALLOWED_ENVIRONMENTS: ClassVar[Set[str]] = {"development", "test", "staging", "production"}
+
     @model_validator(mode="before")
     @classmethod
     def set_environment_defaults(cls, data: Any) -> Any:
-        """Default SEED_DEMO_DATA to True in non-production environments unless explicitly overridden."""
+        """Normalize ENVIRONMENT and fail closed on unknown environments."""
         if isinstance(data, dict):
-            env = data.get("ENVIRONMENT") or os.getenv("ENVIRONMENT", "development")
-            if env != "production" and "SEED_DEMO_DATA" not in data:
+            raw_env = data.get("ENVIRONMENT") or os.getenv("ENVIRONMENT", "development")
+            if not isinstance(raw_env, str):
+                raise ValueError("Fatal Configuration Error: ENVIRONMENT must be a string.")
+            normalized_env = raw_env.strip().lower()
+            if normalized_env not in cls.ALLOWED_ENVIRONMENTS:
+                raise ValueError(
+                    f"Fatal Configuration Error: Unknown ENVIRONMENT '{raw_env}'. "
+                    f"Allowed environments are: {', '.join(sorted(cls.ALLOWED_ENVIRONMENTS))}."
+                )
+            data["ENVIRONMENT"] = normalized_env
+            if normalized_env != "production" and "SEED_DEMO_DATA" not in data:
                 data["SEED_DEMO_DATA"] = True
         return data
 

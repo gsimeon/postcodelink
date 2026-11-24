@@ -141,10 +141,13 @@ class TermiiNotificationProvider(BaseNotificationProvider):
         api_key: str,
         sender_id: str = "PostcodeLnk",
         base_url: str = "https://api.ng.termii.com",
+        channel: Optional[str] = None,
         timeout: float = 10.0,
     ):
+        from backend.app.config import settings
         self.api_key = api_key
         self.sender_id = sender_id
+        self.channel = (channel or getattr(settings, "TERMII_CHANNEL", "dnd") or "dnd").strip()
         clean_base = (base_url or "https://api.ng.termii.com").strip().rstrip("/")
         if clean_base.endswith("/api/sms/send"):
             clean_base = clean_base[:-len("/api/sms/send")].rstrip("/")
@@ -191,7 +194,7 @@ class TermiiNotificationProvider(BaseNotificationProvider):
             "from": self.sender_id,
             "sms": message,
             "type": "plain",
-            "channel": "generic",
+            "channel": self.channel,
             "api_key": self.api_key,
         }
         if idempotency_key:
@@ -258,7 +261,7 @@ class TermiiNotificationProvider(BaseNotificationProvider):
             "from": self.sender_id,
             "sms": f"PostcodeLink Alert for order {delivery_id}: {status_message}",
             "type": "plain",
-            "channel": "generic",
+            "channel": self.channel,
             "api_key": self.api_key,
         }
         try:
@@ -772,6 +775,7 @@ def get_notification_provider(provider_type: Optional[str] = None) -> BaseNotifi
             api_key=settings.TERMII_API_KEY,
             sender_id=settings.TERMII_SENDER_ID,
             base_url=getattr(settings, "TERMII_BASE_URL", "https://api.ng.termii.com"),
+            channel=getattr(settings, "TERMII_CHANNEL", "dnd"),
         )
 
     if selected == "twilio" or (not selected and settings.TWILIO_ACCOUNT_SID):

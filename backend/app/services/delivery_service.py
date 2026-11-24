@@ -359,11 +359,19 @@ def update_delivery_status(db: Session, delivery_id: str, request: DeliveryStatu
     if not delivery:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delivery order not found.")
 
+    # Cross-tenant authorization check:
+    # Merchants may only modify deliveries belonging to their own merchant account
+    is_merchant_owner = delivery.merchant_id == current_user.id
+    if current_user.role == AppRole.MERCHANT and not is_merchant_owner:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Merchants cannot modify deliveries belonging to another merchant."
+        )
+
     # Idempotency check: no duplicate event if status is unchanged
     if delivery.status == request.new_status:
         return delivery
 
-    is_merchant_owner = delivery.merchant_id == current_user.id
     is_assigned_operator = False
     if current_user.role == AppRole.OPERATOR and delivery.operator_id:
         op = db.query(Operator).filter(Operator.profile_id == current_user.id).first()
@@ -371,6 +379,13 @@ def update_delivery_status(db: Session, delivery_id: str, request: DeliveryStatu
             is_assigned_operator = True
 
     # ROLE PERMISSION MATRIX (Enforce authorization prior to state progression)
+    # 0. ASSIGNED: Rejection rule - ASSIGNED status requires the dedicated courier assignment endpoint
+    if request.new_status == DeliveryStatus.ASSIGNED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ASSIGNED status can only be achieved via the dedicated courier assignment endpoint."
+        )
+
     # 1. DELIVERED: Rejection rule - DELIVERED status requires PIN verification endpoint
     if request.new_status == DeliveryStatus.DELIVERED:
         raise HTTPException(
@@ -891,6 +906,9 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
         # Ensure unique idempotency key is assigned for provider deduplication
         if not getattr(item, "idempotency_key", None):
             item.idempotency_key = f"outbox_{item.id}_{item.delivery_version}_{item.retry_count}"
+
+        # Persist lease acquisition immediately before external dispatch or reconciliation
+        db.commit()
 
         # Idempotent crash recovery guard:
         # If the item already has a provider_message_id recorded from prior provider acceptance before a DB crash,

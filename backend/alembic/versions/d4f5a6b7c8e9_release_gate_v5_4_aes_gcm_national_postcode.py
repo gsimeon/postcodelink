@@ -62,8 +62,8 @@ def upgrade() -> None:
             "lng": 7.4891,
             "postcode_type": "digital_location",
             "building_reference": "Federal Commerce House",
-            "verification_status": "official_verified",
-            "provenance": "NIPOST Official Digital Postcode Directory",
+            "verification_status": "local_reference",
+            "provenance": "PostcodeLink National Postcode Format Demonstration Reference",
             "dataset_version": "2026.1",
             "is_active": True,
         },
@@ -77,8 +77,8 @@ def upgrade() -> None:
             "lng": 3.3541,
             "postcode_type": "digital_location",
             "building_reference": "Plot 4 Ikeja Commercial Plaza",
-            "verification_status": "official_verified",
-            "provenance": "NIPOST Official Digital Postcode Directory",
+            "verification_status": "local_reference",
+            "provenance": "PostcodeLink National Postcode Format Demonstration Reference",
             "dataset_version": "2026.1",
             "is_active": True,
         },
@@ -97,7 +97,14 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
-    bind.execute(sa.text("DELETE FROM postcodes WHERE code IN ('FC-02-A09-DB-09', 'LA-01-A04-IK-02')"))
+    bind.execute(
+        sa.text(
+            "DELETE FROM postcodes "
+            "WHERE code IN ('FC-02-A09-DB-09', 'LA-01-A04-IK-02') "
+            "AND provenance IN ('PostcodeLink National Postcode Format Demonstration Reference', 'NIPOST Official Digital Postcode Directory') "
+            "AND dataset_version = '2026.1'"
+        )
+    )
 
     with op.batch_alter_table('notification_outbox') as batch_op:
         batch_op.drop_index('ix_notification_outbox_provider_message_id')
