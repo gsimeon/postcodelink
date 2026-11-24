@@ -41,6 +41,17 @@ def upgrade() -> None:
         )
         op.create_index("ix_verification_evidence_postcode", "verification_evidence", ["postcode"])
 
+    if "consumed_challenge_nonces" not in existing_tables:
+        op.create_table(
+            "consumed_challenge_nonces",
+            sa.Column("nonce", sa.String(length=64), nullable=False),
+            sa.Column("tracking_token", sa.String(length=64), nullable=False),
+            sa.Column("expires_at", sa.DateTime(), nullable=False),
+            sa.Column("consumed_at", sa.DateTime(), nullable=False),
+            sa.PrimaryKeyConstraint("nonce"),
+        )
+        op.create_index("ix_consumed_challenge_nonces_tracking_token", "consumed_challenge_nonces", ["tracking_token"])
+
     if dialect_name == "postgresql":
         op.execute("""
         CREATE OR REPLACE FUNCTION prevent_verification_evidence_tampering()

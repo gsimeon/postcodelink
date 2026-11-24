@@ -652,14 +652,30 @@ def test_challenge_key_separation_and_replay_rejection():
     assert key != settings.SECRET_KEY.encode("utf-8")
     assert key != hashlib.sha256(settings.SECRET_KEY.encode("utf-8")).digest()
 
-    # 2. Issued challenge_token can be verified once and consumed, then replay is rejected
+    # 2. Issued challenge_token can be verified once and consumed atomically in DB across sessions, then replay is rejected
+    from backend.app.database import SessionLocal
+    from concurrent.futures import ThreadPoolExecutor
+
     tok = "A" * 32
     chal = _issue_recipient_challenge_token(tok)
-    _verify_recipient_challenge_token(chal, tok, consume=True)
-    with pytest.raises(HTTPException) as exc:
-        _verify_recipient_challenge_token(chal, tok, consume=True)
-    assert exc.value.status_code == 403
-    assert "already been consumed" in exc.value.detail
+
+    def attempt_consume(_):
+        s = SessionLocal()
+        try:
+            _verify_recipient_challenge_token(chal, tok, consume=True, db=s)
+            s.commit()
+            return "ok"
+        except HTTPException as exc:
+            s.rollback()
+            return exc.status_code
+        finally:
+            s.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(attempt_consume, [1, 2]))
+
+    assert results.count("ok") == 1, f"Expected exactly 1 concurrent consumption to succeed, got {results}"
+    assert results.count(403) == 1, f"Expected replay attempt to fail with 403, got {results}"
 
 
 def test_coverage_report_splits_format_valid_from_nipost_confirmed():
@@ -675,6 +691,7 @@ def test_coverage_report_splits_format_valid_from_nipost_confirmed():
         assert hasattr(rep, "nipost_confirmed_address_metadata")
         assert rep.format_valid_digital_references == rep.national_digital_postcode_records
         assert rep.nipost_confirmed_postcodes == rep.records_with_valid_evidence
+        assert rep.digital_building_level_records <= rep.nipost_confirmed_postcodes
     finally:
         db.close()
 

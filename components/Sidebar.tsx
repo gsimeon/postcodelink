@@ -172,10 +172,10 @@ export function Sidebar({
       {/* Help Card */}
       <div className="help">
         <CircleHelp size={18} color="#2563eb" />
-        <b>Digital Postcodes in Nigeria</b>
-        <small>Official 6-digit codes optimize last-mile dispatch across Lagos, Abuja & major cities.</small>
+        <b>Nigerian Digital Postcodes</b>
+        <small>Validates 11-character digital codes (SS-LL-DDD-AA-BB) and legacy 6-digit references. Local pilot records are not independently NIPOST-verified.</small>
         <button type="button" onClick={() => setActiveTab("postcodes")}>
-          Open Registry <ArrowRight size={13} />
+          Open Explorer <ArrowRight size={13} />
         </button>
       </div>
 

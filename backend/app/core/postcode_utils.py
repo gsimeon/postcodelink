@@ -42,21 +42,21 @@ TEXT_LEGACY_6DIGIT_PATTERN = re.compile(r"\b([1-9]\d{5})\b")
 
 def parse_digital_postcode_components(code: Optional[str]) -> Optional[Dict[str, Any]]:
     """Parse and validate the 5 canonical components of the Nigerian National Digital Postcode standard:
-    SS-LL-DDD-AA-BB (2-2-3-2-2 format)
-    - State (SS): 2 uppercase letters (e.g. 'LA', 'FC', 'KN')
-    - Local Government (LL): 2 alphanumeric characters (e.g. '01', '02', '1A')
-    - District (DDD): 3 alphanumeric characters (e.g. 'A09', 'B12', '100')
-    - Area/Ward (AA): 2 alphanumeric characters (e.g. 'DB', 'AJ', '01')
-    - Building/Unit (BB): 2 alphanumeric characters (e.g. '09', '34', '12')
+    SS-LL-DDD-AA-BB (2A-2N-3AN-2A-2N format)
+    - State (SS): 2 uppercase alphabetic characters (e.g. 'EK', 'LA', 'FC')
+    - Local Government (LL): 2 numeric digits (e.g. '01', '02', '10')
+    - District (DDD): 3 alphanumeric characters (e.g. 'A03', 'A09', '100')
+    - Area/Ward (AA): 2 uppercase alphabetic characters (e.g. 'FK', 'DB', 'EF')
+    - Building/Unit (BB): 2 numeric digits (e.g. '01', '09', '34')
     
     Accepts:
-    1. Canonical display format: SS-LL-DDD-AA-BB (15 characters with hyphens) or SS LL DDD AA BB (15 characters with spaces)
-    2. Normalized compact unseparated format: SSLLDDDAABB (11 characters)
+    1. Canonical display format: SS-LL-DDD-AA-BB (15 characters with hyphens, e.g. 'EK-01-A03-FK-01') or SS LL DDD AA BB (15 characters with spaces)
+    2. Normalized compact unseparated format: SSLLDDDAABB (11 characters, e.g. 'EK01A03FK01')
     
     Strictly rejects:
     - Malformed separator placement, mixed separators, or double hyphens.
     - Swapped or incorrect component widths (e.g. 3-char building or 1-char LGA).
-    - Non-alphabetic state codes.
+    - Non-alphabetic state/area codes or non-numeric LGA/building codes.
     """
     if not code or not isinstance(code, str):
         return None

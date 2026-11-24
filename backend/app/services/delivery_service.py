@@ -622,10 +622,61 @@ def _get_challenge_signing_key() -> bytes:
     return hashlib.sha256(b"postcodelink-dev-challenge-only-secret-v1").digest()
 
 
-def _is_and_mark_nonce_consumed(nonce: str, exp: int, consume: bool = False) -> bool:
-    """Check if challenge nonce was already consumed; optionally mark it consumed atomically."""
+def _is_and_mark_nonce_consumed(
+    nonce: str,
+    exp: int,
+    consume: bool = False,
+    db: Optional[Session] = None,
+    tracking_token: str = "",
+) -> bool:
+    """Distributed atomic check-and-consume for one-time recipient challenge nonces.
+    
+    Uses Redis atomic `SET ... NX EX` when available, and falls back to an atomic
+    database INSERT into `consumed_challenge_nonces` (unique primary key constraint)
+    so concurrent requests across multiple API instances cannot replay the same challenge.
+    """
     now_ts = int(datetime.now(timezone.utc).timestamp())
-    # Prune expired nonces to keep in-memory store bounded
+    ttl = max(60, exp - now_ts)
+
+    # 1. Distributed Redis atomic check/consume
+    try:
+        from backend.app.core.rate_limiter import _get_redis_client
+        r_client = _get_redis_client()
+        if r_client is not None:
+            r_key = f"pubchal_nonce:{nonce}"
+            if consume:
+                # SET NX returns True if key was set (first use), None/False if already exists (replay)
+                acquired = r_client.set(r_key, "1", ex=ttl, nx=True)
+                if not acquired:
+                    return True
+            else:
+                if r_client.exists(r_key):
+                    return True
+    except Exception as exc:
+        logger.warning(f"Redis challenge nonce check fallback to DB: {type(exc).__name__}")
+
+    # 2. Database-backed atomic unique-constraint check/consume (cross-process safe)
+    if db is not None:
+        from backend.app.models.consumed_challenge_nonce import ConsumedChallengeNonce
+        if not consume:
+            existing = db.query(ConsumedChallengeNonce).filter(ConsumedChallengeNonce.nonce == nonce).first()
+            return existing is not None
+        try:
+            with db.begin_nested():
+                db.add(
+                    ConsumedChallengeNonce(
+                        nonce=nonce,
+                        tracking_token=tracking_token,
+                        expires_at=datetime.fromtimestamp(exp, tz=timezone.utc),
+                        consumed_at=datetime.now(timezone.utc),
+                    )
+                )
+                db.flush()
+            return False
+        except IntegrityError:
+            return True
+
+    # 3. Last-resort in-memory fallback (unit tests without db/redis)
     if len(_CONSUMED_CHALLENGE_NONCES) > 5000:
         expired_keys = [k for k, v in _CONSUMED_CHALLENGE_NONCES.items() if v < now_ts]
         for k in expired_keys:
@@ -648,8 +699,13 @@ def _issue_recipient_challenge_token(tracking_token: str) -> str:
     return f"{payload}.{sig}"
 
 
-def _verify_recipient_challenge_token(challenge_token: str, expected_tracking_token: str, consume: bool = False) -> None:
-    """Verify HMAC signature, tracking_token binding, expiry, and one-time nonce consumption."""
+def _verify_recipient_challenge_token(
+    challenge_token: str,
+    expected_tracking_token: str,
+    consume: bool = False,
+    db: Optional[Session] = None,
+) -> None:
+    """Verify HMAC signature, tracking_token binding, expiry, and distributed one-time nonce consumption."""
     import hmac
     parts = (challenge_token or "").strip().split(".")
     if len(parts) != 4:
@@ -684,7 +740,7 @@ def _verify_recipient_challenge_token(challenge_token: str, expected_tracking_to
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Recipient challenge proof has expired. Please re-verify the last 4 digits of your phone number.",
         )
-    if _is_and_mark_nonce_consumed(nonce, exp, consume=consume):
+    if _is_and_mark_nonce_consumed(nonce, exp, consume=consume, db=db, tracking_token=expected_tracking_token):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Recipient challenge proof has already been consumed (replay rejected). Please re-verify your phone digits.",
@@ -838,7 +894,7 @@ def public_confirm_delivery_otp(
     check_client_ip_rate_limit(f"pubotp_tok_{token}", limit_per_minute=10)
 
     # Enforce mandatory server-side challenge proof bound to this tracking token
-    _verify_recipient_challenge_token(request.challenge_token, token)
+    _verify_recipient_challenge_token(request.challenge_token, token, consume=False, db=db)
 
     delivery = db.query(Delivery).filter(
         Delivery.tracking_token == token,
@@ -899,8 +955,8 @@ def public_confirm_delivery_otp(
 
     # Check PIN match
     if verify_otp_hash(request.otp, delivery.otp_hash):
-        # Atomically consume the one-time challenge nonce so it cannot be replayed
-        _verify_recipient_challenge_token(request.challenge_token, token, consume=True)
+        # Atomically consume the one-time challenge nonce across Redis/DB so it cannot be replayed
+        _verify_recipient_challenge_token(request.challenge_token, token, consume=True, db=db)
         delivery.pod_verified = True
         delivery.status = DeliveryStatus.DELIVERED
         delivery.otp_attempts = 0

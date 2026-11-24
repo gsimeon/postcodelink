@@ -1341,6 +1341,7 @@ def get_postcode_coverage_report(
     records_with_complete_metadata = 0
     legacy_six_digit_records = 0
     national_digital_postcode_records = 0
+    digital_records_with_valid_evidence = 0
     local_demonstration_fixtures = 0
     db_records = []
 
@@ -1442,6 +1443,8 @@ def get_postcode_coverage_report(
                     if code_norm in valid_evidence_codes:
                         records_with_valid_evidence += 1
                         states_with_verified_records_set.add(st)
+                        if parse_digital_postcode_components(code) is not None:
+                            digital_records_with_valid_evidence += 1
 
         except Exception as db_err:
             logger.warning(f"Error querying PostcodeDirectory or VerificationEvidence for coverage report: {db_err}")
@@ -1506,7 +1509,7 @@ def get_postcode_coverage_report(
         nipost_confirmed_postcodes=records_with_valid_evidence,
         nipost_confirmed_address_metadata=len(valid_autofill_evidence_codes) if db is not None and "valid_autofill_evidence_codes" in locals() else 0,
         local_demonstration_fixtures=local_demonstration_fixtures,
-        digital_building_level_records=national_digital_postcode_records,
+        digital_building_level_records=digital_records_with_valid_evidence,
         dataset_source=dataset_source,
         source=dataset_source,
         upstream_integration=integration_status,

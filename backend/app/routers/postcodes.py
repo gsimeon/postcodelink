@@ -414,3 +414,19 @@ def api_commercial_cleanse_address(
         client=client,
         db=db,
     )
+
+
+@router.post("/integration/health-check")
+def api_trigger_nipost_health_check(
+    client: NIPOSTClient = Depends(get_nipost_client),
+):
+    """Execute a live upstream NIPOST health probe and return updated operational readiness telemetry.
+    
+    Note: Connectivity/authentication probe success never implies commercial production_authorized approval.
+    """
+    probe_result = client.check_health()
+    status_snapshot = client.get_integration_status()
+    return {
+        "probe": probe_result,
+        "upstream_integration": status_snapshot,
+    }

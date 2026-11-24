@@ -267,7 +267,8 @@ def test_coverage_endpoint_returns_verifiable_metrics():
     assert "Rivers" in data["states_covered"]
     assert data["total_reference_records"] >= 30
     assert data["records_with_coordinates"] > 0
-    assert data["digital_building_level_records"] > 0
+    assert data["format_valid_digital_references"] > 0
+    assert data["digital_building_level_records"] <= data["nipost_confirmed_postcodes"]
 
     # Verify adapter status structure
     adapter_status = data["upstream_integration"]
