@@ -1,4 +1,4 @@
-"""Release Gate v6.1.8: Database-Level Verification Evidence Immutability
+"""Release Gate v6.1.8: Verification Evidence Table & Database-Level Immutability
 
 Revision ID: d4e5f6a7b8c9
 Revises: c3d4e5f6a7b8
@@ -7,6 +7,7 @@ Create Date: 2026-11-24 20:35:00.000000
 """
 from typing import Sequence, Union
 from alembic import op
+import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'd4e5f6a7b8c9'
@@ -18,6 +19,27 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     bind = op.get_bind()
     dialect_name = bind.dialect.name if bind is not None else ""
+    inspector = sa.inspect(bind)
+    existing_tables = inspector.get_table_names()
+
+    if "verification_evidence" not in existing_tables:
+        op.create_table(
+            "verification_evidence",
+            sa.Column("id", sa.String(length=36), nullable=False),
+            sa.Column("postcode", sa.String(length=20), nullable=False),
+            sa.Column("provider", sa.String(length=64), nullable=False, server_default="NIPOST"),
+            sa.Column("provider_reference_id", sa.String(length=128), nullable=True),
+            sa.Column("verification_method", sa.String(length=64), nullable=False, server_default="validator_autofill_pipeline"),
+            sa.Column("dataset_version", sa.String(length=32), nullable=True),
+            sa.Column("verified_at", sa.DateTime(), nullable=False),
+            sa.Column("valid_until", sa.DateTime(), nullable=False),
+            sa.Column("response_hash", sa.String(length=64), nullable=False),
+            sa.Column("status", sa.String(length=32), nullable=False, server_default="verified"),
+            sa.Column("address_metadata_source", sa.String(length=64), nullable=False, server_default="nipost_autofill"),
+            sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("1" if dialect_name == "sqlite" else "true")),
+            sa.PrimaryKeyConstraint("id"),
+        )
+        op.create_index("ix_verification_evidence_postcode", "verification_evidence", ["postcode"])
 
     if dialect_name == "postgresql":
         op.execute("""
