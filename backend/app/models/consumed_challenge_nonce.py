@@ -10,5 +10,5 @@ class ConsumedChallengeNonce(Base):
 
     nonce = Column(String(64), primary_key=True, nullable=False)
     tracking_token = Column(String(64), nullable=False, index=True)
-    expires_at = Column(DateTime, nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
     consumed_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))

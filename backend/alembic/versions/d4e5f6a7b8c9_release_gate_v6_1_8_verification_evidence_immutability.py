@@ -51,6 +51,7 @@ def upgrade() -> None:
             sa.PrimaryKeyConstraint("nonce"),
         )
         op.create_index("ix_consumed_challenge_nonces_tracking_token", "consumed_challenge_nonces", ["tracking_token"])
+        op.create_index("ix_consumed_challenge_nonces_expires_at", "consumed_challenge_nonces", ["expires_at"])
 
     if dialect_name == "postgresql":
         op.execute("""

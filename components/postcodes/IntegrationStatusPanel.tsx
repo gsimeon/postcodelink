@@ -75,7 +75,7 @@ export const IntegrationStatusPanel: React.FC<IntegrationStatusPanelProps> = ({
         <div style={{ background: "#f8fafc", padding: "8px 12px", borderRadius: "6px", border: "1px solid #f1f5f9" }}>
           <span style={{ color: "#64748b", display: "block", fontSize: "10px", textTransform: "uppercase", fontWeight: 700 }}>4. Authentication</span>
           <strong style={{ color: upstreamIntegration.authentication_verified ? "#16a34a" : "#64748b" }}>
-            {upstreamIntegration.authentication_verified ? "Cryptographically Verified" : "Unverified / Standby"}
+            {upstreamIntegration.authentication_verified ? "Credentials Accepted" : "Unverified / Standby"}
           </strong>
         </div>
 

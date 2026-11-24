@@ -24,6 +24,8 @@ from backend.app.core.rate_limiter import check_client_ip_rate_limit
 from backend.app.core.network import get_trusted_client_ip
 from backend.app.config import settings
 from backend.app.models.profile import Profile
+from backend.app.models.enums import AppRole
+from backend.app.core.auth_deps import require_roles
 
 router = APIRouter(prefix="/postcodes", tags=["postcodes"])
 logger = logging.getLogger("postcode_router")
@@ -116,6 +118,7 @@ def execute_postcode_lookup(
                     rec_area = rec_area or None
                     rec_state = rec_state or None
 
+            is_sandbox = getattr(client, "upstream_environment", "unclassified") == "sandbox"
             # Record VerificationEvidence via dedicated transactional service
             evidence_persisted, ev_id, ev_valid_until = record_verification_evidence(
                 db=db,
@@ -125,6 +128,7 @@ def execute_postcode_lookup(
                 upstream_version=upstream_version,
                 is_validator=is_validator,
                 addr_metadata_source=addr_metadata_source,
+                is_sandbox=is_sandbox,
             )
             if strict and not evidence_persisted:
                 if db is None:
@@ -137,7 +141,12 @@ def execute_postcode_lookup(
                     detail="Verification evidence audit record could not be persisted. Strict verification failed closed.",
                 )
 
-            if not evidence_persisted:
+            if is_sandbox:
+                prov_text = "NIPOST Sandbox API (Test Key — Sample Dataset; not valid for production verification)"
+                ver_status = "sandbox_verified"
+                lookup_status_val = "sandbox_verified"
+                service_type_val = "sandbox"
+            elif not evidence_persisted:
                 prov_text = (
                     "NIPOST Live Gateway responded, but audit evidence persistence failed or database unavailable; "
                     "downgraded to local reference per verification integrity policy."
@@ -418,15 +427,29 @@ def api_commercial_cleanse_address(
 
 @router.post("/integration/health-check")
 def api_trigger_nipost_health_check(
+    current_user: Profile = Depends(require_roles([AppRole.ADMIN])),
     client: NIPOSTClient = Depends(get_nipost_client),
 ):
-    """Execute a live upstream NIPOST health probe and return updated operational readiness telemetry.
+    """Administrator-only, rate-limited upstream NIPOST health & credential probe.
     
-    Note: Connectivity/authentication probe success never implies commercial production_authorized approval.
+    Returns minimal sanitized telemetry; detailed diagnostics remain in server logs.
+    Connectivity/authentication probe success never implies commercial production_authorized approval.
     """
+    check_client_ip_rate_limit(f"admin_health_{current_user.id}", limit_per_minute=10)
     probe_result = client.check_health()
+    if not probe_result.get("healthy"):
+        logger.warning(
+            f"Admin NIPOST health probe triggered by {current_user.email} returned unhealthy: "
+            f"{probe_result.get('reason')}"
+        )
     status_snapshot = client.get_integration_status()
     return {
-        "probe": probe_result,
-        "upstream_integration": status_snapshot,
+        "healthy": bool(probe_result.get("healthy")),
+        "connectivity_healthy": bool(status_snapshot.get("connectivity_healthy")),
+        "authentication_verified": bool(status_snapshot.get("authentication_verified")),
+        "contract_verified": bool(status_snapshot.get("contract_verified")),
+        "production_authorized": bool(status_snapshot.get("production_authorized")),
+        "upstream_environment": status_snapshot.get("upstream_environment", "unclassified"),
+        "last_checked_at": status_snapshot.get("last_checked_at"),
+        "status": status_snapshot.get("status"),
     }

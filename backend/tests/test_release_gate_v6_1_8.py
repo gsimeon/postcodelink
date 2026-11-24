@@ -696,3 +696,145 @@ def test_coverage_report_splits_format_valid_from_nipost_confirmed():
         db.close()
 
 
+def test_admin_only_health_check_endpoint_and_authenticated_probe():
+    """Verify /integration/health-check is strictly admin-only and probes authenticated lookup."""
+    from starlette.testclient import TestClient
+    from backend.app.main import app
+    from backend.app.core.security import create_access_token
+    from backend.app.database import SessionLocal
+    from backend.app.services.nipost_client import NIPOSTClient
+    import httpx
+
+    client = TestClient(app)
+
+    # 1. Unauthenticated caller -> 401/403
+    res_unauth = client.post("/api/v1/postcodes/integration/health-check")
+    assert res_unauth.status_code in (401, 403)
+
+    db = SessionLocal()
+    try:
+        merchant = Profile(
+            id=f"m-hc-{uuid.uuid4().hex[:8]}",
+            email=f"m_hc_{uuid.uuid4().hex[:8]}@test.ng",
+            hashed_password="x",
+            full_name="Merchant HC",
+            role=AppRole.MERCHANT,
+        )
+        admin = Profile(
+            id=f"a-hc-{uuid.uuid4().hex[:8]}",
+            email=f"a_hc_{uuid.uuid4().hex[:8]}@test.ng",
+            hashed_password="x",
+            full_name="Admin HC",
+            role=AppRole.ADMIN,
+        )
+        db.add_all([merchant, admin])
+        db.commit()
+
+        m_tok = create_access_token(data={"sub": merchant.id, "role": AppRole.MERCHANT.value})
+        a_tok = create_access_token(data={"sub": admin.id, "role": AppRole.ADMIN.value})
+
+        # 2. Non-admin merchant -> 403 Forbidden
+        res_merch = client.post(
+            "/api/v1/postcodes/integration/health-check",
+            headers={"Authorization": f"Bearer {m_tok}"},
+        )
+        assert res_merch.status_code == 403
+
+        # 3. Admin caller -> 200 OK with sanitized fields only
+        res_admin = client.post(
+            "/api/v1/postcodes/integration/health-check",
+            headers={"Authorization": f"Bearer {a_tok}"},
+        )
+        assert res_admin.status_code == 200
+        body = res_admin.json()
+        assert "connectivity_healthy" in body
+        assert "authentication_verified" in body
+        assert "contract_verified" in body
+        assert body["production_authorized"] is False
+    finally:
+        db.close()
+
+    # 4. NIPOSTClient.check_health() distinguishes 401 rejection vs 200 contract acceptance
+    c_401 = NIPOSTClient(
+        base_url="https://api.postcode.gov.ng",
+        api_key="nipost_test_invalid",
+        transport=httpx.MockTransport(lambda req: httpx.Response(401, json={"error": "unauthorized"})),
+    )
+    probe_401 = c_401.check_health()
+    assert probe_401["healthy"] is False
+    st_401 = c_401.get_integration_status()
+    assert st_401["authentication_verified"] is False
+    assert st_401["contract_verified"] is False
+    assert st_401["upstream_environment"] == "sandbox"
+
+    c_200 = NIPOSTClient(
+        base_url="https://api.postcode.gov.ng",
+        api_key="nipost_live_valid123",
+        transport=httpx.MockTransport(
+            lambda req: httpx.Response(
+                200,
+                json={"data": {"postcode": "100001", "valid": True, "administrative_address": {"state_name": "Lagos", "locality_name": "Ikeja"}}},
+            )
+        ),
+    )
+    probe_200 = c_200.check_health()
+    assert probe_200["healthy"] is True
+    st_200 = c_200.get_integration_status()
+    assert st_200["authentication_verified"] is True
+    assert st_200["contract_verified"] is True
+    assert st_200["production_authorized"] is False
+    assert st_200["upstream_environment"] == "production"
+
+
+def test_nipost_sandbox_test_key_never_classified_as_production_official():
+    """Verify nipost_test_ sandbox responses are strictly classified as sandbox_verified, never official_verified."""
+    import httpx
+    from backend.app.services.nipost_client import NIPOSTClient
+    from backend.app.services.postcode_service import cleanse_address, get_postcode_coverage_report
+    from backend.app.database import SessionLocal
+
+    def sandbox_handler(request: httpx.Request) -> httpx.Response:
+        if "/v1/validate" in str(request.url):
+            return httpx.Response(200, json={"valid": True, "code": "EK-01-A03-FK-01"})
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "postcode": "EK-01-A03-FK-01",
+                    "valid": True,
+                    "administrative_address": {
+                        "state_name": "Ekiti",
+                        "lga_name": "Ado-Ekiti",
+                        "locality_name": "Fajuyi",
+                    },
+                }
+            },
+        )
+
+    sandbox_client = NIPOSTClient(
+        base_url="https://api.postcode.gov.ng",
+        api_key="nipost_test_sandbox_sample_key",
+        transport=httpx.MockTransport(sandbox_handler),
+    )
+    assert sandbox_client.upstream_environment == "sandbox"
+
+    db = SessionLocal()
+    try:
+        res = cleanse_address(
+            address="12 Fajuyi Road, Ado-Ekiti, Ekiti",
+            postcode_hint="EK-01-A03-FK-01",
+            verification_mode="nipost_validate",
+            client=sandbox_client,
+            db=db,
+        )
+        assert res.verification_status == "sandbox_verified"
+        assert res.verification_status != "official_verified"
+        assert res.postcode_status != "verified"
+
+        # Sandbox evidence must not inflate production-confirmed coverage counts
+        cov = get_postcode_coverage_report(db)
+        assert cov.digital_building_level_records <= cov.nipost_confirmed_postcodes
+    finally:
+        db.close()
+
+

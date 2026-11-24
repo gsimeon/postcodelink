@@ -370,6 +370,7 @@ def record_verification_evidence(
     upstream_version: Optional[str] = None,
     is_validator: bool = False,
     addr_metadata_source: Optional[str] = None,
+    is_sandbox: bool = False,
 ) -> Tuple[bool, Optional[int], Optional[datetime]]:
     """Persist a NIPOST VerificationEvidence audit record within a transactional boundary.
 
@@ -398,8 +399,10 @@ def record_verification_evidence(
         resp_hash = hashlib.sha256(raw_bytes).hexdigest()
         ev_valid_until = default_valid_until()
 
-        # Strict coupling of verification method and evidence status
-        if ver_method == "validator_autofill_pipeline":
+        # Strict coupling of verification method and evidence status (sandbox keys never produce 'verified')
+        if is_sandbox:
+            ev_status = "sandbox"
+        elif ver_method == "validator_autofill_pipeline":
             ev_status = "verified"
         elif ver_method == "validator":
             ev_status = "partial"
@@ -756,6 +759,7 @@ def cleanse_address(
             rec_res = "building_location" if rec_type == "digital_location" else "area_district"
 
             upstream_ver = live_data.get("dataset_version") if live_data else None
+            is_sandbox = getattr(client, "upstream_environment", "unclassified") == "sandbox"
             # Record VerificationEvidence via dedicated transactional service
             evidence_persisted, ev_id, ev_valid_until = record_verification_evidence(
                 db=db,
@@ -765,6 +769,7 @@ def cleanse_address(
                 upstream_version=upstream_ver,
                 is_validator=is_validator,
                 addr_metadata_source=addr_metadata_source,
+                is_sandbox=is_sandbox,
             )
             if effective_strict and not evidence_persisted:
                 if db is None:
@@ -777,7 +782,13 @@ def cleanse_address(
                     detail="Verification evidence audit record could not be persisted. Strict verification failed closed.",
                 )
 
-            if not evidence_persisted:
+            if is_sandbox:
+                prov_text = (
+                    "NIPOST Sandbox API (Test Key — Sample Dataset; not valid for production verification)"
+                )
+                ver_status = "sandbox_verified"
+                is_official = False
+            elif not evidence_persisted:
                 # Evidence could not be durably recorded: MUST NOT claim official verification
                 prov_text = (
                     "NIPOST Live Gateway responded, but audit evidence persistence failed or database unavailable; "

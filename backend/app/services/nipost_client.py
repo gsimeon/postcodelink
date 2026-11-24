@@ -110,6 +110,16 @@ class NIPOSTClient:
             return True
         return bool(self.api_key)
 
+    @property
+    def upstream_environment(self) -> str:
+        """Classify upstream NIPOST credential environment: 'production' | 'sandbox' | 'unclassified'."""
+        key = (self.api_key or "").strip()
+        if key.startswith("nipost_live_"):
+            return "production"
+        if key.startswith("nipost_test_"):
+            return "sandbox"
+        return "unclassified"
+
     def get_integration_status(self) -> Dict[str, Any]:
         """Provides structured integration status separating code presence, configuration, health, and commercial authorization."""
         has_url = bool(self.base_url)
@@ -132,6 +142,7 @@ class NIPOSTClient:
             "base_url_set": has_url,
             "credentials_set": has_key,
             "auth_scheme": self.auth_scheme,
+            "upstream_environment": self.upstream_environment,
             "connectivity_healthy": getattr(self, "_last_connectivity_healthy", False),
             "authentication_verified": getattr(self, "_last_authentication_verified", False),
             "contract_verified": getattr(self, "_last_contract_verified", False),
@@ -142,7 +153,10 @@ class NIPOSTClient:
         }
 
     def check_health(self) -> Dict[str, Any]:
-        """Performs a lightweight health check on the configured NIPOST endpoint and records telemetry."""
+        """Performs an authenticated probe against the documented NIPOST lookup endpoint and records telemetry.
+        
+        Does not assume an unauthenticated /health endpoint proves credential acceptance.
+        """
         from datetime import datetime, timezone
         checked_at = datetime.now(timezone.utc).isoformat()
         self._last_checked_at = checked_at
@@ -150,29 +164,71 @@ class NIPOSTClient:
             missing_reason = "base URL missing" if not self.base_url else "API key missing for authentication scheme"
             self._last_connectivity_healthy = False
             self._last_authentication_verified = False
+            self._last_contract_verified = False
             return {
                 "healthy": False,
                 "reason": f"Configuration incomplete: {missing_reason}",
                 "status_code": None,
                 "checked_at": checked_at,
             }
+        probe_path = (self.lookup_path or "/v1/lookup").strip().lstrip("/")
+        probe_url = f"{self.base_url}/{probe_path}"
         try:
             with httpx.Client(transport=self.transport, timeout=min(self.timeout, 3.0)) as http_client:
-                resp = http_client.get(f"{self.base_url}/health", headers=self._get_headers())
-                if resp.status_code in (200, 204):
+                resp = http_client.get(
+                    probe_url,
+                    params={self.query_param: "100001"},
+                    headers=self._get_headers(),
+                )
+                if resp.status_code in (200, 404):
                     self._last_connectivity_healthy = True
                     self._last_authentication_verified = True
-                    return {"healthy": True, "reason": "Endpoint responsive", "status_code": resp.status_code, "checked_at": checked_at}
+                    try:
+                        payload = resp.json()
+                        adapted_status, _, _ = self._adapt_nipost_payload(payload, "100001")
+                        self._last_contract_verified = adapted_status in (
+                            NIPOSTLookupStatus.FOUND,
+                            NIPOSTLookupStatus.NOT_FOUND,
+                        )
+                    except Exception:
+                        self._last_contract_verified = False
+                    return {
+                        "healthy": True,
+                        "reason": "Authenticated lookup probe accepted",
+                        "status_code": resp.status_code,
+                        "checked_at": checked_at,
+                    }
                 elif resp.status_code in (401, 403):
                     self._last_connectivity_healthy = True
                     self._last_authentication_verified = False
-                    return {"healthy": False, "reason": "Authentication failed (invalid or rejected credentials)", "status_code": resp.status_code, "checked_at": checked_at}
+                    self._last_contract_verified = False
+                    return {
+                        "healthy": False,
+                        "reason": "Authentication failed (invalid or rejected credentials)",
+                        "status_code": resp.status_code,
+                        "checked_at": checked_at,
+                    }
                 else:
                     self._last_connectivity_healthy = False
-                    return {"healthy": False, "reason": f"Unexpected upstream status: {resp.status_code}", "status_code": resp.status_code, "checked_at": checked_at}
+                    self._last_authentication_verified = False
+                    self._last_contract_verified = False
+                    return {
+                        "healthy": False,
+                        "reason": f"Unexpected upstream status: {resp.status_code}",
+                        "status_code": resp.status_code,
+                        "checked_at": checked_at,
+                    }
         except Exception as err:
             self._last_connectivity_healthy = False
-            return {"healthy": False, "reason": f"Connection check failed: {str(err)}", "status_code": None, "checked_at": checked_at}
+            self._last_authentication_verified = False
+            self._last_contract_verified = False
+            logger.warning(f"NIPOST upstream health probe failed: {type(err).__name__}")
+            return {
+                "healthy": False,
+                "reason": f"Connection check failed: {type(err).__name__}",
+                "status_code": None,
+                "checked_at": checked_at,
+            }
 
     def _get_headers(self) -> Dict[str, str]:
         headers = {

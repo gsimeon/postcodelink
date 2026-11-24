@@ -82,6 +82,17 @@ To prevent fabricated test fixtures or local reference data from being misrepres
 | **Authoritative Live NIPOST Cloud Gateway** | Live FMCIDE/NIPOST national digital postcode registry. | `official_verified` (`postcode_status: "verified"`) | `dataset_version: null` (or provider-supplied), `fallback_used: false` |
 | **Database Directory Records** | Seeded reference data in local SQLite/PostgreSQL (`PostcodeDirectory`). | `local_reference` (`postcode_status: "local_match"`) | `source_type: "database_directory"`, `source_owner: "NIPOST / PostcodeLink"` |
 | **NIPOST National Digital Postcode** | 5-component building-level standard (`SS-LL-DDD-AA-BB`: State, LGA, District, Area, Building Unit). | Standard NIPOST format | Strict 2-2-3-2-2 width validation (11 alphanumeric chars compact, 15 chars display), canonical & compact parsing |
+
+> **NIPOST Terms & Scope Disclosure**: A syntactically valid or recognized postcode confirms a location reference only; it does not independently establish personal identity, residence, property ownership, or business occupancy.
+
+### Feature Maturity & Release Scope (v6.1.8)
+| Capability | Status | Notes |
+| :--- | :--- | :--- |
+| **Postcode Lookup, Cleansing & Provenance** | **Shipped** | 11-state local pilot reference + NIPOST adapter (`nipost_test_` / `nipost_live_` separation). |
+| **Commercial API & API Key Lifecycle (Backend)** | **Shipped** | `/api/v1/api-keys` & `/api/v1/postcodes/commercial/*` with quota metering. |
+| **Logistics Dispatch, Outbox & Public Tracking** | **Shipped** | Cryptographic 32-char tokens, HMAC challenge proof, distributed Redis/DB nonce replay protection. |
+| **Dispatch Topology Map** | **Experimental / Simulated** | Simulated hub topology; hardware GPS telemetry is not connected. |
+| **Developer Console UI, Webhooks & Bulk CSV Postcode Validation** | **Planned** | Deferred pending NIPOST commercial authorization and customer demand. |
 | **Legacy 6-Digit Postal Codes** | Traditional regional sorting codes (e.g. `100001` Lagos Island, `900001` Garki Abuja). | `local_match` (or `verified` when verified upstream) | Regional routing (`[1-9]\d{5}`) |
 | **Demonstration Reference Fixtures** | Sample 11-character format demonstration codes (e.g. `FC-02-A09-DB-09`, `LA-01-A04-IK-02`). | `local_reference` (`postcode_status: "local_match"`) | `source_type: "demonstration_fixture"`, `source_owner: "PostcodeLink"` |
 

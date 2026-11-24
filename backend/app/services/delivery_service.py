@@ -663,6 +663,10 @@ def _is_and_mark_nonce_consumed(
             return existing is not None
         try:
             with db.begin_nested():
+                # Opportunistic cleanup of expired nonces using indexed expires_at
+                db.query(ConsumedChallengeNonce).filter(
+                    ConsumedChallengeNonce.expires_at < datetime.now(timezone.utc)
+                ).delete(synchronize_session=False)
                 db.add(
                     ConsumedChallengeNonce(
                         nonce=nonce,
