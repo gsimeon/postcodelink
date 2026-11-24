@@ -27,6 +27,8 @@ from backend.app.schemas.delivery import (
     DeliveryPublicTrackingResponse,
     DeliveryBulkCreateResponse,
     BulkItemResult,
+    RecipientVerifyChallengeRequest,
+    RecipientVerifyChallengeResponse,
 )
 from backend.app.services.delivery_service import (
     create_delivery,
@@ -36,6 +38,7 @@ from backend.app.services.delivery_service import (
     get_public_tracking,
     regenerate_tracking_token,
     resend_delivery_pin,
+    verify_recipient_challenge,
 )
 from backend.app.core.auth_deps import (
     get_current_user,
@@ -183,6 +186,16 @@ def api_get_public_tracking(tracking_token: str, db: Session = Depends(get_db)):
     Rejects predictable delivery references.
     """
     return get_public_tracking(db, tracking_token)
+
+
+@router.post("/track/{tracking_token}/verify-recipient", response_model=RecipientVerifyChallengeResponse)
+def api_verify_recipient_challenge(
+    tracking_token: str,
+    request: RecipientVerifyChallengeRequest,
+    db: Session = Depends(get_db),
+):
+    """Verify recipient phone challenge server-side to unlock proof-of-delivery OTP confirmation."""
+    return verify_recipient_challenge(db, tracking_token, request.phone_last_4)
 
 
 @router.get("/{identifier}/tracking", response_model=DeliveryPublicTrackingResponse)

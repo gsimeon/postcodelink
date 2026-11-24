@@ -638,6 +638,20 @@ export const fastApiClient = {
     return await res.json();
   },
 
+  async verifyRecipientChallenge(trackingToken: string, phoneLast4: string): Promise<{ success: boolean; verified: boolean; message: string; delivery_id: string; status: string }> {
+    const res = await fetch(`${API_V1}/deliveries/track/${encodeURIComponent(trackingToken)}/verify-recipient`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone_last_4: phoneLast4 }),
+      cache: 'no-store',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Identity challenge failed');
+    }
+    return await res.json();
+  },
+
   async regenerateTrackingToken(deliveryId: string): Promise<FastAPIDelivery> {
     const res = await fetch(`${API_V1}/deliveries/${encodeURIComponent(deliveryId)}/regenerate-token`, {
       method: 'POST',

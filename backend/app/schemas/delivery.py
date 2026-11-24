@@ -132,6 +132,19 @@ class DeliveryPublicTrackingResponse(BaseModel):
     timeline: List[PublicTrackingEvent] = []
 
 
+class RecipientVerifyChallengeRequest(BaseModel):
+    phone_last_4: str = Field(..., pattern=r"^\d{4}$", description="Last 4 digits of recipient phone number")
+
+
+class RecipientVerifyChallengeResponse(BaseModel):
+    success: bool
+    verified: bool
+    message: str
+    delivery_id: str
+    status: DeliveryStatus
+
+
+
 class BulkItemResult(BaseModel):
     index: int
     success: bool

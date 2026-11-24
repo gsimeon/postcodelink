@@ -36,3 +36,19 @@ class VerificationEvidence(Base):
         if target.tzinfo is None:
             target = target.replace(tzinfo=timezone.utc)
         return now > target
+
+
+from sqlalchemy import event
+
+
+@event.listens_for(VerificationEvidence, "before_update")
+def _prevent_verification_evidence_update(mapper, connection, target):
+    """Enforce strict immutability: VerificationEvidence records cannot be modified once committed."""
+    raise ValueError("VerificationEvidence records are strictly immutable and cannot be updated.")
+
+
+@event.listens_for(VerificationEvidence, "before_delete")
+def _prevent_verification_evidence_delete(mapper, connection, target):
+    """Enforce strict immutability: VerificationEvidence records cannot be deleted from the audit ledger."""
+    raise ValueError("VerificationEvidence records are strictly immutable and cannot be deleted.")
+

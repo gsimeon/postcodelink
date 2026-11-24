@@ -3,8 +3,9 @@ import secrets
 import logging
 import uuid
 import hashlib
+import re
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
@@ -665,6 +666,48 @@ def get_public_tracking(db: Session, identifier: str) -> DeliveryPublicTrackingR
         assigned_operator_name=operator_name,
         timeline=public_timeline,
     )
+
+
+def verify_recipient_challenge(db: Session, identifier: str, phone_last_4: str) -> Dict[str, Any]:
+    """Verify recipient phone challenge server-side strictly against the delivery record.
+    
+    Prevents public brute force and eliminates browser-side phone verification.
+    Validates that phone_last_4 matches the last 4 digits of the recipient_phone.
+    """
+    token = identifier.strip()
+    if token.startswith("PL-") or len(token) < 20:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Public tracking requires a valid 32-character tracking token."
+        )
+
+    delivery = db.query(Delivery).filter(
+        Delivery.tracking_token == token,
+        Delivery.is_deleted == False,
+    ).first()
+    if not delivery:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Delivery tracking record not found. Please provide a valid 32-character tracking token."
+        )
+
+    clean_phone = re.sub(r"\D", "", delivery.recipient_phone or "")
+    actual_last_4 = clean_phone[-4:] if len(clean_phone) >= 4 else ""
+
+    if phone_last_4.strip() != actual_last_4:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Identity challenge failed: Provided 4 digits do not match the recipient phone number on record."
+        )
+
+    return {
+        "success": True,
+        "verified": True,
+        "message": "Recipient identity verified successfully.",
+        "delivery_id": delivery.id,
+        "status": delivery.status,
+    }
+
 
 
 def regenerate_tracking_token(db: Session, delivery_id: str, current_user: Profile) -> Delivery:

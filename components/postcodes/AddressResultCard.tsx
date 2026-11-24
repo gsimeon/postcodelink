@@ -38,7 +38,10 @@ export const AddressResultCard: React.FC<AddressResultCardProps> = ({
             />
           </div>
           <div style={{ fontSize: "12px", color: "#64748b" }}>
-            Confidence: <strong>{Math.round(result.confidence * 100)}%</strong> · Dispatch Readiness: <strong>{Math.round((result.dispatch_confidence || 0) * 100)}%</strong>
+            Parsing Completeness: <strong>{Math.round(result.confidence * 100)}%</strong> · Dispatch Routing Score: <strong>{Math.round((result.dispatch_confidence || 0) * 100)}%</strong>
+          </div>
+          <div style={{ fontSize: "10px", color: "#94a3b8", marginTop: "2px", fontStyle: "italic" }}>
+            Heuristic syntax & territory completeness metric. Does not guarantee physical building existence or delivery carrier SLA.
           </div>
         </div>
 

@@ -64,8 +64,15 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
         <label style={{ display: "block", fontSize: "12px", fontWeight: 700, color: "#334155", marginBottom: "6px" }}>
           VERIFICATION MODE
         </label>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "10px" }}>
-          <div
+        <div
+          role="radiogroup"
+          aria-label="Verification mode selection"
+          style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "10px" }}
+        >
+          <button
+            type="button"
+            role="radio"
+            aria-checked={verificationMode === "nipost_validate"}
             onClick={() => setVerificationMode("nipost_validate")}
             style={{
               padding: "12px",
@@ -73,6 +80,9 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
               border: `2px solid ${verificationMode === "nipost_validate" ? "#0284c7" : "#e2e8f0"}`,
               background: verificationMode === "nipost_validate" ? "#f0f9ff" : "#ffffff",
               cursor: "pointer",
+              textAlign: "left",
+              fontFamily: "inherit",
+              width: "100%",
             }}
           >
             <div style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: 700, fontSize: "13px", color: "#0f172a" }}>
@@ -82,9 +92,12 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
             <p style={{ margin: "4px 0 0", fontSize: "11px", color: "#64748b" }}>
               Verifies against live NIPOST API; gracefully falls back to local reference if gateway is unreachable.
             </p>
-          </div>
+          </button>
 
-          <div
+          <button
+            type="button"
+            role="radio"
+            aria-checked={verificationMode === "nipost_strict"}
             onClick={() => setVerificationMode("nipost_strict")}
             style={{
               padding: "12px",
@@ -92,6 +105,9 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
               border: `2px solid ${verificationMode === "nipost_strict" ? "#dc2626" : "#e2e8f0"}`,
               background: verificationMode === "nipost_strict" ? "#fef2f2" : "#ffffff",
               cursor: "pointer",
+              textAlign: "left",
+              fontFamily: "inherit",
+              width: "100%",
             }}
           >
             <div style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: 700, fontSize: "13px", color: "#0f172a" }}>
@@ -101,9 +117,12 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
             <p style={{ margin: "4px 0 0", fontSize: "11px", color: "#64748b" }}>
               Requires live NIPOST verification; strictly fails closed if gateway is unconfigured or unavailable.
             </p>
-          </div>
+          </button>
 
-          <div
+          <button
+            type="button"
+            role="radio"
+            aria-checked={verificationMode === "local_standardization"}
             onClick={() => setVerificationMode("local_standardization")}
             style={{
               padding: "12px",
@@ -111,6 +130,9 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
               border: `2px solid ${verificationMode === "local_standardization" ? "#d97706" : "#e2e8f0"}`,
               background: verificationMode === "local_standardization" ? "#fffbeb" : "#ffffff",
               cursor: "pointer",
+              textAlign: "left",
+              fontFamily: "inherit",
+              width: "100%",
             }}
           >
             <div style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: 700, fontSize: "13px", color: "#0f172a" }}>
@@ -120,7 +142,7 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
             <p style={{ margin: "4px 0 0", fontSize: "11px", color: "#64748b" }}>
               Uses local reference rules without contacting upstream NIPOST endpoints.
             </p>
-          </div>
+          </button>
         </div>
       </div>
 

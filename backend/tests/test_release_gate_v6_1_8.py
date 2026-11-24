@@ -359,3 +359,132 @@ def test_api_tenant_isolation_and_rbac_boundaries():
 
     finally:
         db.close()
+
+
+def test_server_side_recipient_phone_challenge_and_public_privacy():
+    """Verify that public tracking strictly enforces token privacy and server-side phone challenge verification."""
+    import secrets
+    from backend.app.models.delivery import Delivery
+    from backend.app.models.profile import Profile
+    from backend.app.models.enums import DeliveryStatus, PostcodeStatus, AppRole
+    from backend.app.services.delivery_service import hash_otp
+    from backend.app.database import SessionLocal
+    from starlette.testclient import TestClient
+    from backend.app.main import app
+
+    db = SessionLocal()
+    client = TestClient(app)
+
+    try:
+        # Create merchant
+        merchant = Profile(
+            id=f"merchant-privacy-{uuid.uuid4().hex[:8]}",
+            email=f"merchant_{uuid.uuid4().hex[:8]}@example.com",
+            hashed_password="test_hashed_password",
+            full_name="Merchant Privacy Test",
+            role=AppRole.MERCHANT,
+            business_name="Privacy Logistics Hub",
+        )
+        db.add(merchant)
+
+        token = secrets.token_urlsafe(24)
+        delivery = Delivery(
+            id=f"PL-PRIV-{uuid.uuid4().hex[:6]}",
+            tracking_token=token,
+            merchant_id=merchant.id,
+            recipient_name="Chioma Okeke",
+            recipient_phone="+2348034567890",
+            destination_address="Plot 5 Victoria Island, Lagos",
+            destination_area="Victoria Island",
+            destination_state="Lagos",
+            postcode_input="101241",
+            postcode_status=PostcodeStatus.VERIFIED,
+            verified_postcode="101241",
+            package_description="Confidential Documents",
+            fee=2500,
+            status=DeliveryStatus.PENDING,
+            otp_hash=hash_otp("654321"),
+            otp_attempts=0,
+            otp_max_attempts=3,
+        )
+        db.add(delivery)
+        db.commit()
+
+        # 1. Predictable human-readable delivery ID rejected with HTTP 404
+        res_predictable = client.get(f"/api/v1/deliveries/track/{delivery.id}")
+        assert res_predictable.status_code == 404
+        assert "32-character tracking token" in res_predictable.json()["detail"]
+
+        # 2. Public tracking by secure token returns masked privacy data
+        res_public = client.get(f"/api/v1/deliveries/track/{token}")
+        assert res_public.status_code == 200
+        data = res_public.json()
+        assert data["id"] == delivery.id
+        assert data["recipient_name_masked"] == "C***** O****"
+        assert data["recipient_phone_masked"] == "+23****7890"
+        assert data["destination_general_location"] == "Victoria Island, Lagos"
+        # Privacy guarantees: ensure raw private fields are omitted from public response
+        assert "destination_address" not in data
+        assert "otp_hash" not in data
+        assert "fee" not in data
+
+        # 3. Server-side challenge verification with WRONG last 4 digits -> HTTP 400 Bad Request
+        res_wrong_chal = client.post(
+            f"/api/v1/deliveries/track/{token}/verify-recipient",
+            json={"phone_last_4": "1234"},
+        )
+        assert res_wrong_chal.status_code == 400
+        assert "Identity challenge failed" in res_wrong_chal.json()["detail"]
+
+        # 4. Server-side challenge verification with CORRECT last 4 digits ("7890") -> HTTP 200 OK
+        res_ok_chal = client.post(
+            f"/api/v1/deliveries/track/{token}/verify-recipient",
+            json={"phone_last_4": "7890"},
+        )
+        assert res_ok_chal.status_code == 200
+        chal_data = res_ok_chal.json()
+        assert chal_data["success"] is True
+        assert chal_data["verified"] is True
+        assert chal_data["delivery_id"] == delivery.id
+
+    finally:
+        db.close()
+
+
+def test_verification_evidence_model_immutability():
+    """Verify that VerificationEvidence records are strictly immutable and reject update or delete operations."""
+    import pytest
+    from backend.app.models.verification_evidence import VerificationEvidence
+    from backend.app.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        evidence = VerificationEvidence(
+            id=f"evi-{uuid.uuid4().hex[:12]}",
+            postcode="100001",
+            provider="NIPOST",
+            provider_reference_id="TX-12345",
+            verification_method="validator_autofill_pipeline",
+            dataset_version="2026.1",
+            response_hash="abc123hash456",
+            status="verified",
+            address_metadata_source="nipost_autofill",
+        )
+        db.add(evidence)
+        db.commit()
+
+        # Attempt to update evidence -> raises ValueError
+        evidence.status = "rejected"
+        with pytest.raises(ValueError, match="VerificationEvidence records are strictly immutable and cannot be updated"):
+            db.commit()
+        db.rollback()
+
+        # Attempt to delete evidence -> raises ValueError
+        with pytest.raises(ValueError, match="VerificationEvidence records are strictly immutable and cannot be deleted"):
+            db.delete(evidence)
+            db.commit()
+        db.rollback()
+
+    finally:
+        db.close()
+

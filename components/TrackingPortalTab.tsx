@@ -2,6 +2,7 @@
 
 import React, { useState } from "react";
 import { Delivery, AppSettings } from "@/lib/types";
+import { fastApiClient, FastAPIPublicTracking } from "@/lib/fastapi-client";
 import {
   Search,
   Package,
@@ -20,7 +21,10 @@ import {
   ChevronRight,
   Eye,
   EyeOff,
-  Lock
+  Lock,
+  Shield,
+  HelpCircle,
+  ShieldAlert
 } from "lucide-react";
 
 interface TrackingPortalTabProps {
@@ -34,85 +38,154 @@ export function TrackingPortalTab({
   settings,
   onVerifyOtp,
 }: TrackingPortalTabProps) {
-  const [trackingInput, setTrackingInput] = useState("PL-2048");
-  const [searchedRef, setSearchedRef] = useState("PL-2048");
-  const [enteredOtp, setEnteredOtp] = useState("");
-  const [otpNotice, setOtpNotice] = useState<{ type: "success" | "error"; text: string } | null>(null);
-  const [copiedOtp, setCopiedOtp] = useState(false);
+  const [trackingInput, setTrackingInput] = useState("");
+  const [searchedRef, setSearchedRef] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
 
-  // P0 Security: OTP masking & identity challenge
-  const [isPinRevealed, setIsPinRevealed] = useState(false);
+  // Active tracking state from server or demo fallback
+  const [publicTracking, setPublicTracking] = useState<FastAPIPublicTracking | null>(null);
+  const [isDemoView, setIsDemoView] = useState(false);
+  const [demoDelivery, setDemoDelivery] = useState<Delivery | null>(null);
+
+  // Server-side Recipient Challenge Verification
   const [phoneChallenge, setPhoneChallenge] = useState("");
+  const [isChallengeVerifying, setIsChallengeVerifying] = useState(false);
+  const [challengeVerified, setChallengeVerified] = useState(false);
   const [challengeError, setChallengeError] = useState("");
 
-  const delivery = deliveries.find(
-    (d) =>
-      d.id.toLowerCase() === searchedRef.trim().toLowerCase() ||
-      ((d as any).tracking_token && (d as any).tracking_token === searchedRef.trim())
-  );
+  // OTP Confirmation State
+  const [enteredOtp, setEnteredOtp] = useState("");
+  const [isOtpSubmitting, setIsOtpSubmitting] = useState(false);
+  const [otpNotice, setOtpNotice] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
-  const handleSearch = (e: React.FormEvent) => {
-    e.preventDefault();
-    setSearchedRef(trackingInput.trim());
-    setOtpNotice(null);
-    setIsPinRevealed(false);
-    setPhoneChallenge("");
+  const handleSearch = async (e: React.FormEvent, tokenOverride?: string) => {
+    if (e) e.preventDefault();
+    const token = (tokenOverride || trackingInput).trim();
+    if (!token) return;
+
+    setSearchedRef(token);
+    setSearchError(null);
     setChallengeError("");
-  };
+    setChallengeVerified(false);
+    setOtpNotice(null);
+    setEnteredOtp("");
+    setPhoneChallenge("");
 
-  const handleCopyOtp = (code: string) => {
-    navigator.clipboard.writeText(code);
-    setCopiedOtp(true);
-    setTimeout(() => setCopiedOtp(false), 2000);
-  };
+    // Check for human-readable ID search
+    if (token.startsWith("PL-") || token.length < 20) {
+      // Check if it exists in local deliveries (for demonstration simulator)
+      const localMatch = deliveries.find((d) => d.id.toLowerCase() === token.toLowerCase());
+      if (localMatch) {
+        setIsDemoView(true);
+        setDemoDelivery(localMatch);
+        setPublicTracking(null);
+        return;
+      }
 
-  // Challenge verification: verify recipient owns this parcel before revealing the PIN
-  const handleRevealPin = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!delivery) return;
-    const cleanPhone = delivery.recipientPhone.replace(/\D/g, "");
-    const lastFour = cleanPhone.slice(-4);
-    if (phoneChallenge.trim() === lastFour) {
-      setIsPinRevealed(true);
-      setChallengeError("");
-    } else {
-      setChallengeError("Last 4 digits did not match recipient phone.");
+      setSearchError(
+        "Public tracking requires a secure 32-character tracking token sent via SMS/WhatsApp. " +
+        "Human-readable delivery references (such as PL-2048) are restricted to merchant dashboard search to protect recipient privacy."
+      );
+      setPublicTracking(null);
+      setDemoDelivery(null);
+      return;
+    }
+
+    // Token search via FastAPI
+    setIsLoading(true);
+    try {
+      const tracking = await fastApiClient.getTracking(token);
+      setPublicTracking(tracking);
+      setIsDemoView(false);
+      setDemoDelivery(null);
+    } catch (err: any) {
+      setPublicTracking(null);
+      setDemoDelivery(null);
+      setSearchError(err.message || "Tracking record not found. Please verify the 32-character tracking link.");
+    } finally {
+      setIsLoading(false);
     }
   };
 
+  // Server-side Recipient Challenge Handler
+  const handleVerifyRecipient = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!phoneChallenge || phoneChallenge.trim().length !== 4) {
+      setChallengeError("Please enter exactly 4 numeric digits.");
+      return;
+    }
+
+    setChallengeError("");
+    setIsChallengeVerifying(true);
+
+    try {
+      if (publicTracking) {
+        await fastApiClient.verifyRecipientChallenge(searchedRef, phoneChallenge.trim());
+        setChallengeVerified(true);
+      } else if (demoDelivery) {
+        // Demo mode local verification simulation
+        const cleanPhone = demoDelivery.recipientPhone.replace(/\D/g, "");
+        if (cleanPhone.endsWith(phoneChallenge.trim())) {
+          setChallengeVerified(true);
+        } else {
+          setChallengeError("Last 4 digits did not match recipient phone.");
+        }
+      }
+    } catch (err: any) {
+      setChallengeError(err.message || "Identity challenge failed. Digits do not match recipient on record.");
+    } finally {
+      setIsChallengeVerifying(false);
+    }
+  };
+
+  // Proof-of-delivery OTP submission
   const handleConfirmOtp = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!delivery) return;
-    const res = await onVerifyOtp(delivery.id, enteredOtp.trim());
-    if (res.success) {
-      setOtpNotice({ type: "success", text: res.message });
-      setEnteredOtp("");
-    } else {
-      setOtpNotice({ type: "error", text: res.message });
+    const deliveryId = publicTracking?.id || demoDelivery?.id;
+    if (!deliveryId || !enteredOtp.trim()) return;
+
+    setIsOtpSubmitting(true);
+    try {
+      const res = await onVerifyOtp(deliveryId, enteredOtp.trim());
+      if (res.success) {
+        setOtpNotice({ type: "success", text: res.message });
+        setEnteredOtp("");
+        // Reload tracking to reflect delivered status
+        if (publicTracking) {
+          const updated = await fastApiClient.getTracking(searchedRef);
+          setPublicTracking(updated);
+        }
+      } else {
+        setOtpNotice({ type: "error", text: res.message });
+      }
+    } catch (err: any) {
+      setOtpNotice({ type: "error", text: err.message || "OTP verification failed." });
+    } finally {
+      setIsOtpSubmitting(false);
     }
   };
 
-  // Tracking steps
+  // Step tracker helpers
   const steps = [
-    { key: "draft", label: "Order Placed", desc: "Received at merchant hub" },
-    { key: "assigned", label: "Postcode Verified", desc: "Assigned to courier partner" },
-    { key: "in_transit", label: "Out for Delivery", desc: "Rider on delivery route" },
-    { key: "delivered", label: "Delivered", desc: "Confirmed with OTP" },
+    { key: "pending", label: "Order Received", desc: "Registered at merchant hub" },
+    { key: "assigned", label: "Postcode Routed", desc: "Assigned to courier partner" },
+    { key: "in_transit", label: "Out for Delivery", desc: "Rider dispatched on route" },
+    { key: "delivered", label: "Delivered", desc: "Confirmed with recipient OTP" },
   ];
 
-  const getStepIndex = (status: Delivery["status"]) => {
+  const activeStatus = publicTracking?.status || demoDelivery?.status || "pending";
+  const getStepIndex = (status: string) => {
     if (status === "delivered") return 3;
-    if (status === "in_transit") return 2;
+    if (status === "in_transit" || status === "out_for_delivery" || status === "picked_up") return 2;
     if (status === "assigned") return 1;
     return 0;
   };
+  const currentStepIdx = getStepIndex(activeStatus);
 
-  const currentStepIdx = delivery ? getStepIndex(delivery.status) : 0;
-
-  // Masked phone display for privacy (e.g. +234 802 *** **02)
-  const maskedPhone = delivery
-    ? delivery.recipientPhone.replace(/(\+?\d{3,6})\d{4}(\d{2})/, "$1 *** **$2")
-    : "";
+  const displayPostcode = publicTracking?.verified_postcode || demoDelivery?.verifiedPostcode;
+  const isPostcodeVerified = (publicTracking?.postcode_status || demoDelivery?.postcodeStatus) === "verified";
+  const isPodVerified = publicTracking?.pod_verified || demoDelivery?.podVerified;
 
   return (
     <div>
@@ -120,81 +193,118 @@ export function TrackingPortalTab({
       <section className="panel">
         <div className="panel-head">
           <div>
-            <h2>PostcodeLink Customer Tracking Portal</h2>
+            <h2>PostcodeLink Public Recipient Tracking</h2>
             <p>
-              Recipients and merchants can track live delivery progress, view verified NIPOST routing codes, and confirm proof of delivery via OTP.
+              Recipients can securely track delivery milestones, view verified NIPOST routing metadata, and verify proof of delivery with server-side identity protection.
             </p>
           </div>
         </div>
 
-        {/* Search Bar */}
-        <form onSubmit={handleSearch} style={{ display: "flex", gap: "10px", maxWidth: "600px", margin: "10px 0 20px" }}>
-          <div className="search" style={{ height: "42px" }}>
+        {/* Secure Search Bar */}
+        <form onSubmit={(e) => handleSearch(e)} style={{ display: "flex", gap: "10px", maxWidth: "680px", margin: "14px 0 16px" }}>
+          <div className="search" style={{ height: "44px", flex: 1 }}>
             <Search size={17} />
             <input
               type="text"
-              placeholder="Enter Delivery Reference (e.g. PL-2048, PL-2047, PL-2046)..."
+              placeholder="Enter 32-character secure tracking token..."
               value={trackingInput}
               onChange={(e) => setTrackingInput(e.target.value)}
+              aria-label="Tracking Token Input"
             />
           </div>
-          <button type="submit" className="primary" style={{ height: "42px", padding: "0 20px" }}>
-            Track Parcel
+          <button type="submit" className="primary" style={{ height: "44px", padding: "0 22px" }} disabled={isLoading}>
+            {isLoading ? "Searching..." : "Track Parcel"}
           </button>
         </form>
 
-        {/* Quick sample chips */}
-        <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", fontSize: "11px", color: "#64748b" }}>
-          <span>Try sample references:</span>
-          {deliveries.slice(0, 4).map((d) => (
-            <button
-              key={d.id}
-              type="button"
-              className="outline"
-              style={{ height: "26px", fontSize: "10px", padding: "0 8px" }}
-              onClick={() => {
-                setTrackingInput(d.id);
-                setSearchedRef(d.id);
-                setOtpNotice(null);
-                setIsPinRevealed(false);
-                setPhoneChallenge("");
-                setChallengeError("");
-              }}
-            >
-              {d.id} ({d.recipientName.split(" ")[0]} · {d.status.replace("_", " ")})
-            </button>
-          ))}
+        {/* Privacy Guidance Notice */}
+        <div style={{ fontSize: "11px", color: "#64748b", display: "flex", alignItems: "center", gap: "6px", marginBottom: "14px" }}>
+          <Shield size={13} color="#2563eb" />
+          <span>
+            <strong>Recipient Privacy Protection:</strong> Human-readable delivery IDs (e.g. <code>PL-2048</code>) are restricted from public search to prevent predictable scraping. Use the unique 32-character link sent via SMS.
+          </span>
         </div>
+
+        {/* Demonstration Simulator Helper */}
+        {deliveries.length > 0 && (
+          <div style={{ background: "#f8fafc", border: "1px dashed #cbd5e1", borderRadius: "6px", padding: "10px 14px", marginTop: "10px" }}>
+            <div style={{ fontSize: "11px", fontWeight: 700, color: "#475569", marginBottom: "6px", display: "flex", alignItems: "center", gap: "6px" }}>
+              <span className="pill gray" style={{ fontSize: "10px", padding: "2px 6px" }}>DEMONSTRATION SIMULATOR</span>
+              Click a sample reference to test tracking workflows:
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+              {deliveries.slice(0, 4).map((d) => (
+                <button
+                  key={d.id}
+                  type="button"
+                  className="outline"
+                  style={{ height: "26px", fontSize: "11px", padding: "0 10px" }}
+                  onClick={() => {
+                    const token = (d as any).tracking_token || d.id;
+                    setTrackingInput(token);
+                    handleSearch(undefined as any, token);
+                  }}
+                >
+                  {d.id} ({d.recipientName.split(" ")[0]} · {d.status.replace("_", " ")})
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </section>
 
-      {delivery ? (
+      {/* Error Message */}
+      {searchError && (
+        <section className="panel" style={{ borderLeft: "4px solid #dc2626", background: "#fef2f2", padding: "16px 20px" }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: "10px" }}>
+            <AlertTriangle size={18} color="#dc2626" style={{ marginTop: "2px" }} />
+            <div>
+              <b style={{ color: "#991b1b", fontSize: "13px" }}>Tracking Lookup Notice</b>
+              <p style={{ margin: "4px 0 0", fontSize: "12px", color: "#b91c1c" }}>{searchError}</p>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* Demonstration Mode Warning */}
+      {isDemoView && demoDelivery && (
+        <div style={{ background: "#fffbeb", border: "1px solid #fde68a", padding: "10px 16px", borderRadius: "6px", marginBottom: "16px", display: "flex", alignItems: "center", gap: "8px" }}>
+          <AlertTriangle size={16} color="#d97706" />
+          <span style={{ fontSize: "12px", color: "#92400e" }}>
+            <strong>Demonstration Simulator View:</strong> Displaying simulated local delivery <code>{demoDelivery.id}</code>. In live production, all tracking requests are verified against FastAPI server tokens.
+          </span>
+        </div>
+      )}
+
+      {/* Active Parcel Tracking View */}
+      {(publicTracking || demoDelivery) && (
         <div style={{ display: "grid", gridTemplateColumns: "1.2fr 0.8fr", gap: "20px" }}>
           {/* Main Journey Card */}
-          <section className="panel" style={{ padding: "28px" }}>
+          <section className="panel" style={{ padding: "26px" }}>
             {/* Header info */}
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", borderBottom: "1px solid var(--line)", paddingBottom: "18px", marginBottom: "22px" }}>
               <div>
-                <span className="eyebrow">SHIPMENT TRACKING</span>
+                <span className="eyebrow">SHIPMENT MILESTONES</span>
                 <div style={{ display: "flex", alignItems: "center", gap: "10px", marginTop: "4px" }}>
-                  <h1 style={{ fontFamily: "Manrope, sans-serif", fontSize: "24px", margin: 0, fontWeight: 800 }}>
-                    {delivery.id}
+                  <h1 style={{ fontFamily: "Manrope, sans-serif", fontSize: "22px", margin: 0, fontWeight: 800 }}>
+                    {publicTracking?.id || demoDelivery?.id}
                   </h1>
-                  <span className={`pill ${delivery.status === "delivered" ? "green" : delivery.status === "in_transit" ? "blue" : "amber"}`}>
-                    <i /> {delivery.status.replace("_", " ")}
+                  <span className={`pill ${activeStatus === "delivered" ? "green" : activeStatus === "in_transit" || activeStatus === "out_for_delivery" ? "blue" : "amber"}`}>
+                    <i /> {activeStatus.replace("_", " ")}
                   </span>
                 </div>
                 <div style={{ fontSize: "12px", color: "#64748b", marginTop: "4px" }}>
-                  Estimated Delivery: <b style={{ color: "var(--ink)" }}>{delivery.estimatedDeliveryTime || "In regular business hours"}</b>
+                  Destination Hub: <b style={{ color: "var(--ink)" }}>{publicTracking?.destination_general_location || `${demoDelivery?.destinationArea}, ${demoDelivery?.destinationState}`}</b>
                 </div>
               </div>
 
-              {delivery.postcodeStatus === "verified" ? (
+              {isPostcodeVerified && displayPostcode ? (
                 <div className="postcode-badge verified" style={{ padding: "6px 12px", fontSize: "12px" }}>
-                  <ShieldCheck size={14} /> NG-{delivery.verifiedPostcode} (NIPOST Verified)
+                  <ShieldCheck size={14} /> NG-{displayPostcode} (NIPOST Verified)
                 </div>
               ) : (
                 <div className="postcode-badge unverified" style={{ padding: "6px 12px", fontSize: "12px" }}>
-                  <AlertTriangle size={14} /> Manual Landmark Routing
+                  <AlertTriangle size={14} /> Manual Routing
                 </div>
               )}
             </div>
@@ -202,7 +312,6 @@ export function TrackingPortalTab({
             {/* Interactive Step Progress Tracker */}
             <div style={{ margin: "28px 0 34px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", position: "relative", marginBottom: "8px" }}>
-                {/* Connecting bar */}
                 <div
                   style={{
                     position: "absolute",
@@ -269,41 +378,42 @@ export function TrackingPortalTab({
               </div>
             </div>
 
-            {/* Destination & Package Details */}
+            {/* Privacy-Preserved Location & Routing Details */}
             <div className="form-grid">
               <div style={{ background: "#f8fafc", padding: "14px", borderRadius: "8px", border: "1px solid var(--line)" }}>
                 <span style={{ fontSize: "10px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
-                  DESTINATION ADDRESS
+                  RECIPIENT & DESTINATION (PROTECTED)
                 </span>
-                <b style={{ fontSize: "13px", display: "block", marginTop: "4px" }}>{delivery.destinationAddress}</b>
-                {delivery.landmark && (
-                  <div style={{ fontSize: "11px", color: "#166534", marginTop: "2px" }}>
-                    Landmark: {delivery.landmark}
-                  </div>
-                )}
+                <b style={{ fontSize: "13px", display: "block", marginTop: "4px" }}>
+                  {publicTracking?.recipient_name_masked || (demoDelivery ? `${demoDelivery.recipientName.split(" ")[0]} ****` : "Recipient")}
+                </b>
                 <div style={{ fontSize: "11px", color: "#64748b", marginTop: "2px" }}>
-                  {delivery.destinationArea}, {delivery.destinationState}
+                  Phone: {publicTracking?.recipient_phone_masked || (demoDelivery ? demoDelivery.recipientPhone.replace(/(\+?\d{3,6})\d{4}(\d{2})/, "$1 **** $2") : "***")}
+                </div>
+                <div style={{ fontSize: "11px", color: "#166534", marginTop: "2px" }}>
+                  Area: {publicTracking?.destination_general_location || `${demoDelivery?.destinationArea}, ${demoDelivery?.destinationState}`}
                 </div>
               </div>
 
               <div style={{ background: "#f8fafc", padding: "14px", borderRadius: "8px", border: "1px solid var(--line)" }}>
                 <span style={{ fontSize: "10px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
-                  PACKAGE & LOGISTICS
+                  DISPATCH LOGISTICS
                 </span>
-                <b style={{ fontSize: "13px", display: "block", marginTop: "4px" }}>{delivery.packageDescription || "Parcel"}</b>
+                <b style={{ fontSize: "13px", display: "block", marginTop: "4px" }}>
+                  {publicTracking?.assigned_operator_name || demoDelivery?.operatorName || "Awaiting Fleet Assignment"}
+                </b>
                 <div style={{ fontSize: "11px", color: "#64748b", marginTop: "2px" }}>
-                  Courier: <b>{delivery.operatorName || "Awaiting assignment"}</b>
+                  Verification PIN: <b>Sent via SMS to recipient</b>
                 </div>
                 <div style={{ fontSize: "11px", color: "#0f766e", marginTop: "2px", fontWeight: 600 }}>
-                  Delivery Fee: ₦{delivery.fee?.toLocaleString() || "Prepaid"}
+                  Security: 6-Digit Cryptographic OTP
                 </div>
               </div>
             </div>
           </section>
 
-          {/* Right Column: Protected Security PIN & Courier Contact */}
+          {/* Right Column: Server-Side Phone Challenge & OTP Confirmation */}
           <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
-            {/* P0 Security: Protected Proof of Delivery PIN (OTP) Card */}
             <section
               className="panel"
               style={{
@@ -312,74 +422,72 @@ export function TrackingPortalTab({
               }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#166534", fontWeight: 700, fontSize: "13px", marginBottom: "6px" }}>
-                <Key size={16} /> Delivery Confirmation PIN (OTP)
+                <Key size={16} /> Proof of Delivery Confirmation
               </div>
               <p style={{ fontSize: "11px", color: "#475569", margin: "0 0 12px", lineHeight: 1.5 }}>
-                A 4-digit security PIN has been dispatched to recipient <b>{maskedPhone}</b>. Give this PIN to the courier upon delivery.
+                A 6-digit confirmation PIN is sent via transactional SMS (DND route) to the recipient. To prevent unauthorized interception, the PIN is never displayed in public tracking views.
               </p>
 
-              {delivery.podVerified ? (
-                <div style={{ background: "#dcfce7", border: "1px solid #86efac", color: "#166534", padding: "12px", borderRadius: "8px", textAlign: "center", fontWeight: 700, fontSize: "13px" }}>
-                  ✓ Proof of Delivery Verified
-                  <div style={{ fontSize: "10px", fontWeight: 400, marginTop: "2px" }}>
-                    {delivery.podNote || "Authenticated via OTP"}
+              {isPodVerified ? (
+                <div style={{ background: "#dcfce7", border: "1px solid #86efac", color: "#166534", padding: "14px", borderRadius: "8px", textAlign: "center", fontWeight: 700, fontSize: "13px" }}>
+                  <CheckCircle2 size={18} style={{ margin: "0 auto 4px" }} />
+                  Proof of Delivery Confirmed
+                  <div style={{ fontSize: "11px", fontWeight: 400, marginTop: "2px", color: "#14532d" }}>
+                    Delivery authenticated with cryptographic OTP.
                   </div>
                 </div>
-              ) : isPinRevealed ? (
-                /* Authenticated PIN View */
-                <div style={{ background: "#ffffff", border: "2px dashed #86efac", borderRadius: "8px", padding: "16px", textAlign: "center" }}>
-                  <div style={{ fontSize: "10px", color: "#64748b", letterSpacing: "1px", fontWeight: 700, textTransform: "uppercase" }}>
-                    CONFIRMATION PIN (AUTHENTICATED)
+              ) : challengeVerified ? (
+                /* Unlocked OTP Confirmation Form */
+                <form onSubmit={handleConfirmOtp} style={{ background: "#ffffff", border: "2px solid #86efac", borderRadius: "8px", padding: "16px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px", color: "#166534", fontSize: "12px", fontWeight: 700, marginBottom: "4px" }}>
+                    <ShieldCheck size={15} /> Recipient Identity Confirmed
                   </div>
-                  <div
-                    style={{
-                      fontFamily: "'JetBrains Mono', monospace",
-                      fontSize: "30px",
-                      fontWeight: 800,
-                      letterSpacing: "8px",
-                      color: "#166534",
-                      margin: "6px 0",
-                    }}
-                  >
-                    {delivery.otp || "4821"}
-                  </div>
-                  <div style={{ display: "flex", gap: "6px", justifyContent: "center" }}>
-                    <button
-                      type="button"
-                      className="outline"
-                      style={{ height: "26px", fontSize: "11px", padding: "0 8px" }}
-                      onClick={() => handleCopyOtp(delivery.otp || "4821")}
-                    >
-                      {copiedOtp ? <Check size={12} color="#16a34a" /> : <Copy size={12} />} Copy PIN
+                  <p style={{ fontSize: "11px", color: "#64748b", margin: "0 0 12px" }}>
+                    Enter the 6-digit PIN received on your phone to complete delivery confirmation:
+                  </p>
+
+                  <div style={{ display: "flex", gap: "8px" }}>
+                    <input
+                      type="text"
+                      maxLength={6}
+                      placeholder="Enter 6-digit PIN"
+                      value={enteredOtp}
+                      onChange={(e) => setEnteredOtp(e.target.value)}
+                      style={{
+                        flex: 1,
+                        height: "38px",
+                        border: "1px solid #cbd5e1",
+                        borderRadius: "6px",
+                        textAlign: "center",
+                        fontSize: "16px",
+                        fontWeight: 700,
+                        letterSpacing: "4px",
+                      }}
+                      aria-label="Confirmation OTP"
+                    />
+                    <button type="submit" className="primary" style={{ height: "38px", padding: "0 16px" }} disabled={isOtpSubmitting}>
+                      {isOtpSubmitting ? "Verifying..." : "Confirm"}
                     </button>
-                    <button
-                      type="button"
-                      className="outline"
-                      style={{ height: "26px", fontSize: "11px", padding: "0 8px" }}
-                      onClick={() => setIsPinRevealed(false)}
-                    >
-                      <EyeOff size={12} /> Hide
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                /* Masked Public View with Identity Challenge */
-                <div style={{ background: "#f8fafc", border: "1px solid var(--line)", borderRadius: "8px", padding: "14px" }}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", color: "#475569" }}>
-                      <Lock size={14} color="#64748b" />
-                      <span>Security PIN: <b style={{ letterSpacing: "4px" }}>••••</b></span>
-                    </div>
-                    <span style={{ fontSize: "10px", background: "#e2e8f0", padding: "2px 6px", borderRadius: "4px" }}>
-                      Masked for Privacy
-                    </span>
                   </div>
 
-                  <form onSubmit={handleRevealPin} style={{ marginTop: "10px", borderTop: "1px solid #e2e8f0", paddingTop: "10px" }}>
-                    <label style={{ fontSize: "10px", color: "#64748b", display: "block", marginBottom: "4px" }}>
-                      Are you the recipient? Enter last 4 digits of phone ({maskedPhone}):
-                    </label>
-                    <div style={{ display: "flex", gap: "6px" }}>
+                  {otpNotice && (
+                    <div style={{ marginTop: "10px", fontSize: "11px", fontWeight: 600, color: otpNotice.type === "success" ? "#16a34a" : "#dc2626" }}>
+                      {otpNotice.text}
+                    </div>
+                  )}
+                </form>
+              ) : (
+                /* Server-Side Phone Verification Challenge */
+                <div style={{ background: "#ffffff", border: "1px solid #cbd5e1", borderRadius: "8px", padding: "16px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", fontWeight: 700, color: "#1e293b", marginBottom: "4px" }}>
+                    <Lock size={14} color="#64748b" /> Recipient Verification Gate
+                  </div>
+                  <p style={{ fontSize: "11px", color: "#64748b", margin: "0 0 12px" }}>
+                    Are you the recipient? Confirm the last 4 digits of your phone number to unlock delivery confirmation:
+                  </p>
+
+                  <form onSubmit={handleVerifyRecipient}>
+                    <div style={{ display: "flex", gap: "8px" }}>
                       <input
                         type="password"
                         maxLength={4}
@@ -387,115 +495,45 @@ export function TrackingPortalTab({
                         value={phoneChallenge}
                         onChange={(e) => setPhoneChallenge(e.target.value)}
                         style={{
-                          width: "110px",
-                          height: "30px",
+                          width: "120px",
+                          height: "36px",
                           border: "1px solid #cbd5e1",
-                          borderRadius: "4px",
+                          borderRadius: "6px",
                           textAlign: "center",
-                          fontSize: "12px",
-                          letterSpacing: "2px",
+                          fontSize: "14px",
+                          letterSpacing: "3px",
                         }}
+                        aria-label="Last 4 digits of recipient phone"
                       />
-                      <button type="submit" className="outline" style={{ height: "30px", fontSize: "11px" }}>
-                        <Eye size={12} /> Reveal PIN
+                      <button type="submit" className="outline" style={{ height: "36px", fontSize: "12px" }} disabled={isChallengeVerifying}>
+                        {isChallengeVerifying ? "Verifying..." : "Verify Identity"}
                       </button>
                     </div>
+
                     {challengeError && (
-                      <div style={{ fontSize: "10px", color: "#dc2626", marginTop: "4px" }}>
-                        {challengeError}
+                      <div style={{ fontSize: "11px", color: "#dc2626", marginTop: "8px", display: "flex", alignItems: "center", gap: "4px" }}>
+                        <ShieldAlert size={13} /> {challengeError}
                       </div>
                     )}
                   </form>
                 </div>
               )}
-
-              {/* Courier Rider OTP Verification Form (with attempt limits) */}
-              {!delivery.podVerified && (
-                <form onSubmit={handleConfirmOtp} style={{ marginTop: "16px", borderTop: "1px solid #e2e8f0", paddingTop: "14px" }}>
-                  <label style={{ fontSize: "11px", fontWeight: 700, color: "#475569", display: "block", marginBottom: "4px" }}>
-                    Courier Rider: Verify Recipient PIN on Delivery
-                  </label>
-                  <small style={{ fontSize: "10px", color: "#64748b", display: "block", marginBottom: "6px" }}>
-                    Enforces 3-attempt limit with 15-minute lockout to prevent brute-force.
-                  </small>
-                  <div style={{ display: "flex", gap: "8px" }}>
-                    <input
-                      type="text"
-                      maxLength={4}
-                      placeholder="Enter 4-digit PIN"
-                      value={enteredOtp}
-                      onChange={(e) => setEnteredOtp(e.target.value)}
-                      style={{
-                        flex: 1,
-                        height: "36px",
-                        border: "1px solid #cbd5e1",
-                        borderRadius: "6px",
-                        textAlign: "center",
-                        fontSize: "14px",
-                        fontWeight: 700,
-                        letterSpacing: "4px",
-                      }}
-                    />
-                    <button type="submit" className="primary" style={{ height: "36px" }}>
-                      Authenticate
-                    </button>
-                  </div>
-                  {otpNotice && (
-                    <div
-                      style={{
-                        marginTop: "8px",
-                        fontSize: "11px",
-                        color: otpNotice.type === "success" ? "#16a34a" : "#dc2626",
-                        fontWeight: 600,
-                      }}
-                    >
-                      {otpNotice.text}
-                    </div>
-                  )}
-                </form>
-              )}
             </section>
 
-            {/* Courier & Support Card */}
+            {/* Courier & Dispatch Contact */}
             <section className="panel">
-              <div style={{ fontSize: "12px", fontWeight: 700, color: "var(--ink)", marginBottom: "12px", display: "flex", alignItems: "center", gap: "6px" }}>
-                <Truck size={15} color="#2563eb" /> Courier & Dispatch Contact
+              <div style={{ fontSize: "12px", fontWeight: 700, color: "var(--ink)", marginBottom: "8px", display: "flex", alignItems: "center", gap: "6px" }}>
+                <Truck size={15} color="#2563eb" /> Courier & Dispatch Partner
               </div>
-
-              <b style={{ fontSize: "13px", display: "block" }}>{delivery.operatorName || "Unassigned"}</b>
+              <b style={{ fontSize: "13px", display: "block" }}>
+                {publicTracking?.assigned_operator_name || demoDelivery?.operatorName || "Fleet Partner Assigned"}
+              </b>
               <div style={{ fontSize: "11px", color: "#64748b", marginTop: "2px" }}>
-                Official Courier Partner
-              </div>
-
-              <div style={{ display: "flex", gap: "8px", marginTop: "14px" }}>
-                <a
-                  href={`tel:${delivery.recipientPhone}`}
-                  className="outline"
-                  style={{ flex: 1, height: "36px", textDecoration: "none", display: "flex", alignItems: "center", justifyContent: "center", gap: "6px" }}
-                >
-                  <Phone size={14} color="#2563eb" /> Call Rider
-                </a>
-                <a
-                  href={`https://wa.me/2348034519021?text=${encodeURIComponent(`Hello, I am tracking parcel ${delivery.id} heading to ${delivery.destinationArea}.`)}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="primary"
-                  style={{ flex: 1, height: "36px", background: "#25D366", borderColor: "#25D366", textDecoration: "none", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "6px" }}
-                >
-                  <MessageCircle size={14} /> WhatsApp
-                </a>
+                Authorized PostcodeLink Logistics Partner
               </div>
             </section>
           </div>
         </div>
-      ) : (
-        <section className="panel" style={{ textAlign: "center", padding: "48px 20px" }}>
-          <Package size={40} color="#94a3b8" style={{ margin: "auto", marginBottom: "12px" }} />
-          <h3>No Shipment Found for &quot;{searchedRef}&quot;</h3>
-          <p style={{ color: "#64748b", fontSize: "12px", maxWidth: "420px", margin: "auto" }}>
-            Please verify the tracking reference code (e.g. <code>PL-2048</code>) sent in your merchant order confirmation.
-          </p>
-        </section>
       )}
     </div>
   );
