@@ -691,6 +691,7 @@ export default function Home() {
               deliveries={deliveries}
               settings={settings}
               onVerifyOtp={handleVerifyOtp}
+              isDemoMode={isDemoMode}
             />
           )}
 

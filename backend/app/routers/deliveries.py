@@ -4,7 +4,7 @@ import secrets
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, Query, status, HTTPException
+from fastapi import APIRouter, Depends, Query, status, HTTPException, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
@@ -17,6 +17,7 @@ from backend.app.models.profile import Profile
 from backend.app.models.notification_outbox import NotificationOutbox
 from backend.app.models.enums import DeliveryStatus, AppRole
 from backend.app.services.notification_service import NotificationDeliveryStatus, mask_phone
+from backend.app.core.network import get_trusted_client_ip
 from backend.app.schemas.delivery import (
     DeliveryCreateRequest,
     DeliveryCreateResponse,
@@ -29,6 +30,8 @@ from backend.app.schemas.delivery import (
     BulkItemResult,
     RecipientVerifyChallengeRequest,
     RecipientVerifyChallengeResponse,
+    PublicDeliveryConfirmOTPRequest,
+    PublicDeliveryConfirmOTPResponse,
 )
 from backend.app.services.delivery_service import (
     create_delivery,
@@ -39,6 +42,7 @@ from backend.app.services.delivery_service import (
     regenerate_tracking_token,
     resend_delivery_pin,
     verify_recipient_challenge,
+    public_confirm_delivery_otp,
 )
 from backend.app.core.auth_deps import (
     get_current_user,
@@ -192,10 +196,27 @@ def api_get_public_tracking(tracking_token: str, db: Session = Depends(get_db)):
 def api_verify_recipient_challenge(
     tracking_token: str,
     request: RecipientVerifyChallengeRequest,
+    http_request: Request,
     db: Session = Depends(get_db),
 ):
     """Verify recipient phone challenge server-side to unlock proof-of-delivery OTP confirmation."""
-    return verify_recipient_challenge(db, tracking_token, request.phone_last_4)
+    client_ip = get_trusted_client_ip(http_request)
+    return verify_recipient_challenge(db, tracking_token, request.phone_last_4, client_ip=client_ip)
+
+
+@router.post("/track/{tracking_token}/confirm-delivery", response_model=PublicDeliveryConfirmOTPResponse)
+def api_public_confirm_delivery(
+    tracking_token: str,
+    request: PublicDeliveryConfirmOTPRequest,
+    http_request: Request,
+    db: Session = Depends(get_db),
+):
+    """Recipient public proof-of-delivery confirmation endpoint via 6-digit confirmation PIN.
+    
+    Permits unauthenticated recipients on public tracking portal to confirm delivery without merchant JWT.
+    """
+    client_ip = get_trusted_client_ip(http_request)
+    return public_confirm_delivery_otp(db, tracking_token, request, client_ip=client_ip)
 
 
 @router.get("/{identifier}/tracking", response_model=DeliveryPublicTrackingResponse)

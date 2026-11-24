@@ -445,7 +445,27 @@ def test_server_side_recipient_phone_challenge_and_public_privacy():
         chal_data = res_ok_chal.json()
         assert chal_data["success"] is True
         assert chal_data["verified"] is True
-        assert chal_data["delivery_id"] == delivery.id
+        assert chal_data["tracking_token"] == token
+        assert "delivery_id" not in chal_data
+
+        # 5. Public Delivery Confirmation via PIN with invalid PIN -> 400 Bad Request
+        res_wrong_pin = client.post(
+            f"/api/v1/deliveries/track/{token}/confirm-delivery",
+            json={"otp": "111111"},
+        )
+        assert res_wrong_pin.status_code == 400
+        assert "Invalid delivery PIN" in res_wrong_pin.json()["detail"]
+
+        # 6. Public Delivery Confirmation via PIN with valid PIN -> 200 OK
+        res_ok_pin = client.post(
+            f"/api/v1/deliveries/track/{token}/confirm-delivery",
+            json={"otp": "654321", "phone_last_4": "7890"},
+        )
+        assert res_ok_pin.status_code == 200
+        pin_data = res_ok_pin.json()
+        assert pin_data["success"] is True
+        assert pin_data["status"] == "delivered"
+        assert pin_data["pod_verified"] is True
 
     finally:
         db.close()
@@ -487,4 +507,45 @@ def test_verification_evidence_model_immutability():
 
     finally:
         db.close()
+
+
+def test_digital_postcode_parser_specification_flexibility():
+    """Verify digital postcode parser correctly accepts 11/12 compact and 15/16 display canonical codes."""
+    from backend.app.core.postcode_utils import (
+        parse_digital_postcode_components,
+        is_well_formed_postcode,
+        normalize_postcode,
+    )
+
+    # 1. Standard 11-char compact / 15-char display (2-char building)
+    p1 = parse_digital_postcode_components("FC-02-A09-DB-09")
+    assert p1 is not None
+    assert p1["state"] == "FC"
+    assert p1["lga"] == "02"
+    assert p1["district"] == "A09"
+    assert p1["area"] == "DB"
+    assert p1["building"] == "09"
+    assert p1["compact_code"] == "FC02A09DB09"
+    assert p1["total_length"] == 11
+
+    # Compact form parses identically
+    p1_c = parse_digital_postcode_components("FC02A09DB09")
+    assert p1_c == p1
+
+    # 2. 15-char display with spaces (FC 02 A09 DB 09) parses cleanly
+    p1_sp = parse_digital_postcode_components("FC 02 A09 DB 09")
+    assert p1_sp == p1
+
+    # 3. is_well_formed_postcode accepts both legacy and digital variants
+    assert is_well_formed_postcode("100001") is True
+    assert is_well_formed_postcode("FC-02-A09-DB-09") is True
+    assert is_well_formed_postcode("FC02A09DB09") is True
+    assert is_well_formed_postcode("FC 02 A09 DB 09") is True
+
+    # 4. Strictly rejects malformed codes
+    assert parse_digital_postcode_components("12-02-A09-DB-09") is None  # Non-alpha state
+    assert parse_digital_postcode_components("FC-02-A099-DB-09") is None  # District too long
+    assert parse_digital_postcode_components("FC-02-A09-DB-009") is None  # Building unit too long (3 chars)
+    assert parse_digital_postcode_components("FC--02-A09-DB-09") is None  # Double hyphen
+
 

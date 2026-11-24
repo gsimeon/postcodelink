@@ -29,7 +29,10 @@ from backend.app.schemas.delivery import (
     NotificationDispatchPayload,
     DeliveryResponse,
     PublicTrackingEvent,
+    PublicDeliveryConfirmOTPRequest,
+    PublicDeliveryConfirmOTPResponse,
 )
+from backend.app.core.rate_limiter import check_client_ip_rate_limit
 from backend.app.services.state_machine import can_transition
 from backend.app.services.postcode_service import cleanse_address, normalize_string
 from backend.app.core.security import (
@@ -597,19 +600,22 @@ def mask_recipient_name(name: str) -> str:
     return " ".join(masked_parts)
 
 
+TRACKING_TOKEN_REGEX = re.compile(r"^[A-Za-z0-9_-]{32,64}$")
+
+
 def get_public_tracking(db: Session, identifier: str) -> DeliveryPublicTrackingResponse:
-    """Format delivery for public recipient tracking strictly by cryptographically random tracking token.
+    """Format delivery for public recipient tracking strictly by cryptographically random 32-character tracking token.
     
     Enforces strict privacy:
-    - Rejects lookup by predictable human-readable delivery ID (returns 404).
+    - Rejects lookup by predictable human-readable delivery ID or malformed tokens (returns 404).
     - Masks recipient name and phone.
     - Hides exact street address, coordinates, parcel description, fees, and internal actor notes.
     """
     token = identifier.strip()
-    if token.startswith("PL-") or len(token) < 20:
+    if not TRACKING_TOKEN_REGEX.match(token):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Public tracking requires a valid 32-character tracking token. Human-readable delivery IDs cannot be used for public tracking."
+            detail="Public tracking requires an exact 32-character tracking token. Human-readable delivery IDs cannot be used for public tracking."
         )
 
     delivery = db.query(Delivery).filter(
@@ -668,18 +674,28 @@ def get_public_tracking(db: Session, identifier: str) -> DeliveryPublicTrackingR
     )
 
 
-def verify_recipient_challenge(db: Session, identifier: str, phone_last_4: str) -> Dict[str, Any]:
+def verify_recipient_challenge(
+    db: Session,
+    identifier: str,
+    phone_last_4: str,
+    client_ip: Optional[str] = None,
+) -> Dict[str, Any]:
     """Verify recipient phone challenge server-side strictly against the delivery record.
     
     Prevents public brute force and eliminates browser-side phone verification.
     Validates that phone_last_4 matches the last 4 digits of the recipient_phone.
+    Rate-limits challenge attempts to 10 requests/minute per client IP or token.
     """
     token = identifier.strip()
-    if token.startswith("PL-") or len(token) < 20:
+    if not TRACKING_TOKEN_REGEX.match(token):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Public tracking requires a valid 32-character tracking token."
+            detail="Public tracking requires an exact 32-character tracking token."
         )
+
+    # Rate limiting on unauthenticated challenge endpoint
+    ip_key = client_ip or token[:16]
+    check_client_ip_rate_limit(f"pubchal_{ip_key}", limit_per_minute=10)
 
     delivery = db.query(Delivery).filter(
         Delivery.tracking_token == token,
@@ -704,9 +720,153 @@ def verify_recipient_challenge(db: Session, identifier: str, phone_last_4: str) 
         "success": True,
         "verified": True,
         "message": "Recipient identity verified successfully.",
-        "delivery_id": delivery.id,
+        "tracking_token": delivery.tracking_token,
         "status": delivery.status,
     }
+
+
+def public_confirm_delivery_otp(
+    db: Session,
+    tracking_token: str,
+    request: PublicDeliveryConfirmOTPRequest,
+    client_ip: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Recipient public proof-of-delivery confirmation endpoint via 6-digit confirmation PIN.
+    
+    Allows recipients on public tracking portal to confirm receipt directly without merchant/operator credentials.
+    Enforces exact 32-char token matching, rate limiting (10 req/min), lockout, and single-use revocation.
+    """
+    token = tracking_token.strip()
+    if not TRACKING_TOKEN_REGEX.match(token):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Public delivery confirmation requires an exact 32-character tracking token."
+        )
+
+    # Rate limiting (10 req/min)
+    ip_key = client_ip or token[:16]
+    check_client_ip_rate_limit(f"pubotp_{ip_key}", limit_per_minute=10)
+
+    delivery = db.query(Delivery).filter(
+        Delivery.tracking_token == token,
+        Delivery.is_deleted == False,
+    ).with_for_update().first()
+    if not delivery:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Delivery order not found. Please verify the 32-character tracking token."
+        )
+
+    # Check if already delivered
+    if delivery.status == DeliveryStatus.DELIVERED or delivery.pod_verified:
+        return {
+            "success": True,
+            "message": "Delivery has already been confirmed as delivered.",
+            "status": delivery.status,
+            "pod_verified": True,
+        }
+
+    # Optional phone verification
+    if request.phone_last_4:
+        clean_phone = re.sub(r"\D", "", delivery.recipient_phone or "")
+        if clean_phone[-4:] != request.phone_last_4.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Recipient phone verification failed. Digits do not match record."
+            )
+
+    now = datetime.now(timezone.utc)
+
+    # Check lockout
+    if delivery.otp_locked_until:
+        locked_until = delivery.otp_locked_until
+        if locked_until.tzinfo is None:
+            locked_until = locked_until.replace(tzinfo=timezone.utc)
+        if now < locked_until:
+            rem_secs = int((locked_until - now).total_seconds())
+            rem_mins = max(1, (rem_secs + 59) // 60)
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"PIN verification is locked due to multiple failed attempts. Try again in {rem_mins} minute(s)."
+            )
+        else:
+            delivery.otp_attempts = 0
+            delivery.otp_locked_until = None
+
+    # Check expiry
+    if delivery.otp_expires_at:
+        expires_at = delivery.otp_expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if now > expires_at:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Delivery confirmation PIN has expired. Contact dispatch for assistance."
+            )
+
+    # Check PIN match
+    if verify_otp_hash(request.otp, delivery.otp_hash):
+        delivery.pod_verified = True
+        delivery.status = DeliveryStatus.DELIVERED
+        delivery.otp_attempts = 0
+        delivery.otp_locked_until = None
+        # Single-use revocation
+        delivery.otp_hash = "REVOKED_AND_VERIFIED"
+        delivery.pod_note = request.note or "Verified by recipient via public tracking portal PIN."
+        delivery.version += 1
+
+        if delivery.operator_id:
+            op = db.query(Operator).filter(Operator.id == delivery.operator_id).first()
+            if op:
+                from backend.app.services.delivery_service import adjust_operator_workload_count
+                adjust_operator_workload_count(op, DeliveryStatus.OUT_FOR_DELIVERY, DeliveryStatus.DELIVERED)
+                op.completed_deliveries += 1
+
+        event = DeliveryEvent(
+            delivery_id=delivery.id,
+            status=DeliveryStatus.DELIVERED,
+            actor_name="Recipient",
+            actor_role="public_recipient",
+            note=delivery.pod_note,
+            occurred_at=now,
+        )
+        db.add(event)
+        db.commit()
+        db.refresh(delivery)
+        return {
+            "success": True,
+            "message": "Proof of delivery confirmed successfully. Delivery is marked delivered.",
+            "status": delivery.status,
+            "pod_verified": True,
+        }
+
+    # PIN Mismatch
+    delivery.otp_attempts += 1
+    delivery.version += 1
+    remaining = delivery.otp_max_attempts - delivery.otp_attempts
+
+    if remaining <= 0:
+        delivery.otp_locked_until = now + timedelta(minutes=settings.OTP_LOCKOUT_MINUTES)
+        lock_event = DeliveryEvent(
+            delivery_id=delivery.id,
+            status=delivery.status,
+            actor_name="Security Guard",
+            actor_role="system",
+            note=f"Public portal brute force protection triggered: 3 failed PIN attempts. Locked for {settings.OTP_LOCKOUT_MINUTES} minutes.",
+            occurred_at=now,
+        )
+        db.add(lock_event)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Invalid delivery PIN. Maximum attempts exceeded. Verification locked for {settings.OTP_LOCKOUT_MINUTES} minutes."
+        )
+
+    db.commit()
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"Invalid delivery PIN. {remaining} attempt(s) remaining."
+    )
 
 
 

@@ -140,8 +140,21 @@ class RecipientVerifyChallengeResponse(BaseModel):
     success: bool
     verified: bool
     message: str
-    delivery_id: str
+    tracking_token: str
     status: DeliveryStatus
+
+
+class PublicDeliveryConfirmOTPRequest(BaseModel):
+    otp: str = Field(..., pattern=r"^\d{6}$", description="Strict 6-digit numeric proof-of-delivery PIN")
+    phone_last_4: Optional[str] = Field(None, pattern=r"^\d{4}$", description="Optional recipient phone last 4 for double confirmation")
+    note: Optional[str] = None
+
+
+class PublicDeliveryConfirmOTPResponse(BaseModel):
+    success: bool
+    message: str
+    status: DeliveryStatus
+    pod_verified: bool
 
 
 

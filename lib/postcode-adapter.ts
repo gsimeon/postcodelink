@@ -32,8 +32,10 @@ export interface PostcodeLookupResponse {
 export function isWellFormedPostcode(code: string): boolean {
   const trimmed = code.trim();
   const isNumeric = /^\d{6}$/.test(trimmed);
-  const isDigital = /^[A-Z]{2}-\d{2}-[A-Z0-9]{3}-[A-Z0-9]{2}-\d{2}$/i.test(trimmed);
-  return isNumeric || isDigital;
+  const isDigitalHyphen = /^[A-Z]{2}-[A-Z0-9]{2}-[A-Z0-9]{3}-[A-Z0-9]{2}-[A-Z0-9]{2}$/i.test(trimmed);
+  const isDigitalSpace = /^[A-Z]{2} [A-Z0-9]{2} [A-Z0-9]{3} [A-Z0-9]{2} [A-Z0-9]{2}$/i.test(trimmed);
+  const isDigitalCompact = /^[A-Z]{2}[A-Z0-9]{2}[A-Z0-9]{3}[A-Z0-9]{2}[A-Z0-9]{2}$/i.test(trimmed);
+  return isNumeric || isDigitalHyphen || isDigitalSpace || isDigitalCompact;
 }
 
 export async function serverLookupPostcode(
@@ -44,7 +46,7 @@ export async function serverLookupPostcode(
   const startTime = Date.now();
   const cleanCode = code.trim().toUpperCase();
 
-  // 1. Format validation: check 6-digit conventional or 15-character digital format
+  // 1. Format validation: check 6-digit conventional or 11-char compact / 15-char display digital format
   if (!isWellFormedPostcode(cleanCode)) {
     return {
       success: false,
@@ -52,7 +54,7 @@ export async function serverLookupPostcode(
       source: 'local_reference',
       status: 'unavailable',
       latencyMs: 0,
-      message: 'Invalid postcode format. Must be a 6-digit numeric code or 15-character National Digital Postcode format.',
+      message: 'Invalid postcode format. Must be a 6-digit numeric postal code or 11-character compact / 15-character display National Digital Postcode format.',
       provenance: 'PostcodeLink Format Validator',
       is_official: false,
     };

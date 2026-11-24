@@ -31,12 +31,14 @@ interface TrackingPortalTabProps {
   deliveries: Delivery[];
   settings: AppSettings;
   onVerifyOtp: (deliveryId: string, otp: string) => { success: boolean; message: string; remainingAttempts?: number } | Promise<{ success: boolean; message: string; remainingAttempts?: number }>;
+  isDemoMode?: boolean;
 }
 
 export function TrackingPortalTab({
   deliveries,
   settings,
   onVerifyOtp,
+  isDemoMode = false,
 }: TrackingPortalTabProps) {
   const [trackingInput, setTrackingInput] = useState("");
   const [searchedRef, setSearchedRef] = useState("");
@@ -59,7 +61,7 @@ export function TrackingPortalTab({
   const [isOtpSubmitting, setIsOtpSubmitting] = useState(false);
   const [otpNotice, setOtpNotice] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
-  const handleSearch = async (e: React.FormEvent, tokenOverride?: string) => {
+  const handleSearch = async (e?: React.FormEvent, tokenOverride?: string) => {
     if (e) e.preventDefault();
     const token = (tokenOverride || trackingInput).trim();
     if (!token) return;
@@ -72,20 +74,23 @@ export function TrackingPortalTab({
     setEnteredOtp("");
     setPhoneChallenge("");
 
-    // Check for human-readable ID search
-    if (token.startsWith("PL-") || token.length < 20) {
-      // Check if it exists in local deliveries (for demonstration simulator)
-      const localMatch = deliveries.find((d) => d.id.toLowerCase() === token.toLowerCase());
-      if (localMatch) {
-        setIsDemoView(true);
-        setDemoDelivery(localMatch);
-        setPublicTracking(null);
-        return;
+    const is32CharToken = /^[A-Za-z0-9_-]{32}$/.test(token);
+
+    // If not a 32-character token
+    if (!is32CharToken) {
+      if (isDemoMode) {
+        const localMatch = deliveries.find((d) => d.id.toLowerCase() === token.toLowerCase());
+        if (localMatch) {
+          setIsDemoView(true);
+          setDemoDelivery(localMatch);
+          setPublicTracking(null);
+          return;
+        }
       }
 
       setSearchError(
-        "Public tracking requires a secure 32-character tracking token sent via SMS/WhatsApp. " +
-        "Human-readable delivery references (such as PL-2048) are restricted to merchant dashboard search to protect recipient privacy."
+        "Public tracking requires an exact 32-character URL-safe tracking token sent via SMS/WhatsApp. " +
+        "Human-readable delivery references (such as PL-2048) are restricted to authenticated merchant dashboard search to protect recipient privacy."
       );
       setPublicTracking(null);
       setDemoDelivery(null);
@@ -139,28 +144,44 @@ export function TrackingPortalTab({
     }
   };
 
-  // Proof-of-delivery OTP submission
+  // Proof-of-delivery OTP submission via unauthenticated public confirmation endpoint
   const handleConfirmOtp = async (e: React.FormEvent) => {
     e.preventDefault();
-    const deliveryId = publicTracking?.id || demoDelivery?.id;
-    if (!deliveryId || !enteredOtp.trim()) return;
+    if (!enteredOtp.trim()) return;
 
     setIsOtpSubmitting(true);
     try {
-      const res = await onVerifyOtp(deliveryId, enteredOtp.trim());
-      if (res.success) {
-        setOtpNotice({ type: "success", text: res.message });
-        setEnteredOtp("");
-        // Reload tracking to reflect delivered status
-        if (publicTracking) {
+      if (publicTracking) {
+        const res = await fastApiClient.publicConfirmDelivery(
+          searchedRef,
+          enteredOtp.trim(),
+          phoneChallenge ? phoneChallenge.trim() : undefined
+        );
+        if (res.success) {
+          setOtpNotice({ type: "success", text: res.message });
+          setEnteredOtp("");
+          // Reload tracking to reflect delivered status
           const updated = await fastApiClient.getTracking(searchedRef);
           setPublicTracking(updated);
+        } else {
+          setOtpNotice({ type: "error", text: res.message });
         }
-      } else {
-        setOtpNotice({ type: "error", text: res.message });
+      } else if (demoDelivery) {
+        const res = await onVerifyOtp(demoDelivery.id, enteredOtp.trim());
+        if (res.success) {
+          setOtpNotice({ type: "success", text: res.message });
+          setEnteredOtp("");
+          setDemoDelivery({
+            ...demoDelivery,
+            status: "delivered",
+            podVerified: true,
+          });
+        } else {
+          setOtpNotice({ type: "error", text: res.message });
+        }
       }
     } catch (err: any) {
-      setOtpNotice({ type: "error", text: err.message || "OTP verification failed." });
+      setOtpNotice({ type: "error", text: err.message || "PIN verification failed." });
     } finally {
       setIsOtpSubmitting(false);
     }

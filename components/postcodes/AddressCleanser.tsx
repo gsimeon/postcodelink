@@ -69,11 +69,7 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
           aria-label="Verification mode selection"
           style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "10px" }}
         >
-          <button
-            type="button"
-            role="radio"
-            aria-checked={verificationMode === "nipost_validate"}
-            onClick={() => setVerificationMode("nipost_validate")}
+          <label
             style={{
               padding: "12px",
               borderRadius: "6px",
@@ -82,9 +78,18 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
               cursor: "pointer",
               textAlign: "left",
               fontFamily: "inherit",
-              width: "100%",
+              display: "block",
+              position: "relative",
             }}
           >
+            <input
+              type="radio"
+              name="verification_mode"
+              value="nipost_validate"
+              checked={verificationMode === "nipost_validate"}
+              onChange={() => setVerificationMode("nipost_validate")}
+              style={{ position: "absolute", opacity: 0, pointerEvents: "none" }}
+            />
             <div style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: 700, fontSize: "13px", color: "#0f172a" }}>
               <CheckCircle2 size={15} color="#0284c7" />
               NIPOST Live Verify
@@ -92,13 +97,9 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
             <p style={{ margin: "4px 0 0", fontSize: "11px", color: "#64748b" }}>
               Verifies against live NIPOST API; gracefully falls back to local reference if gateway is unreachable.
             </p>
-          </button>
+          </label>
 
-          <button
-            type="button"
-            role="radio"
-            aria-checked={verificationMode === "nipost_strict"}
-            onClick={() => setVerificationMode("nipost_strict")}
+          <label
             style={{
               padding: "12px",
               borderRadius: "6px",
@@ -107,9 +108,18 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
               cursor: "pointer",
               textAlign: "left",
               fontFamily: "inherit",
-              width: "100%",
+              display: "block",
+              position: "relative",
             }}
           >
+            <input
+              type="radio"
+              name="verification_mode"
+              value="nipost_strict"
+              checked={verificationMode === "nipost_strict"}
+              onChange={() => setVerificationMode("nipost_strict")}
+              style={{ position: "absolute", opacity: 0, pointerEvents: "none" }}
+            />
             <div style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: 700, fontSize: "13px", color: "#0f172a" }}>
               <Shield size={15} color="#dc2626" />
               Strict Fail-Closed
@@ -117,13 +127,9 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
             <p style={{ margin: "4px 0 0", fontSize: "11px", color: "#64748b" }}>
               Requires live NIPOST verification; strictly fails closed if gateway is unconfigured or unavailable.
             </p>
-          </button>
+          </label>
 
-          <button
-            type="button"
-            role="radio"
-            aria-checked={verificationMode === "local_standardization"}
-            onClick={() => setVerificationMode("local_standardization")}
+          <label
             style={{
               padding: "12px",
               borderRadius: "6px",
@@ -132,9 +138,18 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
               cursor: "pointer",
               textAlign: "left",
               fontFamily: "inherit",
-              width: "100%",
+              display: "block",
+              position: "relative",
             }}
           >
+            <input
+              type="radio"
+              name="verification_mode"
+              value="local_standardization"
+              checked={verificationMode === "local_standardization"}
+              onChange={() => setVerificationMode("local_standardization")}
+              style={{ position: "absolute", opacity: 0, pointerEvents: "none" }}
+            />
             <div style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: 700, fontSize: "13px", color: "#0f172a" }}>
               <AlertTriangle size={15} color="#d97706" />
               Local Standardisation Only
@@ -142,7 +157,7 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
             <p style={{ margin: "4px 0 0", fontSize: "11px", color: "#64748b" }}>
               Uses local reference rules without contacting upstream NIPOST endpoints.
             </p>
-          </button>
+          </label>
         </div>
       </div>
 
