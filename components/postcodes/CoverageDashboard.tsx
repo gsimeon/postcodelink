@@ -133,12 +133,32 @@ export const CoverageDashboard: React.FC<CoverageDashboardProps> = ({
 
             <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "8px", padding: "16px" }}>
               <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
-                DIGITAL POSTCODES
+                FORMAT-VALID DIGITAL REFERENCES
               </div>
               <div style={{ fontSize: "24px", fontWeight: 800, color: "#4338ca", marginTop: "4px" }}>
-                {(coverageReport.national_digital_postcode_records ?? coverageReport.digital_building_level_records).toLocaleString()}
+                {(coverageReport.format_valid_digital_references ?? coverageReport.national_digital_postcode_records ?? 0).toLocaleString()}
               </div>
-              <small style={{ fontSize: "11px", color: "#64748b" }}>Building & district level codes</small>
+              <small style={{ fontSize: "11px", color: "#64748b" }}>Syntax-valid local/pilot digital codes (not NIPOST-verified)</small>
+            </div>
+
+            <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "8px", padding: "16px" }}>
+              <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
+                NIPOST-CONFIRMED POSTCODES
+              </div>
+              <div style={{ fontSize: "24px", fontWeight: 800, color: "#15803d", marginTop: "4px" }}>
+                {(coverageReport.nipost_confirmed_postcodes ?? coverageReport.records_with_valid_evidence ?? 0).toLocaleString()}
+              </div>
+              <small style={{ fontSize: "11px", color: "#64748b" }}>Active authoritative existence evidence</small>
+            </div>
+
+            <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "8px", padding: "16px" }}>
+              <div style={{ fontSize: "11px", color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>
+                NIPOST-CONFIRMED METADATA
+              </div>
+              <div style={{ fontSize: "24px", fontWeight: 800, color: "#0284c7", marginTop: "4px" }}>
+                {(coverageReport.nipost_confirmed_address_metadata ?? 0).toLocaleString()}
+              </div>
+              <small style={{ fontSize: "11px", color: "#64748b" }}>Records with upstream address autofill evidence</small>
             </div>
           </div>
 

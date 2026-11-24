@@ -32,9 +32,9 @@ export interface PostcodeLookupResponse {
 export function isWellFormedPostcode(code: string): boolean {
   const trimmed = code.trim();
   const isNumeric = /^\d{6}$/.test(trimmed);
-  const isDigitalHyphen = /^[A-Z]{2}-[A-Z0-9]{2}-[A-Z0-9]{3}-[A-Z0-9]{2}-[A-Z0-9]{2}$/i.test(trimmed);
-  const isDigitalSpace = /^[A-Z]{2} [A-Z0-9]{2} [A-Z0-9]{3} [A-Z0-9]{2} [A-Z0-9]{2}$/i.test(trimmed);
-  const isDigitalCompact = /^[A-Z]{2}[A-Z0-9]{2}[A-Z0-9]{3}[A-Z0-9]{2}[A-Z0-9]{2}$/i.test(trimmed);
+  const isDigitalHyphen = /^[A-Z]{2}-\d{2}-[A-Z0-9]{3}-[A-Z]{2}-\d{2}$/i.test(trimmed);
+  const isDigitalSpace = /^[A-Z]{2} \d{2} [A-Z0-9]{3} [A-Z]{2} \d{2}$/i.test(trimmed);
+  const isDigitalCompact = /^[A-Z]{2}\d{2}[A-Z0-9]{3}[A-Z]{2}\d{2}$/i.test(trimmed);
   return isNumeric || isDigitalHyphen || isDigitalSpace || isDigitalCompact;
 }
 

@@ -580,10 +580,102 @@ def test_digital_postcode_parser_specification_flexibility():
     assert is_well_formed_postcode("FC02A09DB09") is True
     assert is_well_formed_postcode("FC 02 A09 DB 09") is True
 
-    # 4. Strictly rejects malformed codes
+    # 4. Strictly rejects malformed codes and non-conforming component character classes
+    assert parse_digital_postcode_components("EK-01-A03-FK-01") is not None  # Official quickstart example
     assert parse_digital_postcode_components("12-02-A09-DB-09") is None  # Non-alpha state
+    assert parse_digital_postcode_components("FC-AB-A09-DB-09") is None  # Letters in numeric LGA
     assert parse_digital_postcode_components("FC-02-A099-DB-09") is None  # District too long
+    assert parse_digital_postcode_components("FC-02-A09-12-09") is None  # Digits in alpha Area
+    assert parse_digital_postcode_components("FC-02-A09-DB-AB") is None  # Letters in numeric Building
     assert parse_digital_postcode_components("FC-02-A09-DB-009") is None  # Building unit too long (3 chars)
     assert parse_digital_postcode_components("FC--02-A09-DB-09") is None  # Double hyphen
+
+
+def test_nipost_quickstart_contract_and_x_api_key_default():
+    """Verify NIPOSTClient defaults to x-api-key header and parses the published nested data quickstart response."""
+    import httpx
+    from backend.app.services.nipost_client import NIPOSTClient, NIPOSTLookupStatus
+
+    captured_headers = {}
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        for k, v in request.headers.items():
+            captured_headers[k.lower()] = v
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "postcode": "EK-01-A03-FK-01",
+                    "valid": True,
+                    "administrative_address": {
+                        "state_name": "Ekiti",
+                        "lga_name": "Ado-Ekiti",
+                        "locality_name": "Fajuyi",
+                    },
+                    "recent_house_address": {
+                        "recent": "12 Fajuyi Memorial Road",
+                    },
+                }
+            },
+        )
+
+    c = NIPOSTClient(
+        base_url="https://api.postcode.gov.ng",
+        api_key="test_nipost_quickstart_key",
+        transport=httpx.MockTransport(mock_handler),
+    )
+    assert c.auth_scheme == "x-api-key"
+
+    res = c.lookup_postcode("EK-01-A03-FK-01")
+    assert res.status == NIPOSTLookupStatus.FOUND
+    assert captured_headers.get("x-api-key") == "test_nipost_quickstart_key"
+    assert "authorization" not in captured_headers
+    assert res.data["code"] == "EK-01-A03-FK-01"
+    assert res.data["state"] == "Ekiti"
+    assert res.data["lga"] == "Ado-Ekiti"
+    assert res.data["area"] == "Fajuyi"
+    assert res.data["recent_house_address"] == "12 Fajuyi Memorial Road"
+
+
+def test_challenge_key_separation_and_replay_rejection():
+    """Verify recipient challenge key never falls back to JWT SECRET_KEY and rejects replayed nonces."""
+    from backend.app.config import settings
+    from backend.app.services.delivery_service import (
+        _get_challenge_signing_key,
+        _issue_recipient_challenge_token,
+        _verify_recipient_challenge_token,
+    )
+    import hashlib
+
+    # 1. Signing key must not equal raw or hashed SECRET_KEY
+    key = _get_challenge_signing_key()
+    assert key != settings.SECRET_KEY.encode("utf-8")
+    assert key != hashlib.sha256(settings.SECRET_KEY.encode("utf-8")).digest()
+
+    # 2. Issued challenge_token can be verified once and consumed, then replay is rejected
+    tok = "A" * 32
+    chal = _issue_recipient_challenge_token(tok)
+    _verify_recipient_challenge_token(chal, tok, consume=True)
+    with pytest.raises(HTTPException) as exc:
+        _verify_recipient_challenge_token(chal, tok, consume=True)
+    assert exc.value.status_code == 403
+    assert "already been consumed" in exc.value.detail
+
+
+def test_coverage_report_splits_format_valid_from_nipost_confirmed():
+    """Verify coverage report distinguishes format-valid digital references from NIPOST-confirmed metrics."""
+    from backend.app.services.postcode_service import get_postcode_coverage_report
+    from backend.app.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        rep = get_postcode_coverage_report(db)
+        assert hasattr(rep, "format_valid_digital_references")
+        assert hasattr(rep, "nipost_confirmed_postcodes")
+        assert hasattr(rep, "nipost_confirmed_address_metadata")
+        assert rep.format_valid_digital_references == rep.national_digital_postcode_records
+        assert rep.nipost_confirmed_postcodes == rep.records_with_valid_evidence
+    finally:
+        db.close()
 
 

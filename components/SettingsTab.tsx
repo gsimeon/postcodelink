@@ -135,58 +135,11 @@ export function SettingsTab({
           <div className="panel-head">
             <div>
               <h2>National Digital Postcode Gateway Architecture</h2>
-              <p>Server-side integration status and credentials management.</p>
+              <p>Server-side integration architecture and secret isolation (verification mode is selected directly in the Postcode Intelligence workspace).</p>
             </div>
           </div>
 
           <div className="form-grid">
-            <div className="form-group full">
-              <label>Postcode Service Mode</label>
-              <div style={{ display: "flex", gap: "14px", marginTop: "6px" }}>
-                <label
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "8px",
-                    cursor: "pointer",
-                    fontSize: "13px",
-                    fontWeight: 500,
-                  }}
-                >
-                  <input
-                    type="radio"
-                    name="nipostMode"
-                    value="mock"
-                    checked={form.nipostMode === "mock"}
-                    onChange={() => setForm({ ...form, nipostMode: "mock" })}
-                    style={{ width: "auto", height: "auto" }}
-                  />
-                  <b>PostcodeLink Local Reference Dataset — 11-state pilot coverage; not independently NIPOST-verified</b>
-                </label>
-
-                <label
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "8px",
-                    cursor: "pointer",
-                    fontSize: "13px",
-                    fontWeight: 500,
-                  }}
-                >
-                  <input
-                    type="radio"
-                    name="nipostMode"
-                    value="live"
-                    checked={form.nipostMode === "live"}
-                    onChange={() => setForm({ ...form, nipostMode: "live" })}
-                    style={{ width: "auto", height: "auto" }}
-                  />
-                  <b>Live FMCIDE / NIPOST Upstream API Gateway</b>
-                </label>
-              </div>
-            </div>
-
             {/* P1 Security Fix: Server-side environment credential boundary */}
             <div
               className="form-group full"
@@ -201,11 +154,11 @@ export function SettingsTab({
                 <Lock size={16} /> Server-Side Secret Isolation (Production Standard)
               </div>
               <p style={{ fontSize: "12px", color: "#14532d", margin: "0 0 10px", lineHeight: 1.5 }}>
-                In compliance with the PostcodeLink Reliability Gate, upstream API secrets (<code>NIPOST_API_KEY</code>) are never stored in browser storage. Instead, they are loaded via secure server-side routes:
+                In compliance with the PostcodeLink Reliability Gate, upstream API secrets (<code>NIPOST_API_KEY</code>) are never stored in browser storage or managed from client settings. Requests route through FastAPI using the server-configured gateway and local pilot reference dataset (11-state pilot coverage; not independently NIPOST-verified):
               </p>
               <div style={{ fontFamily: "monospace", fontSize: "11px", background: "#ffffff", padding: "10px", borderRadius: "6px", border: "1px solid #86efac", color: "#0f172a" }}>
-                <div>GET  /api/postcode/lookup?code=105102  → Server-authenticated lookup</div>
-                <div style={{ marginTop: "4px" }}>POST /api/postcode/cleanse             → Server-side address resolution</div>
+                <div>GET  /api/v1/postcodes/lookup?code=105102  → Server-authenticated lookup</div>
+                <div style={{ marginTop: "4px" }}>POST /api/v1/postcodes/cleanse             → Server-side address resolution</div>
               </div>
             </div>
           </div>

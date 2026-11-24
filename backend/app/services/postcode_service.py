@@ -1361,6 +1361,7 @@ def get_postcode_coverage_report(
                     all_evidence = res
 
             valid_evidence_codes = set()
+            valid_autofill_evidence_codes = set()
             expired_evidence_codes = set()
             rejected_evidence_codes = set()
             incomplete_evidence_codes = set()
@@ -1371,6 +1372,8 @@ def get_postcode_coverage_report(
                 cls_result = classify_verification_evidence(ev)
                 if cls_result == "valid":
                     valid_evidence_codes.add(code_norm)
+                    if getattr(ev, "address_metadata_source", None) == "nipost_autofill":
+                        valid_autofill_evidence_codes.add(code_norm)
                 elif cls_result == "expired":
                     expired_evidence_codes.add(code_norm)
                 elif cls_result == "rejected":
@@ -1499,6 +1502,9 @@ def get_postcode_coverage_report(
         records_with_complete_metadata=records_with_complete_metadata,
         legacy_six_digit_records=legacy_six_digit_records,
         national_digital_postcode_records=national_digital_postcode_records,
+        format_valid_digital_references=national_digital_postcode_records,
+        nipost_confirmed_postcodes=records_with_valid_evidence,
+        nipost_confirmed_address_metadata=len(valid_autofill_evidence_codes) if db is not None and "valid_autofill_evidence_codes" in locals() else 0,
         local_demonstration_fixtures=local_demonstration_fixtures,
         digital_building_level_records=national_digital_postcode_records,
         dataset_source=dataset_source,

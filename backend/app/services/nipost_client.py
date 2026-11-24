@@ -72,15 +72,19 @@ class NIPOSTClient:
         self.timeout = timeout or getattr(settings, "NIPOST_TIMEOUT_SECONDS", 5.0)
         self.transport = transport
         self.lookup_path = lookup_path or getattr(settings, "NIPOST_LOOKUP_PATH", "/v1/lookup")
-        raw_scheme = (auth_scheme or getattr(settings, "NIPOST_AUTH_SCHEME", "bearer")).lower().strip()
+        raw_scheme = (auth_scheme or getattr(settings, "NIPOST_AUTH_SCHEME", "x-api-key")).lower().strip()
         supported_schemes = {"bearer", "api_key", "x-api-key", "api_key_header", "both", "none"}
         if raw_scheme not in supported_schemes:
             raise ValueError(
                 f"Unsupported NIPOST authentication scheme '{raw_scheme}'. "
-                f"Supported schemes: 'bearer', 'api_key', 'none'."
+                f"Supported schemes: 'x-api-key', 'bearer', 'api_key', 'none'."
             )
         self.auth_scheme = raw_scheme
         self.query_param = query_param or getattr(settings, "NIPOST_QUERY_PARAM", "code")
+        self._last_checked_at: Optional[str] = None
+        self._last_connectivity_healthy: bool = False
+        self._last_authentication_verified: bool = False
+        self._last_contract_verified: bool = False
 
     @property
     def adapter_installed(self) -> bool:
@@ -128,34 +132,47 @@ class NIPOSTClient:
             "base_url_set": has_url,
             "credentials_set": has_key,
             "auth_scheme": self.auth_scheme,
-            "connectivity_healthy": False,
-            "authentication_verified": False,
-            "contract_verified": False,
+            "connectivity_healthy": getattr(self, "_last_connectivity_healthy", False),
+            "authentication_verified": getattr(self, "_last_authentication_verified", False),
+            "contract_verified": getattr(self, "_last_contract_verified", False),
             "production_authorized": False,
+            "last_checked_at": getattr(self, "_last_checked_at", None),
             "status": status,
             "display_status": display_status,
         }
 
     def check_health(self) -> Dict[str, Any]:
-        """Performs a lightweight health check on the configured NIPOST endpoint."""
+        """Performs a lightweight health check on the configured NIPOST endpoint and records telemetry."""
+        from datetime import datetime, timezone
+        checked_at = datetime.now(timezone.utc).isoformat()
+        self._last_checked_at = checked_at
         if not self.configuration_complete:
             missing_reason = "base URL missing" if not self.base_url else "API key missing for authentication scheme"
+            self._last_connectivity_healthy = False
+            self._last_authentication_verified = False
             return {
                 "healthy": False,
                 "reason": f"Configuration incomplete: {missing_reason}",
                 "status_code": None,
+                "checked_at": checked_at,
             }
         try:
             with httpx.Client(transport=self.transport, timeout=min(self.timeout, 3.0)) as http_client:
                 resp = http_client.get(f"{self.base_url}/health", headers=self._get_headers())
                 if resp.status_code in (200, 204):
-                    return {"healthy": True, "reason": "Endpoint responsive", "status_code": resp.status_code}
+                    self._last_connectivity_healthy = True
+                    self._last_authentication_verified = True
+                    return {"healthy": True, "reason": "Endpoint responsive", "status_code": resp.status_code, "checked_at": checked_at}
                 elif resp.status_code in (401, 403):
-                    return {"healthy": False, "reason": "Authentication failed (invalid or rejected credentials)", "status_code": resp.status_code}
+                    self._last_connectivity_healthy = True
+                    self._last_authentication_verified = False
+                    return {"healthy": False, "reason": "Authentication failed (invalid or rejected credentials)", "status_code": resp.status_code, "checked_at": checked_at}
                 else:
-                    return {"healthy": False, "reason": f"Unexpected upstream status: {resp.status_code}", "status_code": resp.status_code}
+                    self._last_connectivity_healthy = False
+                    return {"healthy": False, "reason": f"Unexpected upstream status: {resp.status_code}", "status_code": resp.status_code, "checked_at": checked_at}
         except Exception as err:
-            return {"healthy": False, "reason": f"Connection check failed: {str(err)}", "status_code": None}
+            self._last_connectivity_healthy = False
+            return {"healthy": False, "reason": f"Connection check failed: {str(err)}", "status_code": None, "checked_at": checked_at}
 
     def _get_headers(self) -> Dict[str, str]:
         headers = {
@@ -200,6 +217,9 @@ class NIPOSTClient:
         if not isinstance(data, dict):
             return NIPOSTLookupStatus.INVALID_RESPONSE, None, "NIPOST Validator returned non-dict JSON response."
 
+        if isinstance(data.get("data"), dict) and "valid" not in data and "status" not in data:
+            data = data["data"]
+
         status_str = str(data.get("status", "")).strip().upper()
         error_code = str(data.get("error_code") or data.get("error") or data.get("code") or "").strip().upper()
 
@@ -241,6 +261,13 @@ class NIPOSTClient:
         if not isinstance(data, dict):
             return NIPOSTLookupStatus.INVALID_RESPONSE, None, "NIPOST Autofill API returned non-dict JSON response."
 
+        # Unwrap official NIPOST quickstart nested `data` container if present
+        if isinstance(data.get("data"), dict) and not any(k in data for k in ("state", "area", "district", "matches", "valid")):
+            payload_meta_version = data.get("dataset_version")
+            data = data["data"]
+        else:
+            payload_meta_version = data.get("dataset_version")
+
         status_str = str(data.get("status", "")).strip().upper()
         error_code = str(data.get("error_code") or data.get("error") or data.get("code") or "").strip().upper()
 
@@ -279,18 +306,22 @@ class NIPOSTClient:
         # Extract code (official: postcode, gateway: code)
         ret_code = str(match_record.get("code") or match_record.get("postcode") or "").strip().upper()
 
-        # Extract state, area, lga
-        ret_state = str(match_record.get("state") or "").strip()
-        ret_area = str(match_record.get("area") or match_record.get("district") or "").strip()
-        ret_lga = str(match_record.get("lga") or "").strip()
-        building_ref = match_record.get("building_reference") or match_record.get("recent_house_address") or match_record.get("street")
+        # Extract state, area, lga (supporting both flat fields and quickstart administrative_address.*_name)
+        ret_state = str(match_record.get("state") or match_record.get("state_name") or "").strip()
+        ret_area = str(match_record.get("area") or match_record.get("district") or match_record.get("locality_name") or "").strip()
+        ret_lga = str(match_record.get("lga") or match_record.get("lga_name") or "").strip()
+        raw_recent = match_record.get("recent_house_address")
+        if isinstance(raw_recent, dict):
+            building_ref = raw_recent.get("recent") or raw_recent.get("street") or match_record.get("building_reference") or match_record.get("street")
+        else:
+            building_ref = match_record.get("building_reference") or raw_recent or match_record.get("street")
 
-        # Parse nested administrative_address if state or area missing
+        # Parse nested administrative_address (quickstart: state_name, lga_name, locality_name)
         admin_addr = match_record.get("administrative_address")
         if isinstance(admin_addr, dict):
-            ret_state = ret_state or str(admin_addr.get("state") or "").strip()
-            ret_area = ret_area or str(admin_addr.get("district") or admin_addr.get("area") or "").strip()
-            ret_lga = ret_lga or str(admin_addr.get("lga") or "").strip()
+            ret_state = ret_state or str(admin_addr.get("state_name") or admin_addr.get("state") or "").strip()
+            ret_area = ret_area or str(admin_addr.get("locality_name") or admin_addr.get("district") or admin_addr.get("area") or "").strip()
+            ret_lga = ret_lga or str(admin_addr.get("lga_name") or admin_addr.get("lga") or "").strip()
         elif isinstance(admin_addr, str) and (not ret_state or not ret_area):
             parts = [p.strip() for p in admin_addr.split(",") if p.strip()]
             if len(parts) >= 2:
@@ -309,7 +340,7 @@ class NIPOSTClient:
         if norm_req != norm_ret:
             return NIPOSTLookupStatus.INVALID_RESPONSE, match_record, f"Returned postcode '{ret_code}' does not match requested code '{clean_code}'."
 
-        dataset_ver = match_record.get("dataset_version") or data.get("dataset_version")
+        dataset_ver = match_record.get("dataset_version") or data.get("dataset_version") or payload_meta_version
         postcode_type = match_record.get("postcode_type") or ("digital_location" if len(clean_code.replace("-", "")) > 6 else "conventional_area")
 
         adapted_record = {

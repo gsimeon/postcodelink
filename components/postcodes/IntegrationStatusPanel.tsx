@@ -12,6 +12,7 @@ interface IntegrationStatusPanelProps {
     authentication_verified?: boolean;
     contract_verified?: boolean;
     production_authorized?: boolean;
+    last_checked_at?: string | null;
     status: string;
     display_status: string;
   };
@@ -63,6 +64,11 @@ export const IntegrationStatusPanel: React.FC<IntegrationStatusPanelProps> = ({
           <strong style={{ color: upstreamIntegration.connectivity_healthy ? "#16a34a" : "#64748b" }}>
             {upstreamIntegration.connectivity_healthy ? "Online & Responsive" : "Pending Active Probe"}
           </strong>
+          {upstreamIntegration.last_checked_at && (
+            <span style={{ display: "block", fontSize: "10px", color: "#94a3b8", marginTop: "2px" }}>
+              Checked: {new Date(upstreamIntegration.last_checked_at).toLocaleTimeString()}
+            </span>
+          )}
         </div>
 
         {/* 4. Authentication */}

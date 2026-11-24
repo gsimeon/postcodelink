@@ -11,25 +11,25 @@ import re
 from typing import Optional, Dict, Any, Tuple
 
 
-# Regex specifications
+# Regex specifications (Official NIPOST 5-component format: State[2A]-LGA[2N]-District[3AN]-Area[2A]-Building[2N])
 CANONICAL_DIGITAL_REGEX = re.compile(
-    r"^([A-Z]{2})-([0-9A-Z]{2})-([0-9A-Z]{3})-([0-9A-Z]{2})-([0-9A-Z]{2})$"
+    r"^([A-Z]{2})-([0-9]{2})-([0-9A-Z]{3})-([A-Z]{2})-([0-9]{2})$"
 )
 CANONICAL_DIGITAL_SPACE_REGEX = re.compile(
-    r"^([A-Z]{2}) ([0-9A-Z]{2}) ([0-9A-Z]{3}) ([0-9A-Z]{2}) ([0-9A-Z]{2})$"
+    r"^([A-Z]{2}) ([0-9]{2}) ([0-9A-Z]{3}) ([A-Z]{2}) ([0-9]{2})$"
 )
 COMPACT_DIGITAL_REGEX = re.compile(
-    r"^([A-Z]{2})([0-9A-Z]{2})([0-9A-Z]{3})([0-9A-Z]{2})([0-9A-Z]{2})$"
+    r"^([A-Z]{2})([0-9]{2})([0-9A-Z]{3})([A-Z]{2})([0-9]{2})$"
 )
 LEGACY_6DIGIT_REGEX = re.compile(r"^\d{6}$")
 LEGACY_3PART_LOCAL_REGEX = re.compile(r"^([A-Z]{3})-([A-Z0-9]{3,4})-([A-Z0-9]{4,5})$")
 
 # Free-text address search patterns
 TEXT_CANONICAL_DIGITAL_PATTERN = re.compile(
-    r"\b([A-Za-z]{2}-[0-9A-Za-z]{2}-[0-9A-Za-z]{3}-[0-9A-Za-z]{2}-[0-9A-Za-z]{2})\b"
+    r"\b([A-Za-z]{2}-[0-9]{2}-[0-9A-Za-z]{3}-[A-Za-z]{2}-[0-9]{2})\b"
 )
 TEXT_COMPACT_DIGITAL_PATTERN = re.compile(
-    r"\b([A-Za-z]{2}[0-9A-Za-z]{2}[0-9A-Za-z]{3}[0-9A-Za-z]{2}[0-9A-Za-z]{2})\b"
+    r"\b([A-Za-z]{2}[0-9]{2}[0-9A-Za-z]{3}[A-Za-z]{2}[0-9]{2})\b"
 )
 TEXT_LEGACY_3PART_PATTERN = re.compile(
     r"\b([A-Za-z]{3}-[A-Za-z0-9]{3,4}-[A-Za-z0-9]{4,5})\b"

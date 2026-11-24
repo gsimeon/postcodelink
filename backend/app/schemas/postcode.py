@@ -168,6 +168,9 @@ class CoverageReportResponse(BaseModel):
     records_with_complete_metadata: int = 0
     legacy_six_digit_records: int = 0
     national_digital_postcode_records: int = 0
+    format_valid_digital_references: int = 0
+    nipost_confirmed_postcodes: int = 0
+    nipost_confirmed_address_metadata: int = 0
     local_demonstration_fixtures: int = 0
     digital_building_level_records: int = 0
     dataset_source: str = "database_directory"

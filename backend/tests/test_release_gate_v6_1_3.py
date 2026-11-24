@@ -124,7 +124,7 @@ def test_nipost_client_integration_status_and_health_unconfigured():
     assert status["configuration_complete"] is False
     assert status["base_url_set"] is False
     assert status["credentials_set"] is False
-    assert status["auth_scheme"] == "bearer"
+    assert status["auth_scheme"] == "x-api-key"
     assert status["status"] == "unconfigured"
 
     health = c.check_health()

@@ -189,6 +189,8 @@ class Settings(BaseSettings):
         if os.getenv("OTP_PREVIOUS_SECRETS")
         else []
     )
+    # Dedicated Recipient Challenge Signing Key (strictly separated from JWT SECRET_KEY)
+    CHALLENGE_SECRET_KEY: str = os.getenv("CHALLENGE_SECRET_KEY", "")
     
     # Outbox Payload Cryptography: Dedicated authenticated encryption key (distinct from SECRET_KEY)
     OUTBOX_ENCRYPTION_KEY: str = os.getenv(
@@ -216,7 +218,7 @@ class Settings(BaseSettings):
     NIPOST_API_URL: str = os.getenv("NIPOST_API_URL", os.getenv("NIPOST_API_BASE_URL", ""))
     NIPOST_API_KEY: str = os.getenv("NIPOST_API_KEY", "")
     NIPOST_LOOKUP_PATH: str = os.getenv("NIPOST_LOOKUP_PATH", "/v1/lookup")
-    NIPOST_AUTH_SCHEME: str = os.getenv("NIPOST_AUTH_SCHEME", "bearer")  # "bearer", "api_key", or "none"
+    NIPOST_AUTH_SCHEME: str = os.getenv("NIPOST_AUTH_SCHEME", "x-api-key")  # "x-api-key" (quickstart default), "bearer", "api_key", or "none"
     NIPOST_QUERY_PARAM: str = os.getenv("NIPOST_QUERY_PARAM", "code")  # "code", "postcode", or "both"
     NIPOST_TIMEOUT_SECONDS: float = 5.0
 

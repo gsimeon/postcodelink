@@ -81,12 +81,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    bind = op.get_bind()
-    dialect_name = bind.dialect.name if bind is not None else ""
-
-    if dialect_name == "postgresql":
-        op.execute("DROP TRIGGER IF EXISTS trg_verification_evidence_immutable ON verification_evidence;")
-        op.execute("DROP FUNCTION IF EXISTS prevent_verification_evidence_tampering();")
-    elif dialect_name == "sqlite":
-        op.execute("DROP TRIGGER IF EXISTS trg_verification_evidence_no_update;")
-        op.execute("DROP TRIGGER IF EXISTS trg_verification_evidence_no_delete;")
+    """VerificationEvidence is a permanent retained audit ledger.
+    
+    Database-level immutability triggers are intentionally preserved on downgrade
+    while the verification_evidence table and its audit records remain retained.
+    """
+    pass

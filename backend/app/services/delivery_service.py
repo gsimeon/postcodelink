@@ -602,21 +602,54 @@ def mask_recipient_name(name: str) -> str:
 
 TRACKING_TOKEN_REGEX = re.compile(r"^[A-Za-z0-9_-]{32}$")
 CHALLENGE_TTL_SECONDS = 600
+_CONSUMED_CHALLENGE_NONCES: Dict[str, int] = {}
+
+
+def _get_challenge_signing_key() -> bytes:
+    """Derive a dedicated HMAC key for public recipient challenge tokens.
+    
+    Uses CHALLENGE_SECRET_KEY or domain-separated derivation from OTP_SECRET_KEY.
+    Never falls back to JWT SECRET_KEY.
+    """
+    explicit = (getattr(settings, "CHALLENGE_SECRET_KEY", "") or "").strip()
+    if explicit:
+        return hashlib.sha256(b"postcodelink-challenge-v1:" + explicit.encode("utf-8")).digest()
+    otp_sec = (getattr(settings, "OTP_SECRET_KEY", "") or "").strip()
+    if otp_sec:
+        return hashlib.sha256(b"postcodelink-challenge-otp-derived-v1:" + otp_sec.encode("utf-8")).digest()
+    if settings.ENVIRONMENT == "production":
+        raise RuntimeError("Fatal Security Error: CHALLENGE_SECRET_KEY or OTP_SECRET_KEY must be configured in production.")
+    return hashlib.sha256(b"postcodelink-dev-challenge-only-secret-v1").digest()
+
+
+def _is_and_mark_nonce_consumed(nonce: str, exp: int, consume: bool = False) -> bool:
+    """Check if challenge nonce was already consumed; optionally mark it consumed atomically."""
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    # Prune expired nonces to keep in-memory store bounded
+    if len(_CONSUMED_CHALLENGE_NONCES) > 5000:
+        expired_keys = [k for k, v in _CONSUMED_CHALLENGE_NONCES.items() if v < now_ts]
+        for k in expired_keys:
+            _CONSUMED_CHALLENGE_NONCES.pop(k, None)
+    if nonce in _CONSUMED_CHALLENGE_NONCES:
+        return True
+    if consume:
+        _CONSUMED_CHALLENGE_NONCES[nonce] = exp
+    return False
 
 
 def _issue_recipient_challenge_token(tracking_token: str) -> str:
     """Issue a short-lived HMAC-SHA256 challenge proof bound to the exact tracking_token."""
     import hmac
     exp = int(datetime.now(timezone.utc).timestamp()) + CHALLENGE_TTL_SECONDS
-    nonce = secrets.token_hex(8)
+    nonce = secrets.token_hex(12)
     payload = f"{tracking_token}.{exp}.{nonce}"
-    key = (getattr(settings, "OTP_HMAC_SECRET", None) or settings.SECRET_KEY).encode("utf-8")
+    key = _get_challenge_signing_key()
     sig = hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"{payload}.{sig}"
 
 
-def _verify_recipient_challenge_token(challenge_token: str, expected_tracking_token: str) -> None:
-    """Verify HMAC signature, tracking_token binding, and expiry of a recipient challenge proof."""
+def _verify_recipient_challenge_token(challenge_token: str, expected_tracking_token: str, consume: bool = False) -> None:
+    """Verify HMAC signature, tracking_token binding, expiry, and one-time nonce consumption."""
     import hmac
     parts = (challenge_token or "").strip().split(".")
     if len(parts) != 4:
@@ -638,7 +671,7 @@ def _verify_recipient_challenge_token(challenge_token: str, expected_tracking_to
             detail="Invalid recipient challenge proof expiration.",
         )
     payload = f"{tok}.{exp_str}.{nonce}"
-    key = (getattr(settings, "OTP_HMAC_SECRET", None) or settings.SECRET_KEY).encode("utf-8")
+    key = _get_challenge_signing_key()
     expected_sig = hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(sig, expected_sig):
         raise HTTPException(
@@ -650,6 +683,11 @@ def _verify_recipient_challenge_token(challenge_token: str, expected_tracking_to
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Recipient challenge proof has expired. Please re-verify the last 4 digits of your phone number.",
+        )
+    if _is_and_mark_nonce_consumed(nonce, exp, consume=consume):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Recipient challenge proof has already been consumed (replay rejected). Please re-verify your phone digits.",
         )
 
 
@@ -861,6 +899,8 @@ def public_confirm_delivery_otp(
 
     # Check PIN match
     if verify_otp_hash(request.otp, delivery.otp_hash):
+        # Atomically consume the one-time challenge nonce so it cannot be replayed
+        _verify_recipient_challenge_token(request.challenge_token, token, consume=True)
         delivery.pod_verified = True
         delivery.status = DeliveryStatus.DELIVERED
         delivery.otp_attempts = 0

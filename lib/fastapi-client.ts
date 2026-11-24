@@ -254,6 +254,9 @@ export interface CoverageReport {
   records_with_complete_metadata?: number;
   legacy_six_digit_records?: number;
   national_digital_postcode_records?: number;
+  format_valid_digital_references?: number;
+  nipost_confirmed_postcodes?: number;
+  nipost_confirmed_address_metadata?: number;
   local_demonstration_fixtures?: number;
   digital_building_level_records: number;
   dataset_source?: string;
@@ -268,6 +271,7 @@ export interface CoverageReport {
     authentication_verified?: boolean;
     contract_verified?: boolean;
     production_authorized?: boolean;
+    last_checked_at?: string | null;
     status: string;
     display_status: string;
   };

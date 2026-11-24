@@ -461,7 +461,7 @@ def test_digital_postcode_five_component_structure_validation():
     valid_canonical = [
         "FC-02-A09-DB-09",
         "LA-01-B12-EF-34",
-        "KN-10-C01-01-99",
+        "KN-10-C01-AB-99",
         "OG-05-D88-XY-12",
         "RV-03-E45-AB-67",
     ]
@@ -479,7 +479,7 @@ def test_digital_postcode_five_component_structure_validation():
     valid_normalized = [
         "FC02A09DB09",
         "LA01B12EF34",
-        "KN10C010199",
+        "KN10C01AB99",
     ]
     for code in valid_normalized:
         components = NIPOSTClient.parse_digital_postcode_components(code)
