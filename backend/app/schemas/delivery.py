@@ -113,7 +113,7 @@ class PublicTrackingEvent(BaseModel):
 
 
 class DeliveryPublicTrackingResponse(BaseModel):
-    id: str
+    tracking_token: str
     recipient_name_masked: str  # e.g. "C**** N****"
     recipient_phone_masked: str  # e.g. "080****3421"
     destination_general_location: str  # e.g. "Lekki Phase 1, Lagos"
@@ -121,8 +121,6 @@ class DeliveryPublicTrackingResponse(BaseModel):
     verified_postcode: Optional[str] = None
     status: DeliveryStatus
     requires_pin_confirmation: bool = True
-    otp_attempts: int
-    otp_max_attempts: int
     is_locked: bool
     lockout_remaining_minutes: Optional[int] = None
     pod_verified: bool
@@ -141,11 +139,14 @@ class RecipientVerifyChallengeResponse(BaseModel):
     verified: bool
     message: str
     tracking_token: str
+    challenge_token: str
+    expires_in_seconds: int = 600
     status: DeliveryStatus
 
 
 class PublicDeliveryConfirmOTPRequest(BaseModel):
     otp: str = Field(..., pattern=r"^\d{6}$", description="Strict 6-digit numeric proof-of-delivery PIN")
+    challenge_token: str = Field(..., min_length=16, description="Short-lived server-issued recipient challenge proof bound to tracking_token")
     phone_last_4: Optional[str] = Field(None, pattern=r"^\d{4}$", description="Optional recipient phone last 4 for double confirmation")
     note: Optional[str] = None
 

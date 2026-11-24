@@ -1030,7 +1030,7 @@ def test_soft_deleted_deliveries_excluded_from_public_tracking():
     merchant_token = get_token(AppRole.MERCHANT, "v60_track_merchant@test.ng")
     merchant_headers = {"Authorization": f"Bearer {merchant_token}"}
 
-    tracking_token = f"token_track_test_{secrets.token_hex(16)}"
+    tracking_token = secrets.token_urlsafe(24)
     delivery_id = f"PL-TRACK-TEST-{secrets.token_hex(4)}"
     db = SessionLocal()
     merchant = db.query(Profile).filter(Profile.email == "v60_track_merchant@test.ng").first()

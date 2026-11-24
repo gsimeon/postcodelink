@@ -54,6 +54,7 @@ export function TrackingPortalTab({
   const [phoneChallenge, setPhoneChallenge] = useState("");
   const [isChallengeVerifying, setIsChallengeVerifying] = useState(false);
   const [challengeVerified, setChallengeVerified] = useState(false);
+  const [challengeToken, setChallengeToken] = useState("");
   const [challengeError, setChallengeError] = useState("");
 
   // OTP Confirmation State
@@ -70,6 +71,7 @@ export function TrackingPortalTab({
     setSearchError(null);
     setChallengeError("");
     setChallengeVerified(false);
+    setChallengeToken("");
     setOtpNotice(null);
     setEnteredOtp("");
     setPhoneChallenge("");
@@ -126,7 +128,8 @@ export function TrackingPortalTab({
 
     try {
       if (publicTracking) {
-        await fastApiClient.verifyRecipientChallenge(searchedRef, phoneChallenge.trim());
+        const chalRes = await fastApiClient.verifyRecipientChallenge(searchedRef, phoneChallenge.trim());
+        setChallengeToken(chalRes.challenge_token);
         setChallengeVerified(true);
       } else if (demoDelivery) {
         // Demo mode local verification simulation
@@ -155,6 +158,7 @@ export function TrackingPortalTab({
         const res = await fastApiClient.publicConfirmDelivery(
           searchedRef,
           enteredOtp.trim(),
+          challengeToken,
           phoneChallenge ? phoneChallenge.trim() : undefined
         );
         if (res.success) {
@@ -246,8 +250,8 @@ export function TrackingPortalTab({
           </span>
         </div>
 
-        {/* Demonstration Simulator Helper */}
-        {deliveries.length > 0 && (
+        {/* Demonstration Simulator Helper (strictly gated behind explicit Demo Mode) */}
+        {isDemoMode && deliveries.length > 0 && (
           <div style={{ background: "#f8fafc", border: "1px dashed #cbd5e1", borderRadius: "6px", padding: "10px 14px", marginTop: "10px" }}>
             <div style={{ fontSize: "11px", fontWeight: 700, color: "#475569", marginBottom: "6px", display: "flex", alignItems: "center", gap: "6px" }}>
               <span className="pill gray" style={{ fontSize: "10px", padding: "2px 6px" }}>DEMONSTRATION SIMULATOR</span>
@@ -308,7 +312,7 @@ export function TrackingPortalTab({
                 <span className="eyebrow">SHIPMENT MILESTONES</span>
                 <div style={{ display: "flex", alignItems: "center", gap: "10px", marginTop: "4px" }}>
                   <h1 style={{ fontFamily: "Manrope, sans-serif", fontSize: "22px", margin: 0, fontWeight: 800 }}>
-                    {publicTracking?.id || demoDelivery?.id}
+                    {publicTracking ? `TRK-${publicTracking.tracking_token.slice(0, 8).toUpperCase()}` : demoDelivery?.id}
                   </h1>
                   <span className={`pill ${activeStatus === "delivered" ? "green" : activeStatus === "in_transit" || activeStatus === "out_for_delivery" ? "blue" : "amber"}`}>
                     <i /> {activeStatus.replace("_", " ")}

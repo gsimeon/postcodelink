@@ -71,7 +71,7 @@ export interface PublicTrackingEvent {
 }
 
 export interface FastAPIPublicTracking {
-  id: string;
+  tracking_token: string;
   recipient_name_masked: string;
   recipient_phone_masked: string;
   destination_general_location: string;
@@ -79,8 +79,6 @@ export interface FastAPIPublicTracking {
   verified_postcode?: string;
   status: string;
   requires_pin_confirmation: boolean;
-  otp_attempts: number;
-  otp_max_attempts: number;
   is_locked: boolean;
   lockout_remaining_minutes?: number;
   pod_verified: boolean;
@@ -638,7 +636,7 @@ export const fastApiClient = {
     return await res.json();
   },
 
-  async verifyRecipientChallenge(trackingToken: string, phoneLast4: string): Promise<{ success: boolean; verified: boolean; message: string; tracking_token: string; status: string }> {
+  async verifyRecipientChallenge(trackingToken: string, phoneLast4: string): Promise<{ success: boolean; verified: boolean; message: string; tracking_token: string; challenge_token: string; expires_in_seconds: number; status: string }> {
     const res = await fetch(`${API_V1}/deliveries/track/${encodeURIComponent(trackingToken)}/verify-recipient`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -655,12 +653,13 @@ export const fastApiClient = {
   async publicConfirmDelivery(
     trackingToken: string,
     otp: string,
+    challengeToken: string,
     phoneLast4?: string
   ): Promise<{ success: boolean; message: string; status: string; pod_verified: boolean }> {
     const res = await fetch(`${API_V1}/deliveries/track/${encodeURIComponent(trackingToken)}/confirm-delivery`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ otp, phone_last_4: phoneLast4 }),
+      body: JSON.stringify({ otp, challenge_token: challengeToken, phone_last_4: phoneLast4 }),
       cache: 'no-store',
     });
     if (!res.ok) {

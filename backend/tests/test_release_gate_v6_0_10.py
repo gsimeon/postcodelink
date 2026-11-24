@@ -112,23 +112,24 @@ def test_database_record_with_valid_evidence_returns_verified():
             db.add(rec)
             db.commit()
 
-        # Insert active, unexpired VerificationEvidence
-        db.query(VerificationEvidence).filter(VerificationEvidence.postcode == test_code).delete()
-        ev = VerificationEvidence(
-            postcode=test_code,
-            provider="NIPOST",
-            provider_reference_id="NIPOST-AUDIT-109555-PASS",
-            verification_method="validator_autofill_pipeline",
-            dataset_version="2026.1",
-            response_hash="a" * 64,
-            status="verified",
-            address_metadata_source="nipost_autofill",
-            valid_until=default_valid_until(),
-            is_active=True,
-        )
-        db.add(ev)
-        db.commit()
-        db.refresh(ev)
+        # Insert active, unexpired VerificationEvidence if not already present (table is append-only immutable)
+        ev = db.query(VerificationEvidence).filter(VerificationEvidence.postcode == test_code).first()
+        if not ev:
+            ev = VerificationEvidence(
+                postcode=test_code,
+                provider="NIPOST",
+                provider_reference_id="NIPOST-AUDIT-109555-PASS",
+                verification_method="validator_autofill_pipeline",
+                dataset_version="2026.1",
+                response_hash="a" * 64,
+                status="verified",
+                address_metadata_source="nipost_autofill",
+                valid_until=default_valid_until(),
+                is_active=True,
+            )
+            db.add(ev)
+            db.commit()
+            db.refresh(ev)
 
         res = cleanse_address(
             address="Wharf Road, Audited Maritime Hub, Lagos",
@@ -171,23 +172,24 @@ def test_database_record_with_expired_evidence_demoted():
             db.add(rec)
             db.commit()
 
-        # Insert expired VerificationEvidence (expired 15 days ago)
-        db.query(VerificationEvidence).filter(VerificationEvidence.postcode == test_code).delete()
-        expired_dt = datetime.now(timezone.utc) - timedelta(days=15)
-        ev = VerificationEvidence(
-            postcode=test_code,
-            provider="NIPOST",
-            provider_reference_id="NIPOST-AUDIT-109444-EXPIRED",
-            verification_method="validator_autofill_pipeline",
-            dataset_version="2024.1",
-            response_hash="b" * 64,
-            status="verified",
-            address_metadata_source="nipost_autofill",
-            valid_until=expired_dt,
-            is_active=True,
-        )
-        db.add(ev)
-        db.commit()
+        # Insert expired VerificationEvidence (expired 15 days ago) if not already present
+        ev = db.query(VerificationEvidence).filter(VerificationEvidence.postcode == test_code).first()
+        if not ev:
+            expired_dt = datetime.now(timezone.utc) - timedelta(days=15)
+            ev = VerificationEvidence(
+                postcode=test_code,
+                provider="NIPOST",
+                provider_reference_id="NIPOST-AUDIT-109444-EXPIRED",
+                verification_method="validator_autofill_pipeline",
+                dataset_version="2024.1",
+                response_hash="b" * 64,
+                status="verified",
+                address_metadata_source="nipost_autofill",
+                valid_until=expired_dt,
+                is_active=True,
+            )
+            db.add(ev)
+            db.commit()
 
         res = cleanse_address(
             address="Plot 99, Expired Audit Sector, Lagos",

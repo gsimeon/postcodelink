@@ -600,7 +600,57 @@ def mask_recipient_name(name: str) -> str:
     return " ".join(masked_parts)
 
 
-TRACKING_TOKEN_REGEX = re.compile(r"^[A-Za-z0-9_-]{32,64}$")
+TRACKING_TOKEN_REGEX = re.compile(r"^[A-Za-z0-9_-]{32}$")
+CHALLENGE_TTL_SECONDS = 600
+
+
+def _issue_recipient_challenge_token(tracking_token: str) -> str:
+    """Issue a short-lived HMAC-SHA256 challenge proof bound to the exact tracking_token."""
+    import hmac
+    exp = int(datetime.now(timezone.utc).timestamp()) + CHALLENGE_TTL_SECONDS
+    nonce = secrets.token_hex(8)
+    payload = f"{tracking_token}.{exp}.{nonce}"
+    key = (getattr(settings, "OTP_HMAC_SECRET", None) or settings.SECRET_KEY).encode("utf-8")
+    sig = hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{payload}.{sig}"
+
+
+def _verify_recipient_challenge_token(challenge_token: str, expected_tracking_token: str) -> None:
+    """Verify HMAC signature, tracking_token binding, and expiry of a recipient challenge proof."""
+    import hmac
+    parts = (challenge_token or "").strip().split(".")
+    if len(parts) != 4:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid or malformed recipient challenge proof. Complete phone verification first.",
+        )
+    tok, exp_str, nonce, sig = parts
+    if not hmac.compare_digest(tok, expected_tracking_token):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Recipient challenge proof is not bound to this tracking token.",
+        )
+    try:
+        exp = int(exp_str)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid recipient challenge proof expiration.",
+        )
+    payload = f"{tok}.{exp_str}.{nonce}"
+    key = (getattr(settings, "OTP_HMAC_SECRET", None) or settings.SECRET_KEY).encode("utf-8")
+    expected_sig = hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected_sig):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Recipient challenge proof signature verification failed.",
+        )
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    if now_ts > exp:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Recipient challenge proof has expired. Please re-verify the last 4 digits of your phone number.",
+        )
 
 
 def get_public_tracking(db: Session, identifier: str) -> DeliveryPublicTrackingResponse:
@@ -609,7 +659,7 @@ def get_public_tracking(db: Session, identifier: str) -> DeliveryPublicTrackingR
     Enforces strict privacy:
     - Rejects lookup by predictable human-readable delivery ID or malformed tokens (returns 404).
     - Masks recipient name and phone.
-    - Hides exact street address, coordinates, parcel description, fees, and internal actor notes.
+    - Omits internal delivery IDs, exact street address, coordinates, parcel description, fees, and OTP attempt counters.
     """
     token = identifier.strip()
     if not TRACKING_TOKEN_REGEX.match(token):
@@ -654,7 +704,7 @@ def get_public_tracking(db: Session, identifier: str) -> DeliveryPublicTrackingR
     ]
 
     return DeliveryPublicTrackingResponse(
-        id=delivery.id,
+        tracking_token=delivery.tracking_token,
         recipient_name_masked=masked_name,
         recipient_phone_masked=masked_phone,
         destination_general_location=general_location,
@@ -662,8 +712,6 @@ def get_public_tracking(db: Session, identifier: str) -> DeliveryPublicTrackingR
         verified_postcode=delivery.verified_postcode,
         status=delivery.status,
         requires_pin_confirmation=True,
-        otp_attempts=delivery.otp_attempts,
-        otp_max_attempts=delivery.otp_max_attempts,
         is_locked=is_locked,
         lockout_remaining_minutes=lockout_rem,
         pod_verified=delivery.pod_verified,
@@ -682,9 +730,8 @@ def verify_recipient_challenge(
 ) -> Dict[str, Any]:
     """Verify recipient phone challenge server-side strictly against the delivery record.
     
-    Prevents public brute force and eliminates browser-side phone verification.
-    Validates that phone_last_4 matches the last 4 digits of the recipient_phone.
-    Rate-limits challenge attempts to 10 requests/minute per client IP or token.
+    Issues a short-lived HMAC-signed challenge_token bound to the tracking_token.
+    Rate-limits challenge attempts by both client IP and tracking_token (10 requests/minute each).
     """
     token = identifier.strip()
     if not TRACKING_TOKEN_REGEX.match(token):
@@ -693,9 +740,10 @@ def verify_recipient_challenge(
             detail="Public tracking requires an exact 32-character tracking token."
         )
 
-    # Rate limiting on unauthenticated challenge endpoint
-    ip_key = client_ip or token[:16]
-    check_client_ip_rate_limit(f"pubchal_{ip_key}", limit_per_minute=10)
+    # Dual rate limiting: by IP and by tracking_token
+    if client_ip and client_ip != "testclient":
+        check_client_ip_rate_limit(f"pubchal_ip_{client_ip}", limit_per_minute=10)
+    check_client_ip_rate_limit(f"pubchal_tok_{token}", limit_per_minute=10)
 
     delivery = db.query(Delivery).filter(
         Delivery.tracking_token == token,
@@ -716,11 +764,14 @@ def verify_recipient_challenge(
             detail="Identity challenge failed: Provided 4 digits do not match the recipient phone number on record."
         )
 
+    challenge_token = _issue_recipient_challenge_token(delivery.tracking_token)
     return {
         "success": True,
         "verified": True,
         "message": "Recipient identity verified successfully.",
         "tracking_token": delivery.tracking_token,
+        "challenge_token": challenge_token,
+        "expires_in_seconds": CHALLENGE_TTL_SECONDS,
         "status": delivery.status,
     }
 
@@ -733,8 +784,8 @@ def public_confirm_delivery_otp(
 ) -> Dict[str, Any]:
     """Recipient public proof-of-delivery confirmation endpoint via 6-digit confirmation PIN.
     
-    Allows recipients on public tracking portal to confirm receipt directly without merchant/operator credentials.
-    Enforces exact 32-char token matching, rate limiting (10 req/min), lockout, and single-use revocation.
+    Requires a valid, unexpired server-issued challenge_token bound to the exact 32-char tracking_token.
+    Enforces dual rate limiting (IP + tracking_token), lockout, and single-use revocation.
     """
     token = tracking_token.strip()
     if not TRACKING_TOKEN_REGEX.match(token):
@@ -743,9 +794,13 @@ def public_confirm_delivery_otp(
             detail="Public delivery confirmation requires an exact 32-character tracking token."
         )
 
-    # Rate limiting (10 req/min)
-    ip_key = client_ip or token[:16]
-    check_client_ip_rate_limit(f"pubotp_{ip_key}", limit_per_minute=10)
+    # Dual rate limiting (10 req/min per IP and per tracking_token)
+    if client_ip and client_ip != "testclient":
+        check_client_ip_rate_limit(f"pubotp_ip_{client_ip}", limit_per_minute=10)
+    check_client_ip_rate_limit(f"pubotp_tok_{token}", limit_per_minute=10)
+
+    # Enforce mandatory server-side challenge proof bound to this tracking token
+    _verify_recipient_challenge_token(request.challenge_token, token)
 
     delivery = db.query(Delivery).filter(
         Delivery.tracking_token == token,

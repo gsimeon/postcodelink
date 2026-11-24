@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { VerificationMode, CleanseResult } from "@/lib/fastapi-client";
 import { Sparkles, Shield, AlertTriangle, CheckCircle2 } from "lucide-react";
 import { AddressResultCard } from "./AddressResultCard";
@@ -48,6 +48,8 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
   onApplyPostcode,
   onStartDeliveryWithAddress,
 }) => {
+  const [focusedMode, setFocusedMode] = useState<VerificationMode | null>(null);
+
   return (
     <div style={{ padding: "16px" }}>
       <div style={{ marginBottom: "16px" }}>
@@ -75,6 +77,7 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
               borderRadius: "6px",
               border: `2px solid ${verificationMode === "nipost_validate" ? "#0284c7" : "#e2e8f0"}`,
               background: verificationMode === "nipost_validate" ? "#f0f9ff" : "#ffffff",
+              boxShadow: focusedMode === "nipost_validate" ? "0 0 0 3px rgba(2, 132, 199, 0.35)" : "none",
               cursor: "pointer",
               textAlign: "left",
               fontFamily: "inherit",
@@ -88,6 +91,8 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
               value="nipost_validate"
               checked={verificationMode === "nipost_validate"}
               onChange={() => setVerificationMode("nipost_validate")}
+              onFocus={() => setFocusedMode("nipost_validate")}
+              onBlur={() => setFocusedMode(null)}
               style={{ position: "absolute", opacity: 0, pointerEvents: "none" }}
             />
             <div style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: 700, fontSize: "13px", color: "#0f172a" }}>
@@ -105,6 +110,7 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
               borderRadius: "6px",
               border: `2px solid ${verificationMode === "nipost_strict" ? "#dc2626" : "#e2e8f0"}`,
               background: verificationMode === "nipost_strict" ? "#fef2f2" : "#ffffff",
+              boxShadow: focusedMode === "nipost_strict" ? "0 0 0 3px rgba(220, 38, 38, 0.35)" : "none",
               cursor: "pointer",
               textAlign: "left",
               fontFamily: "inherit",
@@ -118,6 +124,8 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
               value="nipost_strict"
               checked={verificationMode === "nipost_strict"}
               onChange={() => setVerificationMode("nipost_strict")}
+              onFocus={() => setFocusedMode("nipost_strict")}
+              onBlur={() => setFocusedMode(null)}
               style={{ position: "absolute", opacity: 0, pointerEvents: "none" }}
             />
             <div style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: 700, fontSize: "13px", color: "#0f172a" }}>
@@ -135,6 +143,7 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
               borderRadius: "6px",
               border: `2px solid ${verificationMode === "local_standardization" ? "#d97706" : "#e2e8f0"}`,
               background: verificationMode === "local_standardization" ? "#fffbeb" : "#ffffff",
+              boxShadow: focusedMode === "local_standardization" ? "0 0 0 3px rgba(217, 119, 6, 0.35)" : "none",
               cursor: "pointer",
               textAlign: "left",
               fontFamily: "inherit",
@@ -148,6 +157,8 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
               value="local_standardization"
               checked={verificationMode === "local_standardization"}
               onChange={() => setVerificationMode("local_standardization")}
+              onFocus={() => setFocusedMode("local_standardization")}
+              onBlur={() => setFocusedMode(null)}
               style={{ position: "absolute", opacity: 0, pointerEvents: "none" }}
             />
             <div style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: 700, fontSize: "13px", color: "#0f172a" }}>

@@ -161,7 +161,7 @@ export function SettingsTab({
                     onChange={() => setForm({ ...form, nipostMode: "mock" })}
                     style={{ width: "auto", height: "auto" }}
                   />
-                  <b>Authoritative Local NIPOST Registry (30+ Verified Zones)</b>
+                  <b>PostcodeLink Local Reference Dataset — 11-state pilot coverage; not independently NIPOST-verified</b>
                 </label>
 
                 <label
@@ -211,12 +211,12 @@ export function SettingsTab({
           </div>
         </section>
 
-        {/* Supabase Database & RLS Architecture */}
+        {/* Database Authority & Tenant Security Architecture */}
         <section className="panel">
           <div className="panel-head">
             <div>
-              <h2>Supabase Database & Row Level Security (RLS)</h2>
-              <p>Database migrations and role-based access boundaries.</p>
+              <h2>Database Authority & Tenant Security Architecture</h2>
+              <p>Authoritative schema migrations (Alembic / SQLAlchemy) and FastAPI RBAC boundaries.</p>
             </div>
           </div>
 
@@ -232,17 +232,17 @@ export function SettingsTab({
             }}
           >
             <div style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: 700, color: "var(--ink)", marginBottom: "8px" }}>
-              <Database size={16} color="#2563eb" /> Applied Migrations & Security Boundaries
+              <Database size={16} color="#2563eb" /> Single Schema Authority & Application-Enforced Tenant Isolation
             </div>
             <div>
-              • <b>0001_initial_schema.sql:</b> Core database schema defining <code>profiles</code>, <code>operators</code>, <code>deliveries</code>, and <code>delivery_events</code>.
+              • <b>Alembic & SQLAlchemy (Single Schema Authority):</b> All production PostgreSQL and local SQLite schema migrations are managed exclusively via Alembic (<code>backend/alembic/versions/</code>). Legacy Supabase SQL files (<code>supabase/migrations/</code>) are retained solely as reference DDL and are not applied independently.
             </div>
             <div style={{ marginTop: "4px" }}>
-              • <b>0002_role_based_rls_policies.sql:</b> Role-aware Row Level Security granting granular permissions:
+              • <b>FastAPI Authentication & RBAC Boundaries:</b> Application-layer JWT / API-key guards enforce strict tenant isolation:
               <ul style={{ margin: "6px 0 0 20px", padding: 0, fontSize: "11px", color: "#64748b" }}>
-                <li><b>Merchants:</b> Can insert and view only their own deliveries and assigned events.</li>
-                <li><b>Operators:</b> Can view and update status strictly on deliveries assigned to their profile.</li>
-                <li><b>Delivery Events:</b> Strictly immutable audit history (no client updates or deletes allowed).</li>
+                <li><b>Merchants:</b> Scoped strictly to their own deliveries, API keys, and audit events.</li>
+                <li><b>Operators:</b> Scoped strictly to deliveries assigned to their operator profile.</li>
+                <li><b>Immutable Audit Ledgers:</b> Both <code>delivery_events</code> and <code>verification_evidence</code> enforce database-level triggers blocking <code>UPDATE</code> and <code>DELETE</code> operations.</li>
               </ul>
             </div>
           </div>

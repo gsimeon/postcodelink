@@ -108,22 +108,23 @@ def test_database_backed_official_verified_record_returns_verified():
             db.add(rec)
             db.commit()
 
-        # Provide valid audit evidence backing the official record
-        db.query(VerificationEvidence).filter(VerificationEvidence.postcode == official_code).delete()
-        ev = VerificationEvidence(
-            postcode=official_code,
-            provider="NIPOST",
-            provider_reference_id="NIPOST-REF-109777-TEST",
-            verification_method="validator_autofill_pipeline",
-            dataset_version="2026.1",
-            response_hash="a" * 64,
-            status="verified",
-            address_metadata_source="nipost_autofill",
-            valid_until=default_valid_until(),
-            is_active=True,
-        )
-        db.add(ev)
-        db.commit()
+        # Provide valid audit evidence backing the official record (append-only immutable)
+        ev = db.query(VerificationEvidence).filter(VerificationEvidence.postcode == official_code).first()
+        if not ev:
+            ev = VerificationEvidence(
+                postcode=official_code,
+                provider="NIPOST",
+                provider_reference_id="NIPOST-REF-109777-TEST",
+                verification_method="validator_autofill_pipeline",
+                dataset_version="2026.1",
+                response_hash="a" * 64,
+                status="verified",
+                address_metadata_source="nipost_autofill",
+                valid_until=default_valid_until(),
+                is_active=True,
+            )
+            db.add(ev)
+            db.commit()
 
         res = cleanse_address(
             address="Plot 10, Official FMCIDE Pilot Tech Zone, Lagos",

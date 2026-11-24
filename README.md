@@ -81,7 +81,7 @@ To prevent fabricated test fixtures or local reference data from being misrepres
 | :--- | :--- | :--- | :--- |
 | **Authoritative Live NIPOST Cloud Gateway** | Live FMCIDE/NIPOST national digital postcode registry. | `official_verified` (`postcode_status: "verified"`) | `dataset_version: null` (or provider-supplied), `fallback_used: false` |
 | **Database Directory Records** | Seeded reference data in local SQLite/PostgreSQL (`PostcodeDirectory`). | `local_reference` (`postcode_status: "local_match"`) | `source_type: "database_directory"`, `source_owner: "NIPOST / PostcodeLink"` |
-| **NIPOST National Digital Postcode** | 5-component building-level standard (`SS-LL-DDD-AA-BB` or `SS-LL-DDD-AA-BBB`: State, LGA, District, Area, Building Unit). | Standard NIPOST format | Strict 2-2-3-2-2/3 width validation (11-12 alphanumeric chars compact, 15-16 chars display), canonical & compact parsing |
+| **NIPOST National Digital Postcode** | 5-component building-level standard (`SS-LL-DDD-AA-BB`: State, LGA, District, Area, Building Unit). | Standard NIPOST format | Strict 2-2-3-2-2 width validation (11 alphanumeric chars compact, 15 chars display), canonical & compact parsing |
 | **Legacy 6-Digit Postal Codes** | Traditional regional sorting codes (e.g. `100001` Lagos Island, `900001` Garki Abuja). | `local_match` (or `verified` when verified upstream) | Regional routing (`[1-9]\d{5}`) |
 | **Demonstration Reference Fixtures** | Sample 11-character format demonstration codes (e.g. `FC-02-A09-DB-09`, `LA-01-A04-IK-02`). | `local_reference` (`postcode_status: "local_match"`) | `source_type: "demonstration_fixture"`, `source_owner: "PostcodeLink"` |
 
@@ -373,7 +373,7 @@ Following the comprehensive production-readiness review of Release Gate v5.7, th
 
 ### 8. NIPOST Digital Postcode Registry & Address Cleanser
 - **National Postcode Directory**: Searchable registry of official 6-digit NIPOST codes across Lagos, Abuja (FCT), Rivers, Oyo, Kano, Kaduna, Enugu, Ogun, Delta, Edo, and Anambra.
-- **Nigerian Address Cleanser & Standardizer**: Pasting unstructured customer notes with local landmarks (e.g. *"Beside Access Bank, Plot 412 Aminu Kano Crescent, Wuse 2, Abuja"* or *"Opposite Yellow Gate after transformer"*) automatically extracts the area, LGA, State, and attaches the matching official NIPOST 6-digit code.
+- **Nigerian Address Cleanser & Standardizer**: Pasting unstructured customer notes with local landmarks (e.g. *"Beside Access Bank, Plot 412 Aminu Kano Crescent, Wuse 2, Abuja"* or *"Opposite Yellow Gate after transformer"*) automatically extracts the area, LGA, State, and attaches a matching local reference postcode (or an official NIPOST-verified code when live upstream verification is enabled and authorized).
 - **One-Click Dispatch**: Create a delivery order directly from any resolved postcode entry or cleansed address.
 
 ### 9. Courier Fleet & Dispatch Operators

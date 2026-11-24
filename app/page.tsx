@@ -128,7 +128,7 @@ function mapFastAPICustomer(fc: FastAPICustomer): Customer {
 }
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<TabKey>("overview");
+  const [activeTab, setActiveTab] = useState<TabKey>("postcodes");
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
   const [operators, setOperators] = useState<Operator[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);

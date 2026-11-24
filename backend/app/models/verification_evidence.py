@@ -52,3 +52,34 @@ def _prevent_verification_evidence_delete(mapper, connection, target):
     """Enforce strict immutability: VerificationEvidence records cannot be deleted from the audit ledger."""
     raise ValueError("VerificationEvidence records are strictly immutable and cannot be deleted.")
 
+
+from sqlalchemy import DDL
+
+# Database-level immutability triggers when tables are initialized via SQLAlchemy metadata
+event.listen(
+    VerificationEvidence.__table__,
+    "after_create",
+    DDL(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_verification_evidence_no_update
+        BEFORE UPDATE ON verification_evidence
+        BEGIN
+            SELECT RAISE(ABORT, 'verification_evidence records are append-only immutable audit logs and cannot be updated');
+        END;
+        """
+    ).execute_if(dialect="sqlite"),
+)
+event.listen(
+    VerificationEvidence.__table__,
+    "after_create",
+    DDL(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_verification_evidence_no_delete
+        BEFORE DELETE ON verification_evidence
+        BEGIN
+            SELECT RAISE(ABORT, 'verification_evidence records are append-only immutable audit logs and cannot be deleted');
+        END;
+        """
+    ).execute_if(dialect="sqlite"),
+)
+

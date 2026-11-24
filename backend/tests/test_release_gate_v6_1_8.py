@@ -419,11 +419,14 @@ def test_server_side_recipient_phone_challenge_and_public_privacy():
         res_public = client.get(f"/api/v1/deliveries/track/{token}")
         assert res_public.status_code == 200
         data = res_public.json()
-        assert data["id"] == delivery.id
+        assert data["tracking_token"] == token
         assert data["recipient_name_masked"] == "C***** O****"
         assert data["recipient_phone_masked"] == "+23****7890"
         assert data["destination_general_location"] == "Victoria Island, Lagos"
-        # Privacy guarantees: ensure raw private fields are omitted from public response
+        # Privacy guarantees: ensure internal IDs, raw private fields & security counters are omitted
+        assert "id" not in data
+        assert "otp_attempts" not in data
+        assert "otp_max_attempts" not in data
         assert "destination_address" not in data
         assert "otp_hash" not in data
         assert "fee" not in data
@@ -446,20 +449,35 @@ def test_server_side_recipient_phone_challenge_and_public_privacy():
         assert chal_data["success"] is True
         assert chal_data["verified"] is True
         assert chal_data["tracking_token"] == token
+        assert "challenge_token" in chal_data
         assert "delivery_id" not in chal_data
+        challenge_token = chal_data["challenge_token"]
+
+        # 4b. Public Delivery Confirmation WITHOUT or with TAMPERED challenge_token -> rejected
+        res_no_chal = client.post(
+            f"/api/v1/deliveries/track/{token}/confirm-delivery",
+            json={"otp": "654321"},
+        )
+        assert res_no_chal.status_code == 422
+
+        res_bad_chal = client.post(
+            f"/api/v1/deliveries/track/{token}/confirm-delivery",
+            json={"otp": "654321", "challenge_token": "tampered.token.value.0000"},
+        )
+        assert res_bad_chal.status_code == 403
 
         # 5. Public Delivery Confirmation via PIN with invalid PIN -> 400 Bad Request
         res_wrong_pin = client.post(
             f"/api/v1/deliveries/track/{token}/confirm-delivery",
-            json={"otp": "111111"},
+            json={"otp": "111111", "challenge_token": challenge_token},
         )
         assert res_wrong_pin.status_code == 400
         assert "Invalid delivery PIN" in res_wrong_pin.json()["detail"]
 
-        # 6. Public Delivery Confirmation via PIN with valid PIN -> 200 OK
+        # 6. Public Delivery Confirmation via PIN with valid PIN & valid challenge_token -> 200 OK
         res_ok_pin = client.post(
             f"/api/v1/deliveries/track/{token}/confirm-delivery",
-            json={"otp": "654321", "phone_last_4": "7890"},
+            json={"otp": "654321", "challenge_token": challenge_token, "phone_last_4": "7890"},
         )
         assert res_ok_pin.status_code == 200
         pin_data = res_ok_pin.json()
@@ -499,11 +517,31 @@ def test_verification_evidence_model_immutability():
             db.commit()
         db.rollback()
 
-        # Attempt to delete evidence -> raises ValueError
+        # Attempt to delete evidence via ORM -> raises ValueError
         with pytest.raises(ValueError, match="VerificationEvidence records are strictly immutable and cannot be deleted"):
             db.delete(evidence)
             db.commit()
         db.rollback()
+
+        # Attempt direct raw SQL UPDATE / DELETE -> blocked by database-level triggers
+        from sqlalchemy import text
+        raw_update_blocked = False
+        try:
+            db.execute(text("UPDATE verification_evidence SET status = 'tampered' WHERE id = :id"), {"id": evidence.id})
+            db.commit()
+        except Exception:
+            raw_update_blocked = True
+            db.rollback()
+        assert raw_update_blocked, "Database-level trigger must block raw SQL UPDATE on verification_evidence"
+
+        raw_delete_blocked = False
+        try:
+            db.execute(text("DELETE FROM verification_evidence WHERE id = :id"), {"id": evidence.id})
+            db.commit()
+        except Exception:
+            raw_delete_blocked = True
+            db.rollback()
+        assert raw_delete_blocked, "Database-level trigger must block raw SQL DELETE on verification_evidence"
 
     finally:
         db.close()
