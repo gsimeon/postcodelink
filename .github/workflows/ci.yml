@@ -110,3 +110,9 @@ jobs:
 
       - name: Verify Next.js Production Build
         run: npm run build
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright E2E Suite
+        run: npm run test:e2e
