@@ -1368,6 +1368,14 @@ def test_alembic_api_key_migration_classifies_existing_keys_safely(tmp_path):
                 "INSERT INTO api_keys (id, merchant_id, name, key_prefix, hashed_key, monthly_quota, current_period, period_usage_count, usage_count, rate_limit_per_minute, is_active, is_revoked, created_at) "
                 "VALUES ('k_ambig', 'm1', 'Legacy Ambig', 'pkl_live_old', 'h3', 100, '2026-11', 0, 0, 60, 1, 0, '2026-01-01')"
             )
+            conn.execute(
+                "INSERT INTO api_keys (id, merchant_id, name, key_prefix, hashed_key, monthly_quota, current_period, period_usage_count, usage_count, rate_limit_per_minute, is_active, is_revoked, created_at) "
+                "VALUES ('k_wildcard1', 'm1', 'Wildcard Spoof 1', 'plXliveY1234', 'h4', 100, '2026-11', 0, 0, 60, 1, 0, '2026-01-01')"
+            )
+            conn.execute(
+                "INSERT INTO api_keys (id, merchant_id, name, key_prefix, hashed_key, monthly_quota, current_period, period_usage_count, usage_count, rate_limit_per_minute, is_active, is_revoked, created_at) "
+                "VALUES ('k_wildcard2', 'm1', 'Wildcard Spoof 2', 'pl_liveX1234', 'h5', 100, '2026-11', 0, 0, 60, 1, 0, '2026-01-01')"
+            )
             conn.commit()
         finally:
             conn.close()
@@ -1383,6 +1391,8 @@ def test_alembic_api_key_migration_classifies_existing_keys_safely(tmp_path):
         assert rows["k_test"] == ("test", 1)
         assert rows["k_live"] == ("live", 1)
         assert rows["k_ambig"] == ("unclassified", 0)
+        assert rows["k_wildcard1"] == ("unclassified", 0)
+        assert rows["k_wildcard2"] == ("unclassified", 0)
 
 
 def test_unclassified_api_key_rejected_at_authentication_boundary():

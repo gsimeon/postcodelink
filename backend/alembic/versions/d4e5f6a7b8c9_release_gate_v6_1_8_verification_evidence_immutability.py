@@ -59,9 +59,9 @@ def upgrade() -> None:
             with op.batch_alter_table("api_keys") as batch_op:
                 batch_op.add_column(sa.Column("environment", sa.String(length=16), nullable=False, server_default="unclassified"))
                 batch_op.create_index("ix_api_keys_environment", ["environment"])
-            # Deliberately classify existing keys by prefix; ambiguous/unknown legacy keys are quarantined as 'unclassified' & disabled
-            op.execute("UPDATE api_keys SET environment = 'test' WHERE key_prefix LIKE 'pl_test_%'")
-            op.execute("UPDATE api_keys SET environment = 'live' WHERE key_prefix LIKE 'pl_live_%'")
+            # Deliberately classify existing keys by exact 8-char prefix (SUBSTR avoids SQL LIKE '_' wildcard spoofing)
+            op.execute("UPDATE api_keys SET environment = 'test' WHERE SUBSTR(key_prefix, 1, 8) = 'pl_test_'")
+            op.execute("UPDATE api_keys SET environment = 'live' WHERE SUBSTR(key_prefix, 1, 8) = 'pl_live_'")
             false_lit = "0" if dialect_name == "sqlite" else "false"
             op.execute(f"UPDATE api_keys SET environment = 'unclassified', is_active = {false_lit} WHERE environment NOT IN ('test', 'live')")
             with op.batch_alter_table("api_keys") as batch_op:
