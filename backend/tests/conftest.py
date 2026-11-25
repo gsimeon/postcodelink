@@ -6,5 +6,6 @@ import os
 os.environ["SMS_PROVIDER"] = "simulated"
 os.environ["NIPOST_API_BASE_URL"] = ""
 os.environ["NIPOST_API_KEY"] = ""
+os.environ["NIPOST_VALIDATE_PATH"] = ""
 os.environ["OTP_SECRET_KEY"] = ""
 os.environ.setdefault("ENVIRONMENT", "development")

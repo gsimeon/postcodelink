@@ -75,6 +75,7 @@ def test_validator_unavailable_cannot_be_overridden_by_autofill():
     test_client = NIPOSTClient(
         base_url="https://api.postcode.gov.ng",
         api_key="test-key",
+        validate_path="/v1/validate",
         transport=httpx.MockTransport(mock_transport),
     )
 
@@ -101,6 +102,7 @@ def test_validator_unauthorized_cannot_be_overridden_by_autofill():
     test_client = NIPOSTClient(
         base_url="https://api.postcode.gov.ng",
         api_key="bad-key",
+        validate_path="/v1/validate",
         transport=httpx.MockTransport(mock_transport),
     )
 
@@ -127,6 +129,7 @@ def test_validator_not_found_cannot_be_overridden_by_autofill():
     test_client = NIPOSTClient(
         base_url="https://api.postcode.gov.ng",
         api_key="test-key",
+        validate_path="/v1/validate",
         transport=httpx.MockTransport(mock_transport),
     )
 
@@ -148,6 +151,7 @@ def test_validator_found_and_autofill_found_returns_pipeline():
     test_client = NIPOSTClient(
         base_url="https://api.postcode.gov.ng",
         api_key="test-key",
+        validate_path="/v1/validate",
         transport=httpx.MockTransport(mock_transport),
     )
 
@@ -170,6 +174,7 @@ def test_validator_found_and_autofill_missing_returns_partial():
     test_client = NIPOSTClient(
         base_url="https://api.postcode.gov.ng",
         api_key="test-key",
+        validate_path="/v1/validate",
         transport=httpx.MockTransport(mock_transport),
     )
 

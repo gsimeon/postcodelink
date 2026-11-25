@@ -230,6 +230,7 @@ def test_two_stage_validator_negative_halts_immediately():
     test_client = NIPOSTClient(
         base_url="https://api.postcode.gov.ng",
         api_key="test-key",
+        validate_path="/v1/validate",
         transport=httpx.MockTransport(mock_transport),
     )
 

@@ -73,7 +73,7 @@ class NIPOSTClient:
         self.timeout = timeout or getattr(settings, "NIPOST_TIMEOUT_SECONDS", 5.0)
         self.transport = transport
         self.lookup_path = lookup_path or getattr(settings, "NIPOST_LOOKUP_PATH", "/v1/lookup")
-        self.validate_path = (validate_path if validate_path is not None else getattr(settings, "NIPOST_VALIDATE_PATH", "")).strip()
+        self._validate_path_override = validate_path.strip() if validate_path is not None else None
         raw_scheme = (auth_scheme or getattr(settings, "NIPOST_AUTH_SCHEME", "x-api-key")).lower().strip()
         supported_schemes = {"bearer", "api_key", "x-api-key", "api_key_header", "both", "none"}
         if raw_scheme not in supported_schemes:
@@ -87,6 +87,13 @@ class NIPOSTClient:
         self._last_connectivity_healthy: bool = False
         self._last_authentication_verified: bool = False
         self._last_contract_verified: bool = False
+
+    @property
+    def validate_path(self) -> str:
+        """Effective Validator endpoint path (honors instance override or dynamic settings)."""
+        if self._validate_path_override is not None:
+            return self._validate_path_override
+        return str(getattr(settings, "NIPOST_VALIDATE_PATH", "") or "").strip()
 
     @property
     def adapter_installed(self) -> bool:

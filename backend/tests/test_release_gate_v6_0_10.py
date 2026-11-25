@@ -303,6 +303,8 @@ def test_two_stage_pipeline_validator_not_found_strict_fail_closed():
     )
 
     with patch("backend.app.services.nipost_client.NIPOSTClient.is_configured", True), \
+         patch("backend.app.services.nipost_client.NIPOSTClient.upstream_environment", "production"), \
+         patch("backend.app.config.settings.NIPOST_VALIDATE_PATH", "/v1/validate"), \
          patch("backend.app.services.nipost_client.NIPOSTClient.validate_postcode", return_value=val_not_found):
         resp = client.post("/api/v1/postcodes/cleanse", json={
             "address": "99 Nowhere Road, Unknown Area, Lagos",
