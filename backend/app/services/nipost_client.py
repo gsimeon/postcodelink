@@ -73,7 +73,7 @@ class NIPOSTClient:
         self.timeout = timeout or getattr(settings, "NIPOST_TIMEOUT_SECONDS", 5.0)
         self.transport = transport
         self.lookup_path = lookup_path or getattr(settings, "NIPOST_LOOKUP_PATH", "/v1/lookup")
-        self.validate_path = (validate_path if validate_path is not None else getattr(settings, "NIPOST_VALIDATE_PATH", "")).strip()
+        self.validate_path = (validate_path if validate_path is not None else getattr(settings, "NIPOST_VALIDATE_PATH", "/v1/validate")).strip()
         raw_scheme = (auth_scheme or getattr(settings, "NIPOST_AUTH_SCHEME", "x-api-key")).lower().strip()
         supported_schemes = {"bearer", "api_key", "x-api-key", "api_key_header", "both", "none"}
         if raw_scheme not in supported_schemes:
