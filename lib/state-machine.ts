@@ -94,7 +94,7 @@ export function mapBackendToFrontendStatus(apiStatus: string): DeliveryStatus {
     case 'failed':
       return 'failed';
     default:
-      return 'draft';
+      throw new Error(`Unsupported backend delivery status: ${apiStatus}`);
   }
 }
 

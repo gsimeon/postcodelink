@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // 1. Test Canonical Production State Machine
 const ALLOWED_TRANSITIONS = {
@@ -380,7 +383,7 @@ function mapBackendToFrontendStatus(apiStatus) {
     case "failed":
       return "failed";
     default:
-      return "draft";
+      throw new Error(`Unsupported backend delivery status: ${apiStatus}`);
   }
 }
 
@@ -407,6 +410,12 @@ test('Delivery Status Mapping: bi-directional mapping preserves all states inclu
   assert.equal(mapBackendToFrontendStatus('delivered'), 'delivered');
   assert.equal(mapBackendToFrontendStatus('cancelled'), 'cancelled');
   assert.equal(mapBackendToFrontendStatus('failed'), 'failed');
+  assert.throws(() => mapBackendToFrontendStatus('unexpected_status'), /Unsupported backend delivery status/);
+
+  // Ensure lib/state-machine.ts itself fails closed on unknown backend statuses
+  const smSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'state-machine.ts'), 'utf8');
+  assert.ok(smSource.includes('Unsupported backend delivery status'), 'lib/state-machine.ts must throw on unknown backend status');
+  assert.ok(!smSource.includes("default:\n      return 'draft'") && !smSource.includes("default:\r\n      return 'draft'"), 'lib/state-machine.ts must not fall back to draft');
 });
 
 // 7. Canonical Postcode Format & 5-Tier Trust Classification
