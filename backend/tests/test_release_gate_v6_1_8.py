@@ -1309,7 +1309,7 @@ def test_httponly_cookie_auth_csrf_and_logout():
     )
     assert evil_origin.status_code == 403
 
-    # Cookie-authenticated state-changing POST without Origin/Referer in production -> 403 CSRF blocked
+    # Missing Origin/Referer in production -> 403 CSRF blocked
     from backend.app.config import settings as app_settings
     with patch.object(app_settings, "ENVIRONMENT", "production"):
         missing_origin_prod = test_client.post(
@@ -1332,6 +1332,57 @@ def test_httponly_cookie_auth_csrf_and_logout():
     assert out.status_code == 200
     me_after = test_client.get("/api/v1/auth/me")
     assert me_after.status_code == 401
+
+
+def test_alembic_api_key_migration_classifies_existing_keys_safely(tmp_path):
+    """Verify d4e5f6a7b8c9 classifies pl_test_ -> test, pl_live_ -> live, and quarantines ambiguous legacy keys as unclassified & disabled."""
+    import sqlite3
+    from alembic.config import Config
+    from alembic import command
+
+    db_path = tmp_path / "mig_test.db"
+    db_url = f"sqlite:///{db_path.as_posix()}"
+    cfg = Config("alembic.ini")
+    cfg.set_main_option("sqlalchemy.url", db_url)
+
+    # Upgrade to revision right before d4e5f6a7b8c9 using isolated temp DB URL
+    from backend.app.config import settings
+    with patch.object(settings, "DATABASE_URL", db_url):
+        command.upgrade(cfg, "c3d4e5f6a7b8")
+
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO profiles (id, full_name, role, email, hashed_password, created_at, updated_at) "
+                "VALUES ('m1', 'M1', 'MERCHANT', 'm1@test.ng', 'pw', '2026-01-01', '2026-01-01')"
+            )
+            conn.execute(
+                "INSERT INTO api_keys (id, merchant_id, name, key_prefix, hashed_key, monthly_quota, current_period, period_usage_count, usage_count, rate_limit_per_minute, is_active, is_revoked, created_at) "
+                "VALUES ('k_test', 'm1', 'Legacy Test', 'pl_test_abc1', 'h1', 100, '2026-11', 0, 0, 60, 1, 0, '2026-01-01')"
+            )
+            conn.execute(
+                "INSERT INTO api_keys (id, merchant_id, name, key_prefix, hashed_key, monthly_quota, current_period, period_usage_count, usage_count, rate_limit_per_minute, is_active, is_revoked, created_at) "
+                "VALUES ('k_live', 'm1', 'Legacy Live', 'pl_live_xyz2', 'h2', 100, '2026-11', 0, 0, 60, 1, 0, '2026-01-01')"
+            )
+            conn.execute(
+                "INSERT INTO api_keys (id, merchant_id, name, key_prefix, hashed_key, monthly_quota, current_period, period_usage_count, usage_count, rate_limit_per_minute, is_active, is_revoked, created_at) "
+                "VALUES ('k_ambig', 'm1', 'Legacy Ambig', 'pkl_live_old', 'h3', 100, '2026-11', 0, 0, 60, 1, 0, '2026-01-01')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        command.upgrade(cfg, "d4e5f6a7b8c9")
+
+        conn = sqlite3.connect(db_path)
+        try:
+            rows = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT id, environment, is_active FROM api_keys")}
+        finally:
+            conn.close()
+
+        assert rows["k_test"] == ("test", 1)
+        assert rows["k_live"] == ("live", 1)
+        assert rows["k_ambig"] == ("unclassified", 0)
 
 
 def test_commercial_authorization_expiry_revocation_and_production_health_gate():

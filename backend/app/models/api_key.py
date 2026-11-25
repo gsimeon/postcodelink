@@ -12,7 +12,7 @@ class ApiKey(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     merchant_id = Column(String(36), ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False, index=True)
     name = Column(String(100), nullable=False, default="Default API Key")
-    environment = Column(String(16), nullable=False, default="live", index=True)  # "test" | "live"
+    environment = Column(String(16), nullable=False, default="test", index=True)  # "test" | "live" | "unclassified"
     key_prefix = Column(String(16), nullable=False, index=True)  # Public prefix e.g. pl_live_a1b2 / pl_test_a1b2
     hashed_key = Column(String(128), nullable=False, unique=True, index=True)  # Cryptographic hash
     monthly_quota = Column(Integer, nullable=False, default=10000)

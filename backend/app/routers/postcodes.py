@@ -404,7 +404,7 @@ def _resolve_commercial_nipost_client(http_req: Request, live_client: NIPOSTClie
     """Enforce pl_test_ sandbox isolation and commercial production authorization gate."""
     from backend.app.config import settings
 
-    api_key_env = getattr(http_req.state, "api_key_environment", "live")
+    api_key_env = getattr(http_req.state, "api_key_environment", "unclassified")
     if api_key_env == "test":
         if strict:
             raise HTTPException(
@@ -413,6 +413,12 @@ def _resolve_commercial_nipost_client(http_req: Request, live_client: NIPOSTClie
             )
         # Isolated sandbox client: empty base_url guarantees zero outbound live NIPOST calls or credit consumption
         return NIPOSTClient(base_url="", api_key="nipost_test_sandbox_isolated"), True
+
+    if api_key_env != "live":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Unclassified or legacy API key environment cannot access commercial postcode endpoints. Issue a pl_test_ or authorized pl_live_ key.",
+        )
 
     if not getattr(settings, "is_nipost_production_authorized", False):
         raise HTTPException(

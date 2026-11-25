@@ -263,8 +263,9 @@ def api_rotate_api_key(
 
     old_key = db.query(ApiKey).filter(ApiKey.id == key_id).first()
 
-    # Generate fresh key preserving environment (pl_test_ or pl_live_)
-    env = getattr(old_key, "environment", "live") or "live"
+    # Generate fresh key preserving environment (pl_test_ or pl_live_; unclassified defaults safely to 'test')
+    raw_env = getattr(old_key, "environment", "test")
+    env = raw_env if raw_env in ("test", "live") else "test"
     raw_token = secrets.token_urlsafe(32)
     raw_key = f"pl_{env}_{raw_token}"
     prefix = raw_key[:12]
