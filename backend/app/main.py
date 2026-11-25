@@ -90,6 +90,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def request_correlation_middleware(request, call_next):
+    import time
+    import uuid
+    from backend.app.core.logging_config import reset_request_id, set_request_id
+
+    req_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:16]
+    request.state.request_id = req_id
+    token = set_request_id(req_id)
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+        duration_ms = round((time.perf_counter() - start) * 1000, 2)
+        response.headers["X-Request-ID"] = req_id
+        logger.info(
+            f"http_request method={request.method} path={request.url.path} "
+            f"status={response.status_code} duration_ms={duration_ms}"
+        )
+        return response
+    finally:
+        reset_request_id(token)
+
 # Register routers under /api/v1
 app.include_router(auth.router, prefix=settings.API_V1_STR)
 app.include_router(deliveries.router, prefix=settings.API_V1_STR)

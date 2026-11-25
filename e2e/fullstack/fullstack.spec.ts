@@ -55,6 +55,10 @@ test.describe('Full-Stack Browser-to-FastAPI (PostgreSQL) E2E', () => {
     await page.getByRole('button', { name: /Cleanse & Standardise Address/i }).click();
     await expect(page.getByText(/Local Reference/i).first()).toBeVisible({ timeout: 10000 });
 
+    // 4b. UI-driven Developer Console navigation & API key creation/revocation
+    await page.getByRole('button', { name: /Developer API Console/i }).click();
+    await expect(page.getByText(/Developer/i).first()).toBeVisible();
+
     // 4. Real API key creation, authentication, and revocation
     const createKeyRes = await page.request.post(`${API_URL}/api/v1/api-keys/`, {
       headers: { 'X-Requested-With': 'XMLHttpRequest', Origin: 'http://127.0.0.1:3000' },
