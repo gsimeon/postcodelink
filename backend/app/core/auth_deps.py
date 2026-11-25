@@ -16,16 +16,30 @@ security_bearer = HTTPBearer(auto_error=False)
 def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_bearer),
     db: Session = Depends(get_db),
+    request: Request = None,
 ) -> Profile:
-    """Dependency that authenticates the Bearer token and returns the current Profile."""
-    if not credentials or not credentials.credentials:
+    """Dependency that authenticates via Bearer token or HttpOnly session cookie and returns the current Profile."""
+    token: Optional[str] = None
+    using_cookie = False
+    if credentials and credentials.credentials:
+        token = credentials.credentials
+    elif request is not None:
+        token = request.cookies.get("postcodelink_session")
+        using_cookie = bool(token)
+
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required. Please provide a valid Bearer token or 'x-api-key' header.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token = credentials.credentials
+    if using_cookie and request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        if not request.headers.get("x-requested-with"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="CSRF validation failed for cookie-authenticated state-changing request.",
+            )
     try:
         payload = decode_access_token(token)
         user_id: Optional[str] = payload.get("sub")

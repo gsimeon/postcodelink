@@ -2143,8 +2143,9 @@ def test_rate_limiter_health_status_distinguishes_fail_closed_from_in_memory():
                     assert status_fc["alert_fail_closed"] is True
                     assert status_fc["alert_in_memory_fallback"] is False
 
-                    # Endpoint verification
-                    resp = client.get("/health/rate-limiter")
+                    # Endpoint verification (requires ADMIN auth in production)
+                    admin_token = get_token(AppRole.ADMIN, "v60_rl_admin@test.ng")
+                    resp = client.get("/health/rate-limiter", headers={"Authorization": f"Bearer {admin_token}"})
                     assert resp.status_code == 200
                     data = resp.json()
                     assert data["backend"] == "unavailable_fail_closed"

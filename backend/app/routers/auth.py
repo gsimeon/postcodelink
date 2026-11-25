@@ -3,7 +3,7 @@ import time
 import ipaddress
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Tuple, Optional
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
 from backend.app.config import settings
@@ -38,8 +38,21 @@ def cleanup_expired_login_attempts(db: Session, retention_days: int = 30) -> int
     return deleted
 
 
+def _set_session_cookie(response: Response, token: str) -> None:
+    """Persist JWT in an HttpOnly SameSite=Lax cookie so browser JS cannot read it via localStorage."""
+    response.set_cookie(
+        key="postcodelink_session",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        secure=(settings.ENVIRONMENT == "production"),
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        path="/",
+    )
+
+
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-def api_register(request: UserRegisterRequest, db: Session = Depends(get_db)):
+def api_register(request: UserRegisterRequest, response: Response, db: Session = Depends(get_db)):
     """Register a new merchant account. Public registration ALWAYS defaults to MERCHANT."""
     clean_email = request.email.strip().lower()
     existing = db.query(Profile).filter(Profile.email == clean_email).first()
@@ -63,6 +76,7 @@ def api_register(request: UserRegisterRequest, db: Session = Depends(get_db)):
     db.refresh(profile)
 
     token = create_access_token({"sub": profile.id, "email": profile.email, "role": profile.role.value})
+    _set_session_cookie(response, token)
     return TokenResponse(
         access_token=token,
         token_type="bearer",
@@ -100,7 +114,7 @@ def api_admin_create_user(
 
 
 @router.post("/login", response_model=TokenResponse)
-def api_login(request: UserLoginRequest, req: Request, db: Session = Depends(get_db)):
+def api_login(request: UserLoginRequest, req: Request, response: Response, db: Session = Depends(get_db)):
     """Authenticate with email and password to receive a JWT Bearer token with trusted-proxy rate limiting."""
     clean_email = request.email.strip().lower()
     client_ip = get_trusted_client_ip(req)
@@ -213,11 +227,19 @@ def api_login(request: UserLoginRequest, req: Request, db: Session = Depends(get
     db.commit()
 
     token = create_access_token({"sub": profile.id, "email": profile.email, "role": profile.role.value})
+    _set_session_cookie(response, token)
     return TokenResponse(
         access_token=token,
         token_type="bearer",
         profile=ProfileResponse.model_validate(profile)
     )
+
+
+@router.post("/logout")
+def api_logout(response: Response):
+    """Clear the HttpOnly session cookie."""
+    response.delete_cookie(key="postcodelink_session", path="/")
+    return {"status": "logged_out"}
 
 
 @router.get("/me", response_model=ProfileResponse)

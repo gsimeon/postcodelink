@@ -34,7 +34,7 @@ export const ProvenancePanel: React.FC<ProvenancePanelProps> = ({
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "8px" }}>
         <div>
-          <span style={{ color: "#64748b" }}>Source Authority: </span>
+          <span style={{ color: "#64748b" }}>Data Source: </span>
           <strong>{source || "PostcodeLink Intelligence"}</strong>
         </div>
         {datasetVersion && (

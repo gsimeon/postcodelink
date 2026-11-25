@@ -9,10 +9,6 @@ const API_V1 = `${FASTAPI_BASE_URL}/api/v1`;
 
 let authToken: string | null = null;
 
-if (typeof window !== 'undefined') {
-  authToken = localStorage.getItem('postcodelink_auth_token');
-}
-
 export interface FastAPIProfile {
   id: string;
   full_name: string;
@@ -281,6 +277,7 @@ export interface CoverageReport {
 function getHeaders(extraHeaders: Record<string, string> = {}): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    'X-Requested-With': 'XMLHttpRequest',
     ...extraHeaders,
   };
   const token = fastApiClient.getToken();
@@ -313,25 +310,24 @@ export interface FastAPIApiKeyCreated extends FastAPIApiKey {
 
 export const fastApiClient = {
   setToken(token: string | null) {
+    // Keep token in memory only (never localStorage) to protect against XSS token theft;
+    // FastAPI also sets an HttpOnly SameSite=Lax session cookie on login/register.
     authToken = token;
-    if (typeof window !== 'undefined') {
-      if (token) {
-        localStorage.setItem('postcodelink_auth_token', token);
-      } else {
-        localStorage.removeItem('postcodelink_auth_token');
-      }
-    }
   },
 
   getToken(): string | null {
-    if (!authToken && typeof window !== 'undefined') {
-      authToken = localStorage.getItem('postcodelink_auth_token');
-    }
     return authToken;
   },
 
-  logout() {
+  async logout() {
     this.setToken(null);
+    if (typeof window !== 'undefined') {
+      await fetch(`${API_V1}/auth/logout`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      }).catch(() => {});
+    }
   },
 
   isAuthenticated(): boolean {
@@ -341,7 +337,8 @@ export const fastApiClient = {
   async login(email: string, password: string): Promise<{ access_token: string; profile: FastAPIProfile }> {
     const res = await fetch(`${API_V1}/auth/login`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({ email, password }),
     });
     if (!res.ok) {
@@ -362,7 +359,8 @@ export const fastApiClient = {
   }): Promise<{ access_token: string; profile: FastAPIProfile }> {
     const res = await fetch(`${API_V1}/auth/register`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify(payload),
     });
     if (!res.ok) {

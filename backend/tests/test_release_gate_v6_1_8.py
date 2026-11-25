@@ -1275,3 +1275,71 @@ def test_sms_probe_rejects_non_200_responses_and_public_endpoint_does_not_probe(
     _sms_probe_cache.clear()
 
 
+def test_httponly_cookie_auth_csrf_and_logout():
+    """Verify login sets HttpOnly cookie, /me accepts cookie, CSRF blocks cookie POST without header, and logout clears cookie."""
+    from fastapi.testclient import TestClient
+    from backend.app.main import app
+
+    test_client = TestClient(app)
+    email = f"cookie-{uuid.uuid4().hex[:8]}@example.com"
+    reg = test_client.post(
+        "/api/v1/auth/register",
+        json={"full_name": "Cookie User", "email": email, "password": "StrongPassword!123"},
+    )
+    assert reg.status_code == 201
+    assert "postcodelink_session" in reg.cookies
+
+    # Cookie-authenticated GET /me succeeds without Authorization header
+    me_res = test_client.get("/api/v1/auth/me")
+    assert me_res.status_code == 200
+    assert me_res.json()["email"] == email
+
+    # Cookie-authenticated state-changing POST without X-Requested-With -> 403 CSRF blocked
+    csrf_blocked = test_client.post(
+        "/api/v1/api-keys/",
+        json={"name": "CSRF Key", "monthly_quota": 100},
+    )
+    assert csrf_blocked.status_code == 403
+
+    # With X-Requested-With -> succeeds
+    csrf_ok = test_client.post(
+        "/api/v1/api-keys/",
+        headers={"X-Requested-With": "XMLHttpRequest"},
+        json={"name": "Cookie Key", "monthly_quota": 100},
+    )
+    assert csrf_ok.status_code == 201
+
+    # Logout clears cookie
+    out = test_client.post("/api/v1/auth/logout")
+    assert out.status_code == 200
+    me_after = test_client.get("/api/v1/auth/me")
+    assert me_after.status_code == 401
+
+
+def test_commercial_authorization_expiry_revocation_and_production_health_gate():
+    """Verify expired/revoked commercial auth fails closed and detailed health endpoints require ADMIN in production."""
+    from fastapi.testclient import TestClient
+    from backend.app.config import Settings, settings
+    from backend.app.main import app
+
+    base = {
+        "NIPOST_PRODUCTION_AUTHORIZED": True,
+        "NIPOST_AUTHORIZATION_AGREEMENT_REF": "NIPOST-AGR-2026-001",
+        "NIPOST_AUTHORIZATION_APPROVER": "Director of Licensing",
+        "NIPOST_AUTHORIZATION_APPROVED_AT": "2026-11-20T10:00:00Z",
+        "NIPOST_AUTHORIZATION_EXPIRES_AT": "2099-11-20T10:00:00Z",
+        "NIPOST_AUTHORIZATION_REVOKED": False,
+        "NIPOST_AUTHORIZATION_SCOPE": "postcode_verification",
+    }
+    assert Settings(**base).is_nipost_production_authorized is True
+    assert Settings(**{**base, "NIPOST_AUTHORIZATION_EXPIRES_AT": "2020-01-01T00:00:00Z"}).is_nipost_production_authorized is False
+    assert Settings(**{**base, "NIPOST_AUTHORIZATION_REVOKED": True}).is_nipost_production_authorized is False
+
+    test_client = TestClient(app)
+    with patch.object(settings, "ENVIRONMENT", "production"):
+        assert test_client.get("/health/live").status_code == 200
+        assert test_client.get("/health/worker").status_code == 401
+        assert test_client.get("/health/rate-limiter").status_code == 401
+        assert test_client.get("/health/integrations").status_code == 401
+
+

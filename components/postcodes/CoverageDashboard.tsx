@@ -21,10 +21,10 @@ export const CoverageDashboard: React.FC<CoverageDashboardProps> = ({
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", flexWrap: "wrap", gap: "12px" }}>
         <div>
           <h2 style={{ fontSize: "18px", fontWeight: 700, margin: 0, color: "#0f172a" }}>
-            National Postcode Coverage & Integration Readiness
+            Postcode Coverage & Data Quality
           </h2>
           <p style={{ margin: "4px 0 0", fontSize: "12px", color: "#64748b" }}>
-            Live status of official administrative datasets, digital code registry, and upstream gateway connectivity.
+            Coverage across Nigeria&apos;s 36 states + FCT (37 total), dataset freshness, and upstream gateway status.
           </p>
         </div>
         <button

@@ -2,7 +2,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, status
+from fastapi import FastAPI, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -159,8 +159,30 @@ def health_ready(db: Session = Depends(get_db)):
         )
 
 
+def _require_admin_in_production(request: Request, db: Session = Depends(get_db)):
+    """Require ADMIN authentication for detailed operational health endpoints in production."""
+    if settings.ENVIRONMENT != "production":
+        return None
+    from backend.app.core.auth_deps import get_current_user, security_bearer
+    auth_header = request.headers.get("authorization")
+    bearer_creds = None
+    if auth_header and auth_header.lower().startswith("bearer "):
+        from fastapi.security import HTTPAuthorizationCredentials
+        bearer_creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=auth_header.split(" ", 1)[1].strip())
+    user = get_current_user(request=request, credentials=bearer_creds, db=db)
+    if user.role != AppRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator role required for detailed operational diagnostics in production.",
+        )
+    return user
+
+
 @app.get("/health/worker", tags=["system"])
-def health_worker(db: Session = Depends(get_db)):
+def health_worker(
+    db: Session = Depends(get_db),
+    _admin=Depends(_require_admin_in_production),
+):
     """Worker monitoring: checks persistent cross-process worker heartbeats, lifecycle states, and queue backlog."""
     from backend.app.models.notification_outbox import NotificationOutbox
     from backend.app.models.worker_heartbeat import WorkerHeartbeat
@@ -263,7 +285,7 @@ def health_worker(db: Session = Depends(get_db)):
 
 
 @app.get("/health/rate-limiter", tags=["system"])
-def health_rate_limiter():
+def health_rate_limiter(_admin=Depends(_require_admin_in_production)):
     """Rate limiter monitoring: inspects active backend (Redis vs in-memory), fail-closed policy, and connection health."""
     from backend.app.core.rate_limiter import get_rate_limiter_status
     return get_rate_limiter_status()
@@ -364,7 +386,7 @@ def _probe_sms_gateway(force_probe: bool = False) -> dict:
 
 
 @app.get("/health/integrations", tags=["system"])
-def health_integrations():
+def health_integrations(_admin=Depends(_require_admin_in_production)):
     """Integration health: returns consolidated cached NIPOST and SMS telemetry without triggering unauthenticated external probes."""
     from backend.app.services.nipost_client import get_nipost_client
 

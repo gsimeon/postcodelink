@@ -241,6 +241,8 @@ class Settings(BaseSettings):
     NIPOST_AUTHORIZATION_AGREEMENT_REF: str = os.getenv("NIPOST_AUTHORIZATION_AGREEMENT_REF", "").strip()
     NIPOST_AUTHORIZATION_APPROVER: str = os.getenv("NIPOST_AUTHORIZATION_APPROVER", "").strip()
     NIPOST_AUTHORIZATION_APPROVED_AT: str = os.getenv("NIPOST_AUTHORIZATION_APPROVED_AT", "").strip()
+    NIPOST_AUTHORIZATION_EXPIRES_AT: str = os.getenv("NIPOST_AUTHORIZATION_EXPIRES_AT", "").strip()
+    NIPOST_AUTHORIZATION_REVOKED: bool = os.getenv("NIPOST_AUTHORIZATION_REVOKED", "false").strip().lower() == "true"
     NIPOST_AUTHORIZATION_SCOPE: str = os.getenv("NIPOST_AUTHORIZATION_SCOPE", "").strip()
 
     def has_nipost_scope(self, required_scope: str) -> bool:
@@ -253,9 +255,12 @@ class Settings(BaseSettings):
 
     @property
     def is_nipost_production_authorized(self) -> bool:
-        """True only when commercial authorization is enabled and the full approval record
-        (agreement_ref, approver, valid non-future approved_at, and explicit postcode_verification scope) is present.
+        """True only when commercial authorization is enabled, not revoked, not expired,
+        and the full approval record (agreement_ref, approver, valid non-future approved_at,
+        and explicit postcode_verification scope) is present.
         """
+        if self.NIPOST_AUTHORIZATION_REVOKED:
+            return False
         if not (
             self.NIPOST_PRODUCTION_AUTHORIZED
             and self.NIPOST_AUTHORIZATION_AGREEMENT_REF.strip()
@@ -265,12 +270,19 @@ class Settings(BaseSettings):
         ):
             return False
         from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
         try:
             approved_dt = datetime.fromisoformat(self.NIPOST_AUTHORIZATION_APPROVED_AT.strip().replace("Z", "+00:00"))
             if approved_dt.tzinfo is None:
                 approved_dt = approved_dt.replace(tzinfo=timezone.utc)
-            if approved_dt > datetime.now(timezone.utc):
+            if approved_dt > now:
                 return False
+            if self.NIPOST_AUTHORIZATION_EXPIRES_AT.strip():
+                expires_dt = datetime.fromisoformat(self.NIPOST_AUTHORIZATION_EXPIRES_AT.strip().replace("Z", "+00:00"))
+                if expires_dt.tzinfo is None:
+                    expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+                if expires_dt <= now:
+                    return False
         except ValueError:
             return False
         return True

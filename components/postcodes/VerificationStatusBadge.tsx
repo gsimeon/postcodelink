@@ -12,12 +12,11 @@ export const VerificationStatusBadge: React.FC<VerificationStatusBadgeProps> = (
   isLiveNipost,
   isPartial,
 }) => {
-  // 1. Officially Verified: Live authoritative evidence supports the claim
+  // 1. Officially Verified: requires positive official status (never broad boolean flag alone)
   if (
     status === "official_verified" ||
     status === "officially_verified" ||
-    status === "nipost_verified" ||
-    (isLiveNipost && !isPartial)
+    status === "nipost_verified"
   ) {
     return (
       <span
