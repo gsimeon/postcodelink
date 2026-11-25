@@ -319,7 +319,7 @@ def test_api_key_lifecycle_issuance_auth_and_quota_enforcement():
     )
     assert create_res.status_code == 201
     key_data = create_res.json()
-    assert key_data["api_key"].startswith("pl_live_")
+    assert key_data["api_key"].startswith(("pl_test_", "pl_live_"))
     assert key_data["monthly_quota"] == 100 or key_data["monthly_quota"] == 2
     raw_api_key = key_data["api_key"]
     key_id = key_data["id"]

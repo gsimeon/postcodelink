@@ -73,7 +73,7 @@ class NIPOSTClient:
         self.timeout = timeout or getattr(settings, "NIPOST_TIMEOUT_SECONDS", 5.0)
         self.transport = transport
         self.lookup_path = lookup_path or getattr(settings, "NIPOST_LOOKUP_PATH", "/v1/lookup")
-        self.validate_path = (validate_path if validate_path is not None else getattr(settings, "NIPOST_VALIDATE_PATH", "/v1/validate")).strip()
+        self.validate_path = (validate_path if validate_path is not None else getattr(settings, "NIPOST_VALIDATE_PATH", "")).strip()
         raw_scheme = (auth_scheme or getattr(settings, "NIPOST_AUTH_SCHEME", "x-api-key")).lower().strip()
         supported_schemes = {"bearer", "api_key", "x-api-key", "api_key_header", "both", "none"}
         if raw_scheme not in supported_schemes:
@@ -101,6 +101,9 @@ class NIPOSTClient:
     @property
     def configuration_complete(self) -> bool:
         """Required endpoint URL and active credentials exist for production verification based on auth_scheme."""
+        key = (self.api_key or "").strip()
+        if key.startswith("nipost_pk_"):
+            return False
         if self.transport is not None:
             return True
         # If is_configured is explicitly mocked/patched to True in unit test suites
@@ -110,11 +113,13 @@ class NIPOSTClient:
             return False
         if self.auth_scheme == "none":
             return True
-        return bool(self.api_key)
+        return bool(key)
 
     @property
     def upstream_environment(self) -> str:
         """Classify upstream NIPOST credential environment: 'production' | 'sandbox' | 'unclassified'."""
+        if self.auth_scheme == "none":
+            return "unclassified"
         key = (self.api_key or "").strip()
         if key.startswith("nipost_live_"):
             return "production"
@@ -185,7 +190,13 @@ class NIPOSTClient:
             "connectivity_healthy": bool(telemetry.get("connectivity_healthy", False)),
             "authentication_verified": bool(telemetry.get("authentication_verified", False)),
             "contract_verified": bool(telemetry.get("contract_verified", False)),
-            "production_authorized": False,
+            "production_authorized": bool(getattr(settings, "is_nipost_production_authorized", False)),
+            "authorization_record": {
+                "agreement_ref": getattr(settings, "NIPOST_AUTHORIZATION_AGREEMENT_REF", "") or None,
+                "approver": getattr(settings, "NIPOST_AUTHORIZATION_APPROVER", "") or None,
+                "approved_at": getattr(settings, "NIPOST_AUTHORIZATION_APPROVED_AT", "") or None,
+                "scope": getattr(settings, "NIPOST_AUTHORIZATION_SCOPE", "") or None,
+            },
             "last_checked_at": telemetry.get("last_checked_at"),
             "status": status,
             "display_status": display_status,
@@ -801,15 +812,15 @@ class NIPOSTClient:
             data["valid"] = True
             return NIPOSTLookupStatus.FOUND, data, None, "validator"
 
-        # Unified /v1/lookup contract (e.g. api.postcode.gov.ng where /v1/validate is not separate)
+        # Unified /v1/lookup contract (documented public NIPOST API contract)
         lookup_res = self.lookup_postcode(clean_code)
         if lookup_res.status != NIPOSTLookupStatus.FOUND or not lookup_res.data:
             ret_data = lookup_res.data if lookup_res.status == NIPOSTLookupStatus.INVALID_INPUT else None
-            return lookup_res.status, ret_data, lookup_res.error_message, "validator_autofill_pipeline"
+            return lookup_res.status, ret_data, lookup_res.error_message, "unified_lookup"
         data = dict(lookup_res.data)
-        data["service"] = "autofill"
-        data["verification_method"] = "validator_autofill_pipeline"
-        return NIPOSTLookupStatus.FOUND, data, None, "validator_autofill_pipeline"
+        data["service"] = "lookup"
+        data["verification_method"] = "unified_lookup"
+        return NIPOSTLookupStatus.FOUND, data, None, "unified_lookup"
 
 
     def validate_address(

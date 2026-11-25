@@ -3,7 +3,7 @@ import secrets
 import hashlib
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal
-from fastapi import APIRouter, Depends, HTTPException, status, Header
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Header
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
 from sqlalchemy import update, case, and_, or_
@@ -25,9 +25,9 @@ class CreateApiKeyRequest(BaseModel):
         max_length=100,
         description="Descriptive name for the API key (1-100 characters)",
     )
-    environment: Literal["test", "live"] = Field(
-        default="live",
-        description="Developer key environment: 'test' (pl_test_) or 'live' (pl_live_)",
+    environment: Optional[Literal["test", "live"]] = Field(
+        default=None,
+        description="Developer key environment: 'test' (pl_test_ isolated sandbox) or 'live' (pl_live_ production, requires commercial authorization).",
     )
     monthly_quota: int = Field(
         default=10000,
@@ -77,6 +77,7 @@ class ApiKeyCreatedResponse(ApiKeyResponse):
 def get_api_key_merchant(
     x_api_key: Optional[str] = Header(None, alias="x-api-key"),
     db: Session = Depends(get_db),
+    request: Request = None,
 ) -> Profile:
     """FastAPI security dependency authenticating callers via x-api-key header with atomic monthly quota enforcement."""
     if not x_api_key or not isinstance(x_api_key, str):
@@ -153,6 +154,9 @@ def get_api_key_merchant(
             detail=f"Monthly API key quota of {key_record.monthly_quota} requests exceeded for period {now_period}.",
         )
 
+    if request is not None:
+        request.state.api_key_environment = getattr(key_record, "environment", "live") or "live"
+        request.state.api_key_id = key_record.id
     return key_record.merchant
 
 
@@ -163,8 +167,21 @@ def api_create_api_key(
     db: Session = Depends(get_db),
 ):
     """Generate a new secure API key with prefix indexing and monthly request quota."""
+    from backend.app.config import settings
+
+    is_authorized = bool(getattr(settings, "is_nipost_production_authorized", False))
+    env = req.environment if req.environment is not None else ("live" if is_authorized else "test")
+    if env == "live" and not is_authorized:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Live commercial API keys (pl_live_) are disabled until NIPOST commercial authorization is "
+                "recorded and approved (NIPOST_PRODUCTION_AUTHORIZED=true with agreement reference and approver). "
+                "Create a pl_test_ sandbox key instead."
+            ),
+        )
+
     raw_token = secrets.token_urlsafe(32)
-    env = req.environment
     raw_key = f"pl_{env}_{raw_token}"
     prefix = raw_key[:12]
     hashed = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()

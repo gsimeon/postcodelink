@@ -231,10 +231,26 @@ class Settings(BaseSettings):
     NIPOST_API_URL: str = os.getenv("NIPOST_API_URL", os.getenv("NIPOST_API_BASE_URL", ""))
     NIPOST_API_KEY: str = os.getenv("NIPOST_API_KEY", "")
     NIPOST_LOOKUP_PATH: str = os.getenv("NIPOST_LOOKUP_PATH", "/v1/lookup")
-    NIPOST_VALIDATE_PATH: str = os.getenv("NIPOST_VALIDATE_PATH", "/v1/validate")  # Set to "" if upstream uses unified /v1/lookup (e.g. api.postcode.gov.ng)
+    NIPOST_VALIDATE_PATH: str = os.getenv("NIPOST_VALIDATE_PATH", "")  # Blank uses documented unified /v1/lookup; set "/v1/validate" only for two-stage Validator/Autofill
     NIPOST_AUTH_SCHEME: str = os.getenv("NIPOST_AUTH_SCHEME", "x-api-key")  # "x-api-key" (quickstart default), "bearer", "api_key", or "none"
     NIPOST_QUERY_PARAM: str = os.getenv("NIPOST_QUERY_PARAM", "code")  # "code", "postcode", or "both"
     NIPOST_TIMEOUT_SECONDS: float = 5.0
+
+    # Auditable Commercial NIPOST Authorization (required before enabling pl_live_ commercial resale)
+    NIPOST_PRODUCTION_AUTHORIZED: bool = os.getenv("NIPOST_PRODUCTION_AUTHORIZED", "false").strip().lower() == "true"
+    NIPOST_AUTHORIZATION_AGREEMENT_REF: str = os.getenv("NIPOST_AUTHORIZATION_AGREEMENT_REF", "").strip()
+    NIPOST_AUTHORIZATION_APPROVER: str = os.getenv("NIPOST_AUTHORIZATION_APPROVER", "").strip()
+    NIPOST_AUTHORIZATION_APPROVED_AT: str = os.getenv("NIPOST_AUTHORIZATION_APPROVED_AT", "").strip()
+    NIPOST_AUTHORIZATION_SCOPE: str = os.getenv("NIPOST_AUTHORIZATION_SCOPE", "").strip()
+
+    @property
+    def is_nipost_production_authorized(self) -> bool:
+        """True only when commercial authorization is enabled and accompanied by an agreement reference and approver."""
+        return bool(
+            self.NIPOST_PRODUCTION_AUTHORIZED
+            and self.NIPOST_AUTHORIZATION_AGREEMENT_REF.strip()
+            and self.NIPOST_AUTHORIZATION_APPROVER.strip()
+        )
 
     # Trusted Reverse Proxies for Real Client IP extraction and rate limiting.
     # In production, default is strictly empty (direct external connections cannot spoof X-Forwarded-For).

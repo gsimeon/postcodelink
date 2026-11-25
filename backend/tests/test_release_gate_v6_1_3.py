@@ -146,6 +146,7 @@ def test_negative_nipost_response_not_found_semantics():
     """
     mock_client = MagicMock(spec=NIPOSTClient)
     mock_client.is_configured = True
+    mock_client.upstream_environment = "production"
     mock_client.lookup_postcode.return_value = NIPOSTLookupResult(
         status=NIPOSTLookupStatus.NOT_FOUND,
         error_message="Postal code 999999 not registered in national database.",
@@ -179,6 +180,7 @@ def test_negative_nipost_response_invalid_input_semantics():
     """
     mock_client = MagicMock(spec=NIPOSTClient)
     mock_client.is_configured = True
+    mock_client.upstream_environment = "production"
     mock_client.lookup_postcode.return_value = NIPOSTLookupResult(
         status=NIPOSTLookupStatus.INVALID_INPUT,
         error_message="Invalid postcode format: abc",
@@ -210,6 +212,7 @@ def test_positive_nipost_response_evidence_persisted_semantics():
     """
     mock_client = MagicMock(spec=NIPOSTClient)
     mock_client.is_configured = True
+    mock_client.upstream_environment = "production"
     mock_client.lookup_postcode.return_value = NIPOSTLookupResult(
         status=NIPOSTLookupStatus.FOUND,
         data={

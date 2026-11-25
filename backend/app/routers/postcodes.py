@@ -118,8 +118,21 @@ def execute_postcode_lookup(
                     rec_area = rec_area or None
                     rec_state = rec_state or None
 
-            is_sandbox = getattr(client, "upstream_environment", "unclassified") == "sandbox"
-            # Record VerificationEvidence via dedicated transactional service
+            upstream_env = getattr(client, "upstream_environment", "unclassified")
+            is_production_cred = upstream_env == "production"
+            is_sandbox = upstream_env == "sandbox"
+            if strict and not is_production_cred:
+                detail = (
+                    "Strict production verification failed closed: NIPOST client is configured with a sandbox (nipost_test_) credential, which cannot provide authoritative production verification."
+                    if is_sandbox
+                    else "Strict production verification failed closed: NIPOST client requires a positively identified production secret (nipost_live_). Unclassified, publishable (nipost_pk_*), missing, or auth_scheme='none' credentials are rejected."
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=detail,
+                )
+
+            # Record VerificationEvidence via dedicated transactional service (never persisted as official for non-production creds)
             evidence_persisted, ev_id, ev_valid_until = record_verification_evidence(
                 db=db,
                 code=code,
@@ -128,13 +141,8 @@ def execute_postcode_lookup(
                 upstream_version=upstream_version,
                 is_validator=is_validator,
                 addr_metadata_source=addr_metadata_source,
-                is_sandbox=is_sandbox,
+                is_sandbox=is_sandbox or not is_production_cred,
             )
-            if is_sandbox and strict:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Strict production verification failed closed: NIPOST client is configured with a sandbox (nipost_test_) credential, which cannot provide authoritative production verification.",
-                )
 
             if strict and not evidence_persisted:
                 if db is None:
@@ -147,11 +155,20 @@ def execute_postcode_lookup(
                     detail="Verification evidence audit record could not be persisted. Strict verification failed closed.",
                 )
 
+            is_official_production = bool(is_production_cred and evidence_persisted)
             if is_sandbox:
                 prov_text = "NIPOST Sandbox API (Test Key — Sample Dataset; not valid for production verification)"
                 ver_status = "sandbox_verified"
                 lookup_status_val = "sandbox_verified"
                 service_type_val = "sandbox"
+            elif not is_production_cred:
+                prov_text = (
+                    "Upstream NIPOST Gateway responded with an unclassified credential (not nipost_live_); "
+                    "downgraded to local reference per verification integrity policy."
+                )
+                ver_status = "local_reference"
+                lookup_status_val = "local_reference"
+                service_type_val = "unverified_fallback"
             elif not evidence_persisted:
                 prov_text = (
                     "NIPOST Live Gateway responded, but audit evidence persistence failed or database unavailable; "
@@ -183,18 +200,18 @@ def execute_postcode_lookup(
                 verification_status=ver_status,
                 provenance=prov_text,
                 dataset_version=upstream_version,
-                source_owner="NIPOST Sandbox" if is_sandbox else ("NIPOST" if evidence_persisted else "PostcodeLink"),
-                source_type="nipost_sandbox" if is_sandbox else ("official_national_directory" if evidence_persisted else "local_reference"),
+                source_owner="NIPOST Sandbox" if is_sandbox else ("NIPOST" if is_official_production else "PostcodeLink"),
+                source_type="nipost_sandbox" if is_sandbox else ("official_national_directory" if is_official_production else "local_reference"),
                 evidence_id=ev_id,
-                verification_method=ver_method if (evidence_persisted or is_sandbox) else "unverified_fallback",
+                verification_method=ver_method if (is_official_production or is_sandbox) else "unverified_fallback",
                 address_metadata_source=addr_metadata_source,
                 valid_until=ev_valid_until,
             )
             return PostcodeLookupResponse(
-                source="nipost_sandbox" if is_sandbox else ("live_nipost_api" if evidence_persisted else "local_reference_fallback"),
+                source="nipost_sandbox" if is_sandbox else ("live_nipost_api" if is_official_production else "local_reference_fallback"),
                 count=1,
                 matches=[schema_rec],
-                is_live_nipost=bool(evidence_persisted and not is_sandbox),
+                is_live_nipost=is_official_production,
                 upstream_contacted=True,
                 postcode_exists=True,
                 is_partial_verification=is_validator,
@@ -203,10 +220,14 @@ def execute_postcode_lookup(
                 api_integration_version="2026.1",
                 provenance=prov_text,
                 lookup_status=lookup_status_val,
-                verification_source="nipost_sandbox" if is_sandbox else ("live_nipost_api" if evidence_persisted else "local_nipost_reference_dataset"),
+                verification_source="nipost_sandbox" if is_sandbox else ("live_nipost_api" if is_official_production else "local_nipost_reference_dataset"),
                 verification_status=ver_status,
-                fallback_used=bool(not evidence_persisted and not is_sandbox),
-                fallback_reason="Verification evidence could not be recorded" if (not evidence_persisted and not is_sandbox) else None,
+                fallback_used=bool(not is_official_production and not is_sandbox),
+                fallback_reason=(
+                    "Upstream credential is unclassified (requires nipost_live_)"
+                    if (not is_production_cred and not is_sandbox)
+                    else ("Verification evidence could not be recorded" if (not evidence_persisted and not is_sandbox) else None)
+                ),
                 upstream_status=res_status_val,
                 evidence_id=ev_id,
                 verification_method=ver_method if evidence_persisted else "unverified_fallback",
@@ -379,6 +400,31 @@ def api_get_coverage_report(
 # Commercial Subscription API Endpoints (Mandatory API Key Authentication)
 # ==============================================================================
 
+def _resolve_commercial_nipost_client(http_req: Request, live_client: NIPOSTClient, strict: bool) -> tuple[NIPOSTClient, bool]:
+    """Enforce pl_test_ sandbox isolation and commercial production authorization gate."""
+    from backend.app.config import settings
+
+    api_key_env = getattr(http_req.state, "api_key_environment", "live")
+    if api_key_env == "test":
+        if strict:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Developer sandbox keys (pl_test_) cannot perform strict production verification and never contact live NIPOST endpoints.",
+            )
+        # Isolated sandbox client: empty base_url guarantees zero outbound live NIPOST calls or credit consumption
+        return NIPOSTClient(base_url="", api_key="nipost_test_sandbox_isolated"), True
+
+    if not getattr(settings, "is_nipost_production_authorized", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Live commercial postcode access (pl_live_) is disabled pending recorded NIPOST commercial "
+                "authorization (NIPOST_PRODUCTION_AUTHORIZED=true with agreement reference and approver)."
+            ),
+        )
+    return live_client, False
+
+
 @router.get("/commercial/lookup", response_model=PostcodeLookupResponse)
 def api_commercial_lookup_postcodes(
     request: Request,
@@ -392,17 +438,25 @@ def api_commercial_lookup_postcodes(
 ):
     """Commercial enterprise postcode lookup. Strictly requires active 'x-api-key' with valid quota.
     
-    Authenticates and meters monthly quota exactly once via dependency injection.
-    Directly invokes business logic without duplicate route execution or double metering.
+    Enforces pl_test_ sandbox isolation (never hits live NIPOST) and commercial authorization gate for pl_live_.
     """
-    return execute_postcode_lookup(
+    effective_client, is_dev_sandbox = _resolve_commercial_nipost_client(request, client, strict)
+    res = execute_postcode_lookup(
         db=db,
         state=state,
         area=area,
         code=code,
         strict=strict,
-        client=client,
+        client=effective_client,
     )
+    if is_dev_sandbox:
+        res.source = "postcodelink_sandbox"
+        res.verification_source = "postcodelink_sandbox"
+        res.verification_status = "sandbox_verified" if res.matches else "local_reference"
+        res.is_live_nipost = False
+        res.upstream_contacted = False
+        res.provenance = "PostcodeLink Developer Sandbox (pl_test_ — isolated test environment; live NIPOST credits not consumed)"
+    return res
 
 
 @router.post("/commercial/cleanse", response_model=CleanseAddressResponse)
@@ -415,20 +469,29 @@ def api_commercial_cleanse_address(
 ):
     """Commercial enterprise address cleansing. Strictly requires active 'x-api-key' with valid quota.
     
-    Authenticates and meters monthly quota exactly once via dependency injection.
-    Directly invokes business logic without duplicate route execution or double metering.
+    Enforces pl_test_ sandbox isolation (never hits live NIPOST) and commercial authorization gate for pl_live_.
     """
-    return cleanse_address(
+    strict_requested = bool(request.strict or request.verification_mode == "nipost_strict")
+    effective_client, is_dev_sandbox = _resolve_commercial_nipost_client(http_req, client, strict_requested)
+    res = cleanse_address(
         address=request.address,
         state_hint=request.state,
         area_hint=request.area,
         postcode_hint=request.postcode,
         strict=request.strict,
-        live_verify=request.live_verify,
-        verification_mode=request.verification_mode,
-        client=client,
+        live_verify=False if is_dev_sandbox else request.live_verify,
+        verification_mode="local_standardization" if is_dev_sandbox else request.verification_mode,
+        client=effective_client,
         db=db,
     )
+    if is_dev_sandbox:
+        res.source = "postcodelink_sandbox"
+        res.verification_source = "postcodelink_sandbox"
+        res.verification_status = "sandbox_verified" if res.postcode else "local_reference"
+        res.is_live_nipost = False
+        res.upstream_contacted = False
+        res.provenance = "PostcodeLink Developer Sandbox (pl_test_ — isolated test environment; live NIPOST credits not consumed)"
+    return res
 
 
 @router.post("/integration/health-check")

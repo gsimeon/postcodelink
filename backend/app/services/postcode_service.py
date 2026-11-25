@@ -759,8 +759,21 @@ def cleanse_address(
             rec_res = "building_location" if rec_type == "digital_location" else "area_district"
 
             upstream_ver = live_data.get("dataset_version") if live_data else None
-            is_sandbox = getattr(client, "upstream_environment", "unclassified") == "sandbox"
-            # Record VerificationEvidence via dedicated transactional service
+            upstream_env = getattr(client, "upstream_environment", "unclassified")
+            is_production_cred = upstream_env == "production"
+            is_sandbox = upstream_env == "sandbox"
+            if effective_strict and not is_production_cred:
+                detail = (
+                    "Strict production verification failed closed: NIPOST client is configured with a sandbox (nipost_test_) credential, which cannot provide authoritative production verification."
+                    if is_sandbox
+                    else "Strict production verification failed closed: NIPOST client requires a positively identified production secret (nipost_live_). Unclassified, publishable (nipost_pk_*), missing, or auth_scheme='none' credentials are rejected."
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=detail,
+                )
+
+            # Record VerificationEvidence via dedicated transactional service (never persisted as official for non-production creds)
             evidence_persisted, ev_id, ev_valid_until = record_verification_evidence(
                 db=db,
                 code=live_code,
@@ -769,13 +782,8 @@ def cleanse_address(
                 upstream_version=upstream_ver,
                 is_validator=is_validator,
                 addr_metadata_source=addr_metadata_source,
-                is_sandbox=is_sandbox,
+                is_sandbox=is_sandbox or not is_production_cred,
             )
-            if is_sandbox and effective_strict:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Strict production verification failed closed: NIPOST client is configured with a sandbox (nipost_test_) credential, which cannot provide authoritative production verification.",
-                )
 
             if effective_strict and not evidence_persisted:
                 if db is None:
@@ -788,11 +796,19 @@ def cleanse_address(
                     detail="Verification evidence audit record could not be persisted. Strict verification failed closed.",
                 )
 
+            is_official_production = bool(is_production_cred and evidence_persisted)
             if is_sandbox:
                 prov_text = (
                     "NIPOST Sandbox API (Test Key — Sample Dataset; not valid for production verification)"
                 )
                 ver_status = "sandbox_verified"
+                is_official = False
+            elif not is_production_cred:
+                prov_text = (
+                    "Upstream NIPOST Gateway responded with an unclassified credential (not nipost_live_); "
+                    "downgraded to local reference per verification integrity policy."
+                )
+                ver_status = "local_reference"
                 is_official = False
             elif not evidence_persisted:
                 # Evidence could not be durably recorded: MUST NOT claim official verification
@@ -824,10 +840,10 @@ def cleanse_address(
                 verification_status=ver_status,
                 provenance=prov_text,
                 dataset_version=upstream_ver,
-                source_owner="NIPOST Sandbox" if is_sandbox else ("NIPOST" if evidence_persisted else "PostcodeLink"),
-                source_type="nipost_sandbox" if is_sandbox else ("official_national_directory" if evidence_persisted else "local_reference"),
+                source_owner="NIPOST Sandbox" if is_sandbox else ("NIPOST" if is_official_production else "PostcodeLink"),
+                source_type="nipost_sandbox" if is_sandbox else ("official_national_directory" if is_official_production else "local_reference"),
                 evidence_id=ev_id,
-                verification_method=ver_method if (evidence_persisted or is_sandbox) else "unverified_fallback",
+                verification_method=ver_method if (is_official_production or is_sandbox) else "unverified_fallback",
                 address_metadata_source=addr_metadata_source,
                 valid_until=ev_valid_until,
             )
@@ -836,13 +852,10 @@ def cleanse_address(
                 p_status = "conflict"
                 conf = 0.50
                 disp_conf = 0.45
-            elif is_sandbox:
+            elif is_sandbox or not is_official_production:
                 p_status = "local_match"
                 conf = 0.75
                 disp_conf = 0.75
-            elif not evidence_persisted:
-                p_status = "local_match"
-                conf = 0.75
                 disp_conf = 0.75
             elif is_official:
                 p_status = "verified"
@@ -860,6 +873,14 @@ def cleanse_address(
             if not address_consistent:
                 changes_msg = [
                     f"Address Inconsistency: Supplied area '{area_hint or clean_addr}' does not match official postcode {live_code} area '{live_area}, {live_state}'."
+                ]
+            elif is_sandbox:
+                changes_msg = [
+                    f"Sandbox check: Postcode {live_code} recognized by NIPOST sandbox dataset ({live_area}, {live_state}); not valid for production verification."
+                ]
+            elif not is_production_cred:
+                changes_msg = [
+                    f"Warning: Upstream NIPOST credential is unclassified (requires nipost_live_). Downgraded code {live_code} to local reference."
                 ]
             elif not evidence_persisted:
                 changes_msg = [
@@ -896,20 +917,20 @@ def cleanse_address(
                 address_consistent=address_consistent,
                 upstream_contacted=True,
                 dispatch_confidence=disp_conf,
-                source="nipost_sandbox" if is_sandbox else ("live_nipost_api" if evidence_persisted else "local_reference_fallback"),
+                source="nipost_sandbox" if is_sandbox else ("live_nipost_api" if is_official_production else "local_reference_fallback"),
                 matched_record=matched_schema,
                 changes_made=changes_msg,
                 provenance=prov_text,
-                source_owner="NIPOST Sandbox" if is_sandbox else ("NIPOST" if evidence_persisted else "PostcodeLink"),
-                source_type="nipost_sandbox" if is_sandbox else ("official_national_directory" if evidence_persisted else "local_reference"),
+                source_owner="NIPOST Sandbox" if is_sandbox else ("NIPOST" if is_official_production else "PostcodeLink"),
+                source_type="nipost_sandbox" if is_sandbox else ("official_national_directory" if is_official_production else "local_reference"),
                 checked_against_nipost=True,
-                is_live_nipost=bool(evidence_persisted and not is_sandbox),
-                verification_source="nipost_sandbox" if is_sandbox else ("live_nipost_api" if evidence_persisted else "local_nipost_reference_dataset"),
-                fallback_used=bool(not evidence_persisted and not is_sandbox),
+                is_live_nipost=is_official_production,
+                verification_source="nipost_sandbox" if is_sandbox else ("live_nipost_api" if is_official_production else "local_nipost_reference_dataset"),
+                fallback_used=bool(not is_official_production and not is_sandbox),
                 dataset_version=upstream_ver,
                 api_integration_version="2026.1",
                 evidence_id=ev_id,
-                verification_method=ver_method if evidence_persisted else "unverified_fallback",
+                verification_method=ver_method if (is_official_production or is_sandbox) else "unverified_fallback",
                 address_metadata_source=addr_metadata_source,
                 valid_until=ev_valid_until,
                 upstream_status=nipost_status.value,

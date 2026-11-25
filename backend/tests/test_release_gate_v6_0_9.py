@@ -359,6 +359,7 @@ def test_execute_postcode_lookup_handles_validator_only_payload_without_key_erro
 
     mock_client = MagicMock(spec=NIPOSTClient)
     mock_client.is_configured = True
+    mock_client.upstream_environment = "production"
     # Validator response contains code and valid: True, but lacks area and state
     mock_client.lookup_postcode.return_value = NIPOSTLookupResult(
         status=NIPOSTLookupStatus.FOUND,
@@ -427,6 +428,7 @@ def test_cleanse_address_invokes_nipost_and_discloses_live_verification():
         "validator_autofill_pipeline",
     )
     with patch("backend.app.services.nipost_client.NIPOSTClient.is_configured", True), \
+         patch("backend.app.services.nipost_client.NIPOSTClient.upstream_environment", "production"), \
          patch("backend.app.services.nipost_client.NIPOSTClient.lookup_postcode", return_value=live_result), \
          patch("backend.app.services.nipost_client.NIPOSTClient.orchestrated_verify", return_value=orch_live):
         resp = client.post("/api/v1/postcodes/cleanse", json={

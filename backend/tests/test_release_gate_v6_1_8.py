@@ -946,12 +946,24 @@ def test_api_keys_support_test_and_live_environments_and_preserve_on_rotate():
         assert test_data["api_key"].startswith("pl_test_")
         assert test_data["key_prefix"].startswith("pl_test_")
 
-        # Create a live key
-        res_live = test_client.post(
+        # Create a live key when commercial authorization is NOT granted -> must fail closed 403
+        res_live_blocked = test_client.post(
             "/api/v1/api-keys/",
             headers=headers,
-            json={"name": "Production Key", "monthly_quota": 5000, "environment": "live"},
+            json={"name": "Production Key Blocked", "monthly_quota": 5000, "environment": "live"},
         )
+        assert res_live_blocked.status_code == 403
+
+        # Grant auditable commercial authorization -> live key creation succeeds
+        from backend.app.config import settings
+        with patch.object(settings, "NIPOST_PRODUCTION_AUTHORIZED", True), \
+             patch.object(settings, "NIPOST_AUTHORIZATION_AGREEMENT_REF", "NIPOST-AGR-2026-001"), \
+             patch.object(settings, "NIPOST_AUTHORIZATION_APPROVER", "Director of Licensing"):
+            res_live = test_client.post(
+                "/api/v1/api-keys/",
+                headers=headers,
+                json={"name": "Production Key", "monthly_quota": 5000, "environment": "live"},
+            )
         assert res_live.status_code == 201
         live_data = res_live.json()
         assert live_data["environment"] == "live"
@@ -1025,7 +1037,156 @@ def test_nipost_client_unified_lookup_and_assembly_unit_contract():
     assert status == NIPOSTLookupStatus.FOUND
     assert err is None
     assert data is not None and data["valid"] is True
-    assert method == "validator_autofill_pipeline"
+    assert method == "unified_lookup"
     assert not any("/v1/validate" in url for _, url, _ in seen_requests)
+
+
+def test_strict_mode_rejects_unclassified_publishable_missing_and_none_auth_scheme():
+    """Verify P1-2: strict mode requires positively identified nipost_live_ secret; rejects unclassified, nipost_pk_*, missing, and auth_scheme=none."""
+    import httpx
+    from backend.app.services.nipost_client import NIPOSTClient
+    from backend.app.services.postcode_service import cleanse_address
+    from backend.app.routers.postcodes import execute_postcode_lookup
+    from backend.app.database import SessionLocal
+
+    def ok_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "postcode": "EK-01-A03-FK-01",
+                    "valid": True,
+                    "administrative_address": {
+                        "state_name": "Ekiti",
+                        "lga_name": "Ado-Ekiti",
+                        "locality_name": "Fajuyi",
+                    },
+                }
+            },
+        )
+
+    bad_clients = [
+        NIPOSTClient(base_url="https://api.postcode.gov.ng", api_key="arbitrary_secret_key", transport=httpx.MockTransport(ok_handler)),
+        NIPOSTClient(base_url="https://api.postcode.gov.ng", api_key="nipost_pk_publishable_key", transport=httpx.MockTransport(ok_handler)),
+        NIPOSTClient(base_url="https://api.postcode.gov.ng", api_key="", auth_scheme="none", transport=httpx.MockTransport(ok_handler)),
+        NIPOSTClient(base_url="https://api.postcode.gov.ng", api_key="nipost_live_ignored_when_none", auth_scheme="none", transport=httpx.MockTransport(ok_handler)),
+    ]
+    assert bad_clients[1].configuration_complete is False
+
+    db = SessionLocal()
+    try:
+        for bad in bad_clients:
+            assert bad.upstream_environment == "unclassified"
+            with pytest.raises(HTTPException) as exc_lookup:
+                execute_postcode_lookup(db=db, code="EK-01-A03-FK-01", strict=True, client=bad)
+            assert exc_lookup.value.status_code == 503
+
+            with pytest.raises(HTTPException) as exc_cleanse:
+                cleanse_address(
+                    address="12 Fajuyi Road, Ado-Ekiti, Ekiti",
+                    postcode_hint="EK-01-A03-FK-01",
+                    verification_mode="nipost_strict",
+                    client=bad,
+                    db=db,
+                )
+            assert exc_cleanse.value.status_code == 503
+
+            # Non-strict mode must downgrade to local_reference (never official_verified)
+            res_non_strict = execute_postcode_lookup(db=db, code="EK-01-A03-FK-01", strict=False, client=bad)
+            assert res_non_strict.verification_status == "local_reference"
+            assert res_non_strict.is_live_nipost is False
+    finally:
+        db.close()
+
+
+def test_pl_test_key_isolated_from_live_nipost_and_pl_live_gated_by_authorization():
+    """Verify P1-3 & P1-5: pl_test_ keys never contact live NIPOST; pl_live_ commercial access requires recorded authorization."""
+    from fastapi.testclient import TestClient
+    from backend.app.main import app
+    from backend.app.database import SessionLocal
+    from backend.app.core.security import create_access_token
+    from backend.app.models.api_key import ApiKey
+    import hashlib
+
+    test_client = TestClient(app)
+    db = SessionLocal()
+    try:
+        merchant_id = str(uuid.uuid4())
+        merchant = Profile(
+            id=merchant_id,
+            full_name="Sandbox Isolation Merchant",
+            phone=f"+23480{str(uuid.UUID(merchant_id).int)[:8]}",
+            email=f"sandbox-{merchant_id[:8]}@example.com",
+            hashed_password="test_hashed_password",
+            role=AppRole.MERCHANT,
+        )
+        db.add(merchant)
+        db.commit()
+
+        token = create_access_token({"sub": merchant.id, "role": AppRole.MERCHANT.value})
+        jwt_headers = {"Authorization": f"Bearer {token}"}
+
+        # 1. Create a pl_test_ key
+        res_test = test_client.post(
+            "/api/v1/api-keys/",
+            headers=jwt_headers,
+            json={"name": "Isolated Test Key", "monthly_quota": 50, "environment": "test"},
+        )
+        assert res_test.status_code == 201
+        pl_test_key = res_test.json()["api_key"]
+        assert pl_test_key.startswith("pl_test_")
+
+        # Even if server NIPOST_API_BASE_URL/KEY were set, pl_test_ must NEVER invoke live upstream
+        with patch("backend.app.routers.postcodes.NIPOSTClient.orchestrated_verify", side_effect=AssertionError("pl_test_ must never call live NIPOST")):
+            lookup_res = test_client.get(
+                "/api/v1/postcodes/commercial/lookup?state=Lagos",
+                headers={"x-api-key": pl_test_key},
+            )
+            assert lookup_res.status_code == 200
+            body = lookup_res.json()
+            assert body["source"] == "postcodelink_sandbox"
+            assert body["is_live_nipost"] is False
+            assert body["upstream_contacted"] is False
+
+            cleanse_res = test_client.post(
+                "/api/v1/postcodes/commercial/cleanse",
+                json={"address": "15 Marina St, Lagos Island", "state": "Lagos"},
+                headers={"x-api-key": pl_test_key},
+            )
+            assert cleanse_res.status_code == 200
+            c_body = cleanse_res.json()
+            assert c_body["source"] == "postcodelink_sandbox"
+            assert c_body["is_live_nipost"] is False
+
+            # Strict mode with pl_test_ fails closed 503
+            strict_res = test_client.get(
+                "/api/v1/postcodes/commercial/lookup?code=101233&strict=true",
+                headers={"x-api-key": pl_test_key},
+            )
+            assert strict_res.status_code == 503
+
+        # 2. Existing pl_live_ key is blocked (403) when production_authorized is False
+        raw_live = f"pl_live_{uuid.uuid4().hex}"
+        db.add(
+            ApiKey(
+                merchant_id=merchant.id,
+                name="Preexisting Live Key",
+                environment="live",
+                key_prefix=raw_live[:12],
+                hashed_key=hashlib.sha256(raw_live.encode()).hexdigest(),
+                monthly_quota=100,
+                current_period=datetime.now(timezone.utc).strftime("%Y-%m"),
+                is_active=True,
+                is_revoked=False,
+            )
+        )
+        db.commit()
+        blocked_live = test_client.get(
+            "/api/v1/postcodes/commercial/lookup?state=Lagos",
+            headers={"x-api-key": raw_live},
+        )
+        assert blocked_live.status_code == 403
+    finally:
+        db.close()
 
 

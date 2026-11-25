@@ -51,6 +51,8 @@ def test_lookup_endpoint_fails_closed_when_validator_fails_despite_autofill_200(
         )
 
     with patch.object(NIPOSTClient, "is_configured", True), \
+         patch.object(NIPOSTClient, "upstream_environment", "production"), \
+         patch("backend.app.config.settings.NIPOST_VALIDATE_PATH", "/v1/validate"), \
          patch.object(NIPOSTClient, "validate_postcode", side_effect=mock_validator), \
          patch.object(NIPOSTClient, "lookup_postcode", side_effect=mock_autofill):
 
@@ -85,6 +87,8 @@ def test_lookup_endpoint_fallback_discloses_validator_failure_without_official_e
         )
 
     with patch.object(NIPOSTClient, "is_configured", True), \
+         patch.object(NIPOSTClient, "upstream_environment", "production"), \
+         patch("backend.app.config.settings.NIPOST_VALIDATE_PATH", "/v1/validate"), \
          patch.object(NIPOSTClient, "validate_postcode", side_effect=mock_validator), \
          patch.object(NIPOSTClient, "lookup_postcode", side_effect=mock_autofill):
 
@@ -115,6 +119,8 @@ def test_lookup_endpoint_two_stage_success_returns_official_verified():
         )
 
     with patch.object(NIPOSTClient, "is_configured", True), \
+         patch.object(NIPOSTClient, "upstream_environment", "production"), \
+         patch("backend.app.config.settings.NIPOST_VALIDATE_PATH", "/v1/validate"), \
          patch.object(NIPOSTClient, "validate_postcode", side_effect=mock_validator), \
          patch.object(NIPOSTClient, "lookup_postcode", side_effect=mock_autofill):
 
@@ -145,6 +151,8 @@ def test_lookup_endpoint_validator_success_autofill_missing_returns_partial():
         )
 
     with patch.object(NIPOSTClient, "is_configured", True), \
+         patch.object(NIPOSTClient, "upstream_environment", "production"), \
+         patch("backend.app.config.settings.NIPOST_VALIDATE_PATH", "/v1/validate"), \
          patch.object(NIPOSTClient, "validate_postcode", side_effect=mock_validator), \
          patch.object(NIPOSTClient, "lookup_postcode", side_effect=mock_autofill):
 

@@ -1195,6 +1195,7 @@ def test_commercial_lookup_increments_monthly_quota_by_exactly_one():
             id=f"key_{secrets.token_hex(8)}",
             merchant_id=merchant.id,
             name="Commercial Lookup Key",
+            environment="test",
             key_prefix=raw_key[:12],
             hashed_key=key_hash,
             monthly_quota=100,
@@ -1249,6 +1250,7 @@ def test_commercial_cleanse_increments_monthly_quota_by_exactly_one():
             id=f"key_{secrets.token_hex(8)}",
             merchant_id=merchant.id,
             name="Commercial Cleanse Key",
+            environment="test",
             key_prefix=raw_key[:12],
             hashed_key=key_hash,
             monthly_quota=100,
@@ -1306,6 +1308,7 @@ def test_commercial_quota_boundary_permits_one_and_rejects_second():
             id=f"key_{secrets.token_hex(8)}",
             merchant_id=merchant.id,
             name="Strict 1-Quota Key",
+            environment="test",
             key_prefix=raw_key[:12],
             hashed_key=key_hash,
             monthly_quota=1,
@@ -1440,6 +1443,7 @@ def test_nipost_provenance_preserves_upstream_version_or_returns_null():
     try:
         mock_client = MagicMock(spec=NIPOSTClient)
         mock_client.is_configured = True
+        mock_client.upstream_environment = "production"
 
         # Scenario 1: Upstream NIPOST provides dataset_version "2026.3"
         mock_client.lookup_postcode.return_value = NIPOSTLookupResult(
@@ -1519,7 +1523,7 @@ def test_api_key_creation_with_and_without_expiry_and_expiration_enforcement():
         data1 = res1.json()
         assert data1["name"] == "Non-Expiring Key"
         assert data1["expires_at"] is None
-        assert data1["api_key"].startswith("pl_live_")
+        assert data1["api_key"].startswith(("pl_test_", "pl_live_"))
 
         # 2. Create a key with 30-day expiry — HTTP 201 (previously raised NameError: timedelta)
         res2 = client.post(

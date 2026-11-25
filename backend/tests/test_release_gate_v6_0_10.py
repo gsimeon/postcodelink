@@ -232,6 +232,8 @@ def test_two_stage_pipeline_validator_and_autofill_success():
     )
 
     with patch("backend.app.services.nipost_client.NIPOSTClient.is_configured", True), \
+         patch("backend.app.services.nipost_client.NIPOSTClient.upstream_environment", "production"), \
+         patch("backend.app.config.settings.NIPOST_VALIDATE_PATH", "/v1/validate"), \
          patch("backend.app.services.nipost_client.NIPOSTClient.validate_postcode", return_value=val_result), \
          patch("backend.app.services.nipost_client.NIPOSTClient.lookup_postcode", return_value=autofill_result):
         resp = client.post("/api/v1/postcodes/cleanse", json={
@@ -268,6 +270,8 @@ def test_two_stage_pipeline_validator_success_autofill_missing():
     )
 
     with patch("backend.app.services.nipost_client.NIPOSTClient.is_configured", True), \
+         patch("backend.app.services.nipost_client.NIPOSTClient.upstream_environment", "production"), \
+         patch("backend.app.config.settings.NIPOST_VALIDATE_PATH", "/v1/validate"), \
          patch("backend.app.services.nipost_client.NIPOSTClient.validate_postcode", return_value=val_result), \
          patch("backend.app.services.nipost_client.NIPOSTClient.lookup_postcode", return_value=autofill_empty):
         resp = client.post("/api/v1/postcodes/cleanse", json={

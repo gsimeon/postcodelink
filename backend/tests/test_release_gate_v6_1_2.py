@@ -62,6 +62,7 @@ def test_cleanse_address_db_none_strict_mode_fails_closed_503():
     )
 
     with patch("backend.app.services.nipost_client.NIPOSTClient.is_configured", True), \
+         patch("backend.app.services.nipost_client.NIPOSTClient.upstream_environment", "production"), \
          patch("backend.app.services.nipost_client.NIPOSTClient.lookup_postcode", return_value=mock_result), \
          patch("backend.app.services.nipost_client.NIPOSTClient.validate_postcode", return_value=mock_result):
         with pytest.raises(HTTPException) as exc_info:
@@ -93,6 +94,7 @@ def test_cleanse_address_db_none_non_strict_demotes_to_local_reference():
     )
 
     with patch("backend.app.services.nipost_client.NIPOSTClient.is_configured", True), \
+         patch("backend.app.services.nipost_client.NIPOSTClient.upstream_environment", "production"), \
          patch("backend.app.services.nipost_client.NIPOSTClient.lookup_postcode", return_value=mock_result), \
          patch("backend.app.services.nipost_client.NIPOSTClient.validate_postcode", return_value=mock_result):
         res = cleanse_address(
@@ -123,6 +125,7 @@ def test_execute_postcode_lookup_db_none_strict_mode_fails_closed_503():
     )
 
     with patch("backend.app.services.nipost_client.NIPOSTClient.is_configured", True), \
+         patch("backend.app.services.nipost_client.NIPOSTClient.upstream_environment", "production"), \
          patch("backend.app.services.nipost_client.NIPOSTClient.lookup_postcode", return_value=mock_result), \
          patch("backend.app.services.nipost_client.NIPOSTClient.validate_postcode", return_value=mock_result):
         with pytest.raises(HTTPException) as exc_info:
@@ -148,6 +151,7 @@ def test_execute_postcode_lookup_db_none_non_strict_demotes():
     )
 
     with patch("backend.app.services.nipost_client.NIPOSTClient.is_configured", True), \
+         patch("backend.app.services.nipost_client.NIPOSTClient.upstream_environment", "production"), \
          patch("backend.app.services.nipost_client.NIPOSTClient.lookup_postcode", return_value=mock_result), \
          patch("backend.app.services.nipost_client.NIPOSTClient.validate_postcode", return_value=mock_result):
         res = execute_postcode_lookup(
@@ -192,6 +196,7 @@ def test_api_cleanse_address_explicit_nipost_strict_mode():
     )
 
     with patch("backend.app.services.nipost_client.NIPOSTClient.is_configured", True), \
+         patch("backend.app.services.nipost_client.NIPOSTClient.upstream_environment", "production"), \
          patch("backend.app.services.nipost_client.NIPOSTClient.validate_postcode", return_value=val_unavail), \
          patch("backend.app.services.nipost_client.NIPOSTClient.lookup_postcode", return_value=val_unavail):
         resp = client.post("/api/v1/postcodes/cleanse", json={
@@ -211,6 +216,7 @@ def test_api_cleanse_address_legacy_strict_boolean_maps_to_nipost_strict():
     )
 
     with patch("backend.app.services.nipost_client.NIPOSTClient.is_configured", True), \
+         patch("backend.app.services.nipost_client.NIPOSTClient.upstream_environment", "production"), \
          patch("backend.app.services.nipost_client.NIPOSTClient.validate_postcode", return_value=val_unavail), \
          patch("backend.app.services.nipost_client.NIPOSTClient.lookup_postcode", return_value=val_unavail):
         resp = client.post("/api/v1/postcodes/cleanse", json={
