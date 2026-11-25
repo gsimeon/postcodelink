@@ -115,8 +115,8 @@ def get_current_actor(
     x_api_key = request.headers.get("x-api-key")
     if x_api_key:
         from backend.app.routers.api_keys import get_api_key_merchant
-        return get_api_key_merchant(x_api_key=x_api_key, db=db)
-    return get_current_user(credentials=credentials, db=db)
+        return get_api_key_merchant(x_api_key=x_api_key, db=db, request=request)
+    return get_current_user(credentials=credentials, db=db, request=request)
 
 
 def get_authenticated_merchant_or_api_key(
