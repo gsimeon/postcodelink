@@ -269,45 +269,29 @@ def health_rate_limiter():
 
 @app.get("/health/integrations", tags=["system"])
 def health_integrations():
-    """Integration health: performs bounded connectivity and authentication checks across external gateways."""
+    """Integration health: returns consolidated NIPOST telemetry from NIPOSTClient and SMS gateway status.
+    
+    Uses NIPOSTClient as the single source of truth (no duplicate /health probe) and omits sensitive endpoints/keys.
+    """
     import httpx
     from datetime import datetime, timezone
+    from backend.app.services.nipost_client import get_nipost_client
 
     now = datetime.now(timezone.utc)
-    nipost_configured = bool(settings.NIPOST_API_KEY and (settings.NIPOST_API_URL or settings.NIPOST_API_BASE_URL))
-    nipost_reachable = False
-    nipost_authenticated = False
-    nipost_last_check = None
-    nipost_error_category = None
-
-    if nipost_configured:
-        base_url = settings.NIPOST_API_BASE_URL or settings.NIPOST_API_URL
-        try:
-            resp = httpx.get(
-                f"{base_url.rstrip('/')}/health",
-                headers={"Authorization": f"Bearer {settings.NIPOST_API_KEY}"},
-                timeout=1.5,
-            )
-            nipost_reachable = True
-            if resp.status_code in [200, 204]:
-                nipost_authenticated = True
-                nipost_last_check = now.isoformat()
-            elif resp.status_code in [401, 403]:
-                nipost_authenticated = False
-                nipost_error_category = "authentication_failed"
-            else:
-                nipost_authenticated = True
-                nipost_last_check = now.isoformat()
-        except (httpx.ConnectError, httpx.TimeoutException):
-            nipost_reachable = False
-            nipost_authenticated = False
-            nipost_error_category = "network_unreachable_or_timeout"
-        except Exception:
-            nipost_reachable = False
-            nipost_authenticated = False
-            nipost_error_category = "probe_exception"
-    else:
+    nipost_client = get_nipost_client()
+    nipost_status = nipost_client.get_integration_status()
+    nipost_configured = bool(nipost_status.get("configuration_complete"))
+    nipost_reachable = bool(nipost_status.get("connectivity_healthy"))
+    nipost_authenticated = bool(nipost_status.get("authentication_verified"))
+    nipost_last_check = nipost_status.get("last_checked_at")
+    if not nipost_configured:
         nipost_error_category = "unconfigured"
+    elif not nipost_authenticated and nipost_last_check is not None:
+        nipost_error_category = "authentication_failed"
+    elif not nipost_reachable and nipost_last_check is not None:
+        nipost_error_category = "network_unreachable_or_timeout"
+    else:
+        nipost_error_category = None
 
     # SMS Gateway Probe
     sms_configured = False

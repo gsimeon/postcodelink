@@ -958,7 +958,9 @@ def test_api_keys_support_test_and_live_environments_and_preserve_on_rotate():
         from backend.app.config import settings
         with patch.object(settings, "NIPOST_PRODUCTION_AUTHORIZED", True), \
              patch.object(settings, "NIPOST_AUTHORIZATION_AGREEMENT_REF", "NIPOST-AGR-2026-001"), \
-             patch.object(settings, "NIPOST_AUTHORIZATION_APPROVER", "Director of Licensing"):
+             patch.object(settings, "NIPOST_AUTHORIZATION_APPROVER", "Director of Licensing"), \
+             patch.object(settings, "NIPOST_AUTHORIZATION_APPROVED_AT", "2026-11-20T10:00:00Z"), \
+             patch.object(settings, "NIPOST_AUTHORIZATION_SCOPE", "postcode_verification"):
             res_live = test_client.post(
                 "/api/v1/api-keys/",
                 headers=headers,
@@ -1188,5 +1190,59 @@ def test_pl_test_key_isolated_from_live_nipost_and_pl_live_gated_by_authorizatio
         assert blocked_live.status_code == 403
     finally:
         db.close()
+
+
+def test_commercial_authorization_requires_valid_date_and_scope():
+    """Verify is_nipost_production_authorized requires valid non-future approved_at and postcode_verification scope."""
+    from backend.app.config import Settings
+
+    base = {
+        "NIPOST_PRODUCTION_AUTHORIZED": True,
+        "NIPOST_AUTHORIZATION_AGREEMENT_REF": "NIPOST-AGR-2026-001",
+        "NIPOST_AUTHORIZATION_APPROVER": "Director of Licensing",
+        "NIPOST_AUTHORIZATION_APPROVED_AT": "2026-11-20T10:00:00Z",
+        "NIPOST_AUTHORIZATION_SCOPE": "postcode_verification",
+    }
+    s_valid = Settings(**base)
+    assert s_valid.is_nipost_production_authorized is True
+
+    # Missing date -> False
+    assert Settings(**{**base, "NIPOST_AUTHORIZATION_APPROVED_AT": ""}).is_nipost_production_authorized is False
+    # Invalid date -> False
+    assert Settings(**{**base, "NIPOST_AUTHORIZATION_APPROVED_AT": "not-a-date"}).is_nipost_production_authorized is False
+    # Future date -> False
+    assert Settings(**{**base, "NIPOST_AUTHORIZATION_APPROVED_AT": "2099-01-01T00:00:00Z"}).is_nipost_production_authorized is False
+    # Wrong scope -> False
+    assert Settings(**{**base, "NIPOST_AUTHORIZATION_SCOPE": "bulk_extraction"}).is_nipost_production_authorized is False
+    # Missing scope -> False
+    assert Settings(**{**base, "NIPOST_AUTHORIZATION_SCOPE": ""}).is_nipost_production_authorized is False
+
+
+def test_health_integrations_delegates_to_nipost_client_without_bearer_health_probe():
+    """Verify /health/integrations reads NIPOSTClient telemetry and never fires a separate /health Bearer probe."""
+    from fastapi.testclient import TestClient
+    from backend.app.main import app
+
+    test_client = TestClient(app)
+    fake_status = {
+        "configuration_complete": True,
+        "connectivity_healthy": True,
+        "authentication_verified": False,
+        "contract_verified": False,
+        "production_authorized": False,
+        "upstream_environment": "sandbox",
+        "last_checked_at": "2026-11-25T09:00:00+00:00",
+    }
+    with patch("backend.app.services.nipost_client.NIPOSTClient.get_integration_status", return_value=fake_status), \
+         patch("httpx.get", side_effect=AssertionError("/health/integrations must not fire separate Bearer /health probe")):
+        res = test_client.get("/health/integrations")
+        assert res.status_code == 200
+        nipost = res.json()["nipost"]
+        assert nipost["configured"] is True
+        assert nipost["reachable"] is True
+        assert nipost["authenticated"] is False
+        assert nipost["last_error_category"] == "authentication_failed"
+        assert "base_url" not in nipost
+        assert "api_key" not in nipost
 
 

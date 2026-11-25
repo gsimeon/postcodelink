@@ -243,14 +243,37 @@ class Settings(BaseSettings):
     NIPOST_AUTHORIZATION_APPROVED_AT: str = os.getenv("NIPOST_AUTHORIZATION_APPROVED_AT", "").strip()
     NIPOST_AUTHORIZATION_SCOPE: str = os.getenv("NIPOST_AUTHORIZATION_SCOPE", "").strip()
 
+    def has_nipost_scope(self, required_scope: str) -> bool:
+        """Check whether the recorded commercial authorization scope explicitly includes required_scope."""
+        raw = (self.NIPOST_AUTHORIZATION_SCOPE or "").strip().lower()
+        if not raw:
+            return False
+        tokens = {tok.strip() for tok in raw.replace(";", ",").replace(" ", ",").split(",") if tok.strip()}
+        return required_scope.lower() in tokens or "commercial_api" in tokens
+
     @property
     def is_nipost_production_authorized(self) -> bool:
-        """True only when commercial authorization is enabled and accompanied by an agreement reference and approver."""
-        return bool(
+        """True only when commercial authorization is enabled and the full approval record
+        (agreement_ref, approver, valid non-future approved_at, and explicit postcode_verification scope) is present.
+        """
+        if not (
             self.NIPOST_PRODUCTION_AUTHORIZED
             and self.NIPOST_AUTHORIZATION_AGREEMENT_REF.strip()
             and self.NIPOST_AUTHORIZATION_APPROVER.strip()
-        )
+            and self.NIPOST_AUTHORIZATION_APPROVED_AT.strip()
+            and self.has_nipost_scope("postcode_verification")
+        ):
+            return False
+        from datetime import datetime, timezone
+        try:
+            approved_dt = datetime.fromisoformat(self.NIPOST_AUTHORIZATION_APPROVED_AT.strip().replace("Z", "+00:00"))
+            if approved_dt.tzinfo is None:
+                approved_dt = approved_dt.replace(tzinfo=timezone.utc)
+            if approved_dt > datetime.now(timezone.utc):
+                return False
+        except ValueError:
+            return False
+        return True
 
     # Trusted Reverse Proxies for Real Client IP extraction and rate limiting.
     # In production, default is strictly empty (direct external connections cannot spoof X-Forwarded-For).

@@ -41,11 +41,18 @@ def main() -> int:
         "upstream_environment": status["upstream_environment"],
     })
 
+    lookup_entitlement_verified = False
     for code in ("EK-01-A03-FK-01", "100001"):
         res = client.lookup_postcode(code)
         print(f"2. Lookup ({code}): status={res.status.value} http={res.http_status} msg={res.error_message}")
+        if res.status.value in ("FOUND", "NOT_FOUND", "INVALID_INPUT") and res.http_status == 200:
+            lookup_entitlement_verified = True
 
-    return 0 if health.get("healthy") else 1
+    orch_status, _, orch_err, orch_method = client.orchestrated_verify("EK-01-A03-FK-01")
+    print(f"3. Orchestrated Verify (EK-01-A03-FK-01): status={orch_status.value} method={orch_method} err={orch_err}")
+    print(f"   Summary: assembly_contract_verified={bool(status['contract_verified'])} lookup_entitlement_verified={lookup_entitlement_verified}")
+
+    return 0 if (health.get("healthy") and lookup_entitlement_verified) else 1
 
 
 if __name__ == "__main__":
