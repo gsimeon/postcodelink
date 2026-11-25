@@ -39,13 +39,18 @@ def cleanup_expired_login_attempts(db: Session, retention_days: int = 30) -> int
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
-    """Persist JWT in an HttpOnly SameSite=Lax cookie so browser JS cannot read it via localStorage."""
+    """Persist JWT in an HttpOnly cookie so browser JS cannot read it via localStorage."""
+    samesite_val = getattr(settings, "SESSION_COOKIE_SAMESITE", "lax").strip().lower()
+    if samesite_val not in ("lax", "strict", "none"):
+        samesite_val = "lax"
+    # Browsers require Secure=True when SameSite=None
+    is_secure = (settings.ENVIRONMENT == "production") or (samesite_val == "none")
     response.set_cookie(
         key="postcodelink_session",
         value=token,
         httponly=True,
-        samesite="lax",
-        secure=(settings.ENVIRONMENT == "production"),
+        samesite=samesite_val,
+        secure=is_secure,
         max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         path="/",
     )

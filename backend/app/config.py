@@ -150,6 +150,7 @@ class Settings(BaseSettings):
     JWT_PREVIOUS_KEYS_MAP: Dict[str, str] = {}
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
+    SESSION_COOKIE_SAMESITE: str = os.getenv("SESSION_COOKIE_SAMESITE", "lax").strip().lower()
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
