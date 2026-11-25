@@ -96,12 +96,13 @@ test.describe('Full-Stack Browser-to-FastAPI (PostgreSQL) E2E', () => {
     });
     expect(delRes.status()).toBe(201);
     const delBody = await delRes.json();
-    expect(delBody.tracking_token).toBeTruthy();
+    const trackingToken = delBody.delivery?.tracking_token ?? delBody.tracking_token;
+    expect(trackingToken).toBeTruthy();
 
-    const trackRes = await page.request.get(`${API_URL}/api/v1/deliveries/track/${delBody.tracking_token}`);
+    const trackRes = await page.request.get(`${API_URL}/api/v1/deliveries/track/${trackingToken}`);
     expect(trackRes.status()).toBe(200);
     const trackBody = await trackRes.json();
-    expect(trackBody.recipient_name_masked).not.toBe('Chinedu Okafor');
+    expect(trackBody.recipient_name_masked ?? trackBody.recipient_name).not.toBe('Chinedu Okafor');
     expect(trackBody.otp_hash).toBeUndefined();
 
     // 6. Logout clears session cookie
