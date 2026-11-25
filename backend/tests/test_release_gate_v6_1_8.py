@@ -1246,3 +1246,32 @@ def test_health_integrations_delegates_to_nipost_client_without_bearer_health_pr
         assert "api_key" not in nipost
 
 
+def test_sms_probe_rejects_non_200_responses_and_public_endpoint_does_not_probe():
+    """Verify SMS health probe treats non-200 responses (e.g. 404/500) as unauthenticated and public GET never probes externally."""
+    from fastapi.testclient import TestClient
+    from backend.app.main import app, _probe_sms_gateway, _sms_probe_cache
+    from backend.app.config import settings
+    import httpx
+
+    _sms_probe_cache.clear()
+    with patch.object(settings, "SMS_PROVIDER", "termii"), \
+         patch.object(settings, "TERMII_API_KEY", "termii_key_123"), \
+         patch.object(settings, "TERMII_SENDER_ID", "PostcodeLink"):
+        # Public GET /health/integrations must NOT call httpx.get
+        test_client = TestClient(app)
+        with patch("httpx.get", side_effect=AssertionError("public /health/integrations must not probe SMS provider")):
+            res = test_client.get("/health/integrations")
+            assert res.status_code == 200
+            assert res.json()["sms_gateway"]["authenticated"] is False
+
+        # Admin-triggered probe receiving HTTP 404 or 500 must mark authenticated=False
+        mock_404 = MagicMock(spec=httpx.Response)
+        mock_404.status_code = 404
+        with patch("httpx.get", return_value=mock_404):
+            probe_res = _probe_sms_gateway(force_probe=True)
+            assert probe_res["reachable"] is True
+            assert probe_res["authenticated"] is False
+            assert probe_res["last_error_category"] == "unexpected_http_404"
+    _sms_probe_cache.clear()
+
+

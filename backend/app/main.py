@@ -10,6 +10,8 @@ from sqlalchemy import text
 
 from backend.app.config import settings
 from backend.app.database import engine, Base, get_db
+from backend.app.core.auth_deps import require_roles
+from backend.app.models.enums import AppRole
 from backend.app.seed import seed_database
 from backend.app.workers.outbox_worker import run_outbox_worker_loop
 from backend.app.routers import (
@@ -267,17 +269,105 @@ def health_rate_limiter():
     return get_rate_limiter_status()
 
 
-@app.get("/health/integrations", tags=["system"])
-def health_integrations():
-    """Integration health: returns consolidated NIPOST telemetry from NIPOSTClient and SMS gateway status.
-    
-    Uses NIPOSTClient as the single source of truth (no duplicate /health probe) and omits sensitive endpoints/keys.
-    """
+_sms_probe_cache: dict = {}
+
+
+def _probe_sms_gateway(force_probe: bool = False) -> dict:
+    """Return SMS gateway health; only probes external providers when force_probe=True (admin-triggered)."""
     import httpx
     from datetime import datetime, timezone
-    from backend.app.services.nipost_client import get_nipost_client
 
     now = datetime.now(timezone.utc)
+    provider = settings.SMS_PROVIDER
+    if provider == "simulated":
+        return {
+            "provider": provider,
+            "configured": True,
+            "reachable": True,
+            "authenticated": True,
+            "last_successful_check": now.isoformat(),
+            "last_error_category": None,
+        }
+
+    if provider == "termii":
+        configured = bool(settings.TERMII_API_KEY and settings.TERMII_SENDER_ID)
+    elif provider == "twilio":
+        configured = bool(settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN and settings.TWILIO_FROM_NUMBER)
+    else:
+        configured = False
+
+    if not configured:
+        return {
+            "provider": provider,
+            "configured": False,
+            "reachable": False,
+            "authenticated": False,
+            "last_successful_check": None,
+            "last_error_category": "unconfigured",
+        }
+
+    cached = _sms_probe_cache.get(provider)
+    if not force_probe:
+        if cached:
+            return cached
+        return {
+            "provider": provider,
+            "configured": True,
+            "reachable": False,
+            "authenticated": False,
+            "last_successful_check": None,
+            "last_error_category": "awaiting_admin_probe",
+        }
+
+    reachable = False
+    authenticated = False
+    last_check = None
+    error_category = None
+    try:
+        if provider == "termii":
+            resp = httpx.get(
+                "https://api.ng.termii.com/api/get-balance",
+                params={"api_key": settings.TERMII_API_KEY},
+                timeout=1.5,
+            )
+        else:
+            resp = httpx.get(
+                f"https://api.twilio.com/2010-04-01/Accounts/{settings.TWILIO_ACCOUNT_SID}.json",
+                auth=(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN),
+                timeout=1.5,
+            )
+        reachable = True
+        if resp.status_code == 200:
+            authenticated = True
+            last_check = now.isoformat()
+        elif resp.status_code in (401, 403):
+            authenticated = False
+            error_category = "authentication_failed"
+        else:
+            authenticated = False
+            error_category = f"unexpected_http_{resp.status_code}"
+    except (httpx.ConnectError, httpx.TimeoutException):
+        error_category = "network_unreachable_or_timeout"
+    except Exception:
+        error_category = "probe_exception"
+
+    result = {
+        "provider": provider,
+        "configured": True,
+        "reachable": reachable,
+        "authenticated": authenticated,
+        "last_successful_check": last_check,
+        "last_error_category": error_category,
+    }
+    _sms_probe_cache[provider] = result
+    return result
+
+
+@app.get("/health/integrations", tags=["system"])
+def health_integrations():
+    """Integration health: returns consolidated cached NIPOST and SMS telemetry without triggering unauthenticated external probes."""
+    from backend.app.services.nipost_client import get_nipost_client
+
     nipost_client = get_nipost_client()
     nipost_status = nipost_client.get_integration_status()
     nipost_configured = bool(nipost_status.get("configuration_complete"))
@@ -293,76 +383,12 @@ def health_integrations():
     else:
         nipost_error_category = None
 
-    # SMS Gateway Probe
-    sms_configured = False
-    sms_reachable = False
-    sms_authenticated = False
-    sms_last_check = None
-    sms_error_category = None
-
-    if settings.SMS_PROVIDER == "simulated":
-        sms_configured = True
-        sms_reachable = True
-        sms_authenticated = True
-        sms_last_check = now.isoformat()
-    elif settings.SMS_PROVIDER == "termii":
-        sms_configured = bool(settings.TERMII_API_KEY and settings.TERMII_SENDER_ID)
-        if sms_configured:
-            try:
-                resp = httpx.get(
-                    "https://api.ng.termii.com/api/get-balance",
-                    params={"api_key": settings.TERMII_API_KEY},
-                    timeout=1.5,
-                )
-                sms_reachable = True
-                if resp.status_code == 200:
-                    sms_authenticated = True
-                    sms_last_check = now.isoformat()
-                elif resp.status_code in [401, 403]:
-                    sms_authenticated = False
-                    sms_error_category = "authentication_failed"
-                else:
-                    sms_authenticated = True
-                    sms_last_check = now.isoformat()
-            except (httpx.ConnectError, httpx.TimeoutException):
-                sms_reachable = False
-                sms_authenticated = False
-                sms_error_category = "network_unreachable_or_timeout"
-            except Exception:
-                sms_reachable = False
-                sms_authenticated = False
-                sms_error_category = "probe_exception"
-        else:
-            sms_error_category = "unconfigured"
-    elif settings.SMS_PROVIDER == "twilio":
-        sms_configured = bool(settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN and settings.TWILIO_FROM_NUMBER)
-        if sms_configured:
-            try:
-                resp = httpx.get(
-                    f"https://api.twilio.com/2010-04-01/Accounts/{settings.TWILIO_ACCOUNT_SID}.json",
-                    auth=(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN),
-                    timeout=1.5,
-                )
-                sms_reachable = True
-                if resp.status_code == 200:
-                    sms_authenticated = True
-                    sms_last_check = now.isoformat()
-                elif resp.status_code in [401, 403]:
-                    sms_authenticated = False
-                    sms_error_category = "authentication_failed"
-                else:
-                    sms_authenticated = True
-                    sms_last_check = now.isoformat()
-            except (httpx.ConnectError, httpx.TimeoutException):
-                sms_reachable = False
-                sms_authenticated = False
-                sms_error_category = "network_unreachable_or_timeout"
-            except Exception:
-                sms_reachable = False
-                sms_authenticated = False
-                sms_error_category = "probe_exception"
-        else:
-            sms_error_category = "unconfigured"
+    sms_info = _probe_sms_gateway(force_probe=False)
+    sms_configured = sms_info["configured"]
+    sms_reachable = sms_info["reachable"]
+    sms_authenticated = sms_info["authenticated"]
+    sms_last_check = sms_info["last_successful_check"]
+    sms_error_category = sms_info["last_error_category"]
 
     from backend.app.core.rate_limiter import get_rate_limiter_status
     rate_limiter_info = get_rate_limiter_status()
@@ -414,3 +440,15 @@ def health_integrations():
         },
         "rate_limiter": rate_limiter_info,
     }
+
+
+@app.post("/api/v1/health/integrations/probe", tags=["system"])
+def admin_probe_integrations(
+    current_user=Depends(require_roles([AppRole.ADMIN])),
+):
+    """Admin-only live probe for NIPOST (Assembly) and SMS gateway; updates cached telemetry."""
+    from backend.app.services.nipost_client import get_nipost_client
+
+    nipost_probe = get_nipost_client().check_health()
+    sms_probe = _probe_sms_gateway(force_probe=True)
+    return {"nipost": nipost_probe, "sms_gateway": sms_probe}

@@ -486,4 +486,13 @@ test('Trust Tier Classification: correctly evaluates 5-tier trust states and rej
   assert.equal(t5.is_official, false);
 });
 
+test('Environment Configuration: .env.example and fastapi-client.ts agree on NEXT_PUBLIC_FASTAPI_URL', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const envExample = fs.readFileSync(path.join(process.cwd(), '.env.example'), 'utf8');
+  const clientSrc = fs.readFileSync(path.join(process.cwd(), 'lib', 'fastapi-client.ts'), 'utf8');
+  assert.ok(envExample.includes('NEXT_PUBLIC_FASTAPI_URL='), '.env.example must define NEXT_PUBLIC_FASTAPI_URL');
+  assert.ok(clientSrc.includes('process.env.NEXT_PUBLIC_FASTAPI_URL'), 'fastapi-client.ts must read NEXT_PUBLIC_FASTAPI_URL');
+});
+
 
