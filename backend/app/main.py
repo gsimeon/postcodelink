@@ -30,13 +30,14 @@ logger = logging.getLogger("uvicorn")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager running startup database checks, development seeding, and background outbox worker."""
-    if settings.ENVIRONMENT == "production":
+    if settings.ENVIRONMENT in ("production", "staging"):
         logger.info(
-            "Production environment: Skipping automatic DDL. Schema managed strictly via Alembic migrations ('alembic upgrade head')."
+            f"{settings.ENVIRONMENT.capitalize()} environment: Skipping automatic DDL. "
+            "Schema managed strictly via Alembic migrations ('alembic upgrade head')."
         )
         if settings.SEED_DEMO_DATA or settings.SEED_DEMO_ACCOUNTS:
             raise RuntimeError(
-                "Fatal Security Error: SEED_DEMO_DATA and SEED_DEMO_ACCOUNTS cannot be enabled in production environment."
+                f"Fatal Security Error: SEED_DEMO_DATA and SEED_DEMO_ACCOUNTS cannot be enabled in {settings.ENVIRONMENT} environment."
             )
     else:
         logger.info("Development/Test environment: Initializing local tables if not existing...")

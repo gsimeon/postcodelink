@@ -295,11 +295,7 @@ class Settings(BaseSettings):
     # In development/test mode, only loopback addresses and testclient are permitted.
     # Note: Broad private subnets (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) are strictly excluded by default
     # to prevent untrusted internal containers or shared infrastructure from forging client IPs.
-    TRUSTED_PROXIES: List[str] = (
-        [p.strip() for p in os.getenv("TRUSTED_PROXIES").split(",") if p.strip()]
-        if os.getenv("TRUSTED_PROXIES") is not None
-        else (["127.0.0.1", "::1", "localhost", "testclient"] if os.getenv("ENVIRONMENT", "development").strip().lower() != "production" else [])
-    )
+    TRUSTED_PROXIES: List[str] = []
 
     # SMS & WhatsApp Out-of-band Dispatch Gateway
     SMS_PROVIDER: str = "simulated"
@@ -341,13 +337,31 @@ class Settings(BaseSettings):
                     f"Allowed environments are: {', '.join(sorted(cls.ALLOWED_ENVIRONMENTS))}."
                 )
             data["ENVIRONMENT"] = normalized_env
-            if normalized_env != "production" and "SEED_DEMO_DATA" not in data:
-                data["SEED_DEMO_DATA"] = True
+            if "SEED_DEMO_DATA" not in data:
+                env_seed = os.getenv("SEED_DEMO_DATA")
+                if env_seed is not None:
+                    data["SEED_DEMO_DATA"] = env_seed.strip().lower() in ("true", "1", "yes")
+                else:
+                    data["SEED_DEMO_DATA"] = normalized_env == "development"
+            if "TRUSTED_PROXIES" not in data:
+                env_proxies = os.getenv("TRUSTED_PROXIES")
+                if env_proxies is not None:
+                    data["TRUSTED_PROXIES"] = [p.strip() for p in env_proxies.split(",") if p.strip()]
+                elif normalized_env in ("development", "test"):
+                    data["TRUSTED_PROXIES"] = ["127.0.0.1", "::1", "localhost", "testclient"]
+                else:
+                    data["TRUSTED_PROXIES"] = []
         return data
 
     @model_validator(mode="after")
     def validate_production_security(self):
         """Reject startup if running in production with weak secrets, simulated provider, or insecure defaults."""
+        if self.ENVIRONMENT == "staging":
+            if self.SEED_DEMO_ACCOUNTS:
+                raise ValueError("Fatal Security Error: SEED_DEMO_ACCOUNTS cannot be enabled in staging environment.")
+            if self.SEED_DEMO_DATA:
+                raise ValueError("Fatal Security Error: SEED_DEMO_DATA cannot be enabled in staging environment.")
+
         if self.ENVIRONMENT == "production":
             raw_secret = (self.SECRET_KEY or "").strip()
             validate_cryptographic_secret(raw_secret, "SECRET_KEY")
