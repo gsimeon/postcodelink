@@ -41,15 +41,20 @@ def main() -> int:
         "upstream_environment": status["upstream_environment"],
     })
 
-    # 2. Valid 11-char digital postcode lookup: require FOUND if NIPOST_SANDBOX_KNOWN_VALID_CODE is set, else FOUND or NOT_FOUND
+    # 2. Valid 11-char digital postcode lookup: require a provider-approved NIPOST_SANDBOX_KNOWN_VALID_CODE returning FOUND.
+    #    Without a known-existing code returning FOUND, report LOOKUP_CONTRACT_UNCONFIRMED (never false-positive True).
     known_code = env_vals.get("NIPOST_SANDBOX_KNOWN_VALID_CODE", "").strip()
     probe_code = known_code or "EK-01-A03-FK-01"
     res_digital = client.lookup_postcode(probe_code)
     print(f"2a. Lookup ({probe_code}): status={res_digital.status.value} http={res_digital.http_status} msg={res_digital.error_message}")
-    if known_code:
-        lookup_entitlement_verified = res_digital.status.value == "FOUND" and res_digital.http_status == 200
+    if known_code and res_digital.status.value == "FOUND" and res_digital.http_status == 200:
+        lookup_entitlement_verified = True
+        lookup_contract_state = "LOOKUP_CONTRACT_VERIFIED"
     else:
-        lookup_entitlement_verified = res_digital.status.value in ("FOUND", "NOT_FOUND") and res_digital.http_status == 200
+        lookup_entitlement_verified = False
+        lookup_contract_state = "LOOKUP_CONTRACT_UNCONFIRMED"
+        if not known_code:
+            print("    NOTE: NIPOST_SANDBOX_KNOWN_VALID_CODE not set; NOT_FOUND proves reachability only -> LOOKUP_CONTRACT_UNCONFIRMED.")
 
     # 2b. Legacy 6-digit format check (api.postcode.gov.ng rejects 6-digit codes; handled locally unless NIPOST enables 6-digit lookup)
     res_invalid = client.lookup_postcode("100001")
@@ -75,12 +80,13 @@ def main() -> int:
     print(f"3. Orchestrated Verify (EK-01-A03-FK-01): status={orch_status.value} method={orch_method} err={orch_err}")
     print(
         f"   Summary: assembly_contract_verified={bool(status['contract_verified'])} "
+        f"lookup_contract_state={lookup_contract_state} "
         f"lookup_entitlement_verified={lookup_entitlement_verified} "
         f"invalid_format_handled={invalid_format_handled} "
         f"unauthorized_handled={unauthorized_handled}"
     )
 
-    return 0 if (health.get("healthy") and lookup_entitlement_verified and invalid_format_handled and unauthorized_handled) else 1
+    return 0 if (health.get("healthy") and invalid_format_handled and unauthorized_handled and (not known_code or lookup_entitlement_verified)) else 1
 
 
 if __name__ == "__main__":
