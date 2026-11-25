@@ -41,21 +41,35 @@ def main() -> int:
         "upstream_environment": status["upstream_environment"],
     })
 
-    # 2. Valid 11-char digital postcode lookup: require FOUND or NOT_FOUND (never INVALID_INPUT)
-    res_digital = client.lookup_postcode("EK-01-A03-FK-01")
-    print(f"2a. Lookup (EK-01-A03-FK-01): status={res_digital.status.value} http={res_digital.http_status} msg={res_digital.error_message}")
-    lookup_entitlement_verified = res_digital.status.value in ("FOUND", "NOT_FOUND") and res_digital.http_status == 200
+    # 2. Valid 11-char digital postcode lookup: require FOUND if NIPOST_SANDBOX_KNOWN_VALID_CODE is set, else FOUND or NOT_FOUND
+    known_code = env_vals.get("NIPOST_SANDBOX_KNOWN_VALID_CODE", "").strip()
+    probe_code = known_code or "EK-01-A03-FK-01"
+    res_digital = client.lookup_postcode(probe_code)
+    print(f"2a. Lookup ({probe_code}): status={res_digital.status.value} http={res_digital.http_status} msg={res_digital.error_message}")
+    if known_code:
+        lookup_entitlement_verified = res_digital.status.value == "FOUND" and res_digital.http_status == 200
+    else:
+        lookup_entitlement_verified = res_digital.status.value in ("FOUND", "NOT_FOUND") and res_digital.http_status == 200
 
-    # 2b. Invalid legacy/malformed format check
+    # 2b. Legacy 6-digit format check (api.postcode.gov.ng rejects 6-digit codes; handled locally unless NIPOST enables 6-digit lookup)
     res_invalid = client.lookup_postcode("100001")
     print(f"2b. Lookup (100001): status={res_invalid.status.value} http={res_invalid.http_status} msg={res_invalid.error_message}")
     invalid_format_handled = res_invalid.status.value in ("INVALID_INPUT", "NOT_FOUND") and res_invalid.http_status == 200
 
-    # 2c. Negative auth check (invalid key must fail closed as UNAUTHORIZED)
+    # 2c. Negative auth checks against BOTH Assembly and Lookup endpoints
     bad_client = NIPOSTClient(base_url=base_url, api_key="nipost_test_invalid_probe_key", auth_scheme=auth_scheme, lookup_path=lookup_path)
     bad_health = bad_client.check_health()
-    unauthorized_handled = not bad_health.get("healthy") and bad_health.get("status_code") in (401, 403)
-    print(f"2c. Negative Auth Probe: healthy={bad_health.get('healthy')} status={bad_health.get('status_code')} rejected={unauthorized_handled}")
+    bad_lookup = bad_client.lookup_postcode(probe_code)
+    unauthorized_handled = (
+        not bad_health.get("healthy")
+        and bad_health.get("status_code") in (401, 403)
+        and bad_lookup.status.value == "UNAUTHORIZED"
+        and bad_lookup.http_status in (401, 403)
+    )
+    print(
+        f"2c. Negative Auth Probes: assembly_status={bad_health.get('status_code')} "
+        f"lookup_status={bad_lookup.status.value}({bad_lookup.http_status}) rejected={unauthorized_handled}"
+    )
 
     orch_status, _, orch_err, orch_method = client.orchestrated_verify("EK-01-A03-FK-01")
     print(f"3. Orchestrated Verify (EK-01-A03-FK-01): status={orch_status.value} method={orch_method} err={orch_err}")

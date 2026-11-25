@@ -40,6 +40,21 @@ def get_current_user(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="CSRF validation failed for cookie-authenticated state-changing request.",
             )
+        origin = request.headers.get("origin")
+        referer = request.headers.get("referer")
+        source_url = origin or referer
+        if source_url:
+            from urllib.parse import urlparse
+            from backend.app.config import settings
+            parsed = urlparse(source_url)
+            req_origin = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+            allowed = {o.rstrip("/") for o in settings.CORS_ORIGINS}
+            self_origin = str(request.base_url).rstrip("/")
+            if req_origin not in allowed and req_origin != self_origin:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="CSRF origin validation failed for cookie-authenticated request.",
+                )
     try:
         payload = decode_access_token(token)
         user_id: Optional[str] = payload.get("sub")

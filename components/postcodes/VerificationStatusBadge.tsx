@@ -10,6 +10,34 @@ interface VerificationStatusBadgeProps {
   fallbackUsed?: boolean;
 }
 
+export function isOfficiallyVerifiedEvidence({
+  status,
+  isLiveNipost,
+  isPartial,
+  fallbackUsed,
+  evidenceId,
+  validUntil,
+}: VerificationStatusBadgeProps): boolean {
+  const hasOfficialStatus =
+    status === "official_verified" ||
+    status === "officially_verified" ||
+    status === "nipost_verified";
+  if (!hasOfficialStatus || isLiveNipost !== true || isPartial || fallbackUsed) {
+    return false;
+  }
+  if (!evidenceId || !evidenceId.trim()) {
+    return false;
+  }
+  if (!validUntil || !validUntil.trim()) {
+    return false;
+  }
+  const expiresMs = Date.parse(validUntil);
+  if (Number.isNaN(expiresMs) || expiresMs <= Date.now()) {
+    return false;
+  }
+  return true;
+}
+
 export const VerificationStatusBadge: React.FC<VerificationStatusBadgeProps> = ({
   status,
   isLiveNipost,
@@ -18,18 +46,16 @@ export const VerificationStatusBadge: React.FC<VerificationStatusBadgeProps> = (
   validUntil,
   fallbackUsed,
 }) => {
-  const hasExplicitEvidence = evidenceId === undefined ? true : Boolean(evidenceId);
-  const isUnexpired = !validUntil || new Date(validUntil).getTime() > Date.now();
-
-  // 1. Officially Verified: requires positive official status, valid unexpired evidence, and no fallback/partial flag
+  // 1. Officially Verified: fail-closed check requiring official status, live provider, non-empty evidenceId, and valid unexpired validUntil
   if (
-    (status === "official_verified" ||
-      status === "officially_verified" ||
-      status === "nipost_verified") &&
-    !isPartial &&
-    !fallbackUsed &&
-    hasExplicitEvidence &&
-    isUnexpired
+    isOfficiallyVerifiedEvidence({
+      status,
+      isLiveNipost,
+      isPartial,
+      fallbackUsed,
+      evidenceId,
+      validUntil,
+    })
   ) {
     return (
       <span

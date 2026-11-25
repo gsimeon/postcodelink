@@ -495,4 +495,29 @@ test('Environment Configuration: .env.example and fastapi-client.ts agree on NEX
   assert.ok(clientSrc.includes('process.env.NEXT_PUBLIC_FASTAPI_URL'), 'fastapi-client.ts must read NEXT_PUBLIC_FASTAPI_URL');
 });
 
+test('Official Verification Badge: fails closed on missing, expired, malformed, partial, or fallback evidence', () => {
+  function isOfficiallyVerifiedEvidence({ status, isLiveNipost, isPartial, fallbackUsed, evidenceId, validUntil }) {
+    const hasOfficialStatus = status === 'official_verified' || status === 'officially_verified' || status === 'nipost_verified';
+    if (!hasOfficialStatus || isLiveNipost !== true || isPartial || fallbackUsed) return false;
+    if (!evidenceId || !evidenceId.trim()) return false;
+    if (!validUntil || !validUntil.trim()) return false;
+    const expiresMs = Date.parse(validUntil);
+    if (Number.isNaN(expiresMs) || expiresMs <= Date.now()) return false;
+    return true;
+  }
+
+  const future = new Date(Date.now() + 86400_000).toISOString();
+  const past = new Date(Date.now() - 86400_000).toISOString();
+
+  assert.equal(isOfficiallyVerifiedEvidence({ status: 'official_verified', isLiveNipost: true, evidenceId: 'ev-1', validUntil: future }), true);
+  assert.equal(isOfficiallyVerifiedEvidence({ status: 'official_verified', isLiveNipost: false, evidenceId: 'ev-1', validUntil: future }), false);
+  assert.equal(isOfficiallyVerifiedEvidence({ status: 'official_verified', isLiveNipost: true, evidenceId: '', validUntil: future }), false);
+  assert.equal(isOfficiallyVerifiedEvidence({ status: 'official_verified', isLiveNipost: true, validUntil: future }), false);
+  assert.equal(isOfficiallyVerifiedEvidence({ status: 'official_verified', isLiveNipost: true, evidenceId: 'ev-1' }), false);
+  assert.equal(isOfficiallyVerifiedEvidence({ status: 'official_verified', isLiveNipost: true, evidenceId: 'ev-1', validUntil: 'not-a-date' }), false);
+  assert.equal(isOfficiallyVerifiedEvidence({ status: 'official_verified', isLiveNipost: true, evidenceId: 'ev-1', validUntil: past }), false);
+  assert.equal(isOfficiallyVerifiedEvidence({ status: 'official_verified', isLiveNipost: true, isPartial: true, evidenceId: 'ev-1', validUntil: future }), false);
+  assert.equal(isOfficiallyVerifiedEvidence({ status: 'official_verified', isLiveNipost: true, fallbackUsed: true, evidenceId: 'ev-1', validUntil: future }), false);
+});
+
 

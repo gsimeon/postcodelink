@@ -164,7 +164,12 @@ export const PostcodeDirectory: React.FC<PostcodeDirectoryProps> = ({
                     {item.state || "—"}
                   </td>
                   <td style={{ padding: "10px 14px" }}>
-                    <VerificationStatusBadge status={item.verification_status} isLiveNipost={item.verification_status === "official_verified"} />
+                    <VerificationStatusBadge
+                      status={item.verification_status}
+                      isLiveNipost={item.verification_status === "official_verified"}
+                      evidenceId={item.evidence_id}
+                      validUntil={item.valid_until}
+                    />
                   </td>
                   <td style={{ padding: "10px 14px", textAlign: "right" }}>
                     <div style={{ display: "inline-flex", gap: "6px" }}>

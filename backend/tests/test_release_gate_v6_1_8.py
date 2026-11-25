@@ -1301,10 +1301,18 @@ def test_httponly_cookie_auth_csrf_and_logout():
     )
     assert csrf_blocked.status_code == 403
 
-    # With X-Requested-With -> succeeds
+    # Cookie-authenticated state-changing POST from untrusted Origin -> 403 CSRF blocked
+    evil_origin = test_client.post(
+        "/api/v1/api-keys/",
+        headers={"X-Requested-With": "XMLHttpRequest", "Origin": "https://evil.example"},
+        json={"name": "Evil Origin Key", "monthly_quota": 100},
+    )
+    assert evil_origin.status_code == 403
+
+    # With X-Requested-With and allowed Origin -> succeeds
     csrf_ok = test_client.post(
         "/api/v1/api-keys/",
-        headers={"X-Requested-With": "XMLHttpRequest"},
+        headers={"X-Requested-With": "XMLHttpRequest", "Origin": "http://localhost:3000"},
         json={"name": "Cookie Key", "monthly_quota": 100},
     )
     assert csrf_ok.status_code == 201
