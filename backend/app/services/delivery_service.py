@@ -622,6 +622,28 @@ def _get_challenge_signing_key() -> bytes:
     return hashlib.sha256(b"postcodelink-dev-challenge-only-secret-v1").digest()
 
 
+def purge_expired_challenge_nonces(db: Session, batch_size: int = 500) -> int:
+    """Batch-purge expired ConsumedChallengeNonce rows outside the customer request path."""
+    from backend.app.models.consumed_challenge_nonce import ConsumedChallengeNonce
+    now = datetime.now(timezone.utc)
+    expired_nonces = (
+        db.query(ConsumedChallengeNonce.nonce)
+        .filter(ConsumedChallengeNonce.expires_at < now)
+        .limit(batch_size)
+        .all()
+    )
+    if not expired_nonces:
+        return 0
+    nonce_ids = [row[0] for row in expired_nonces]
+    deleted = (
+        db.query(ConsumedChallengeNonce)
+        .filter(ConsumedChallengeNonce.nonce.in_(nonce_ids))
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return int(deleted or 0)
+
+
 def _is_and_mark_nonce_consumed(
     nonce: str,
     exp: int,
@@ -663,10 +685,6 @@ def _is_and_mark_nonce_consumed(
             return existing is not None
         try:
             with db.begin_nested():
-                # Opportunistic cleanup of expired nonces using indexed expires_at
-                db.query(ConsumedChallengeNonce).filter(
-                    ConsumedChallengeNonce.expires_at < datetime.now(timezone.utc)
-                ).delete(synchronize_session=False)
                 db.add(
                     ConsumedChallengeNonce(
                         nonce=nonce,
@@ -1216,6 +1234,10 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
     WORKER_LAST_HEARTBEAT = now
     assigned_worker = worker_id or f"worker-{secrets.token_hex(4)}"
     record_worker_heartbeat(db, assigned_worker, status="active", processed_count=0)
+    try:
+        purge_expired_challenge_nonces(db, batch_size=500)
+    except Exception:
+        db.rollback()
 
     # Determine dialect for SKIP LOCKED support
     bind = db.get_bind()

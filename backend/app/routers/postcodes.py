@@ -130,6 +130,12 @@ def execute_postcode_lookup(
                 addr_metadata_source=addr_metadata_source,
                 is_sandbox=is_sandbox,
             )
+            if is_sandbox and strict:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Strict production verification failed closed: NIPOST client is configured with a sandbox (nipost_test_) credential, which cannot provide authoritative production verification.",
+                )
+
             if strict and not evidence_persisted:
                 if db is None:
                     raise HTTPException(
@@ -177,18 +183,18 @@ def execute_postcode_lookup(
                 verification_status=ver_status,
                 provenance=prov_text,
                 dataset_version=upstream_version,
-                source_owner="NIPOST" if evidence_persisted else "PostcodeLink",
-                source_type="official_national_directory" if evidence_persisted else "local_reference",
+                source_owner="NIPOST Sandbox" if is_sandbox else ("NIPOST" if evidence_persisted else "PostcodeLink"),
+                source_type="nipost_sandbox" if is_sandbox else ("official_national_directory" if evidence_persisted else "local_reference"),
                 evidence_id=ev_id,
-                verification_method=ver_method if evidence_persisted else "unverified_fallback",
+                verification_method=ver_method if (evidence_persisted or is_sandbox) else "unverified_fallback",
                 address_metadata_source=addr_metadata_source,
                 valid_until=ev_valid_until,
             )
             return PostcodeLookupResponse(
-                source="live_nipost_api" if evidence_persisted else "local_reference_fallback",
+                source="nipost_sandbox" if is_sandbox else ("live_nipost_api" if evidence_persisted else "local_reference_fallback"),
                 count=1,
                 matches=[schema_rec],
-                is_live_nipost=bool(evidence_persisted),
+                is_live_nipost=bool(evidence_persisted and not is_sandbox),
                 upstream_contacted=True,
                 postcode_exists=True,
                 is_partial_verification=is_validator,
@@ -197,10 +203,10 @@ def execute_postcode_lookup(
                 api_integration_version="2026.1",
                 provenance=prov_text,
                 lookup_status=lookup_status_val,
-                verification_source="live_nipost_api" if evidence_persisted else "local_nipost_reference_dataset",
+                verification_source="nipost_sandbox" if is_sandbox else ("live_nipost_api" if evidence_persisted else "local_nipost_reference_dataset"),
                 verification_status=ver_status,
-                fallback_used=bool(not evidence_persisted),
-                fallback_reason="Verification evidence could not be recorded" if not evidence_persisted else None,
+                fallback_used=bool(not evidence_persisted and not is_sandbox),
+                fallback_reason="Verification evidence could not be recorded" if (not evidence_persisted and not is_sandbox) else None,
                 upstream_status=res_status_val,
                 evidence_id=ev_id,
                 verification_method=ver_method if evidence_persisted else "unverified_fallback",

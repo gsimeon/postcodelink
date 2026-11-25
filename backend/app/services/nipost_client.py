@@ -120,11 +120,48 @@ class NIPOSTClient:
             return "sandbox"
         return "unclassified"
 
+    def _persist_health_telemetry(self) -> None:
+        """Persist latest probe telemetry in Redis when available so all API workers share consistent state."""
+        try:
+            import json
+            from backend.app.core.rate_limiter import _get_redis_client
+            r_client = _get_redis_client()
+            if r_client is not None:
+                payload = json.dumps({
+                    "connectivity_healthy": self._last_connectivity_healthy,
+                    "authentication_verified": self._last_authentication_verified,
+                    "contract_verified": self._last_contract_verified,
+                    "last_checked_at": self._last_checked_at,
+                })
+                r_client.set("nipost_integration_telemetry", payload, ex=3600)
+        except Exception:
+            pass
+
+    def _load_health_telemetry(self) -> Dict[str, Any]:
+        """Load shared probe telemetry from Redis if present, falling back to instance state."""
+        try:
+            import json
+            from backend.app.core.rate_limiter import _get_redis_client
+            r_client = _get_redis_client()
+            if r_client is not None:
+                raw = r_client.get("nipost_integration_telemetry")
+                if raw:
+                    return json.loads(raw)
+        except Exception:
+            pass
+        return {
+            "connectivity_healthy": getattr(self, "_last_connectivity_healthy", False),
+            "authentication_verified": getattr(self, "_last_authentication_verified", False),
+            "contract_verified": getattr(self, "_last_contract_verified", False),
+            "last_checked_at": getattr(self, "_last_checked_at", None),
+        }
+
     def get_integration_status(self) -> Dict[str, Any]:
         """Provides structured integration status separating code presence, configuration, health, and commercial authorization."""
         has_url = bool(self.base_url)
         has_key = bool(self.api_key)
         configured = bool(self.configuration_complete)
+        telemetry = self._load_health_telemetry()
 
         if configured:
             status = "configured"
@@ -143,19 +180,19 @@ class NIPOSTClient:
             "credentials_set": has_key,
             "auth_scheme": self.auth_scheme,
             "upstream_environment": self.upstream_environment,
-            "connectivity_healthy": getattr(self, "_last_connectivity_healthy", False),
-            "authentication_verified": getattr(self, "_last_authentication_verified", False),
-            "contract_verified": getattr(self, "_last_contract_verified", False),
+            "connectivity_healthy": bool(telemetry.get("connectivity_healthy", False)),
+            "authentication_verified": bool(telemetry.get("authentication_verified", False)),
+            "contract_verified": bool(telemetry.get("contract_verified", False)),
             "production_authorized": False,
-            "last_checked_at": getattr(self, "_last_checked_at", None),
+            "last_checked_at": telemetry.get("last_checked_at"),
             "status": status,
             "display_status": display_status,
         }
 
     def check_health(self) -> Dict[str, Any]:
-        """Performs an authenticated probe against the documented NIPOST lookup endpoint and records telemetry.
+        """Performs a zero-credit authenticated probe against POST /v1/assembly/assemble and persists telemetry.
         
-        Does not assume an unauthenticated /health endpoint proves credential acceptance.
+        Does not consume Lookup credits and never treats a generic 404 as accepted credentials.
         """
         from datetime import datetime, timezone
         checked_at = datetime.now(timezone.utc).isoformat()
@@ -165,36 +202,38 @@ class NIPOSTClient:
             self._last_connectivity_healthy = False
             self._last_authentication_verified = False
             self._last_contract_verified = False
+            self._persist_health_telemetry()
             return {
                 "healthy": False,
                 "reason": f"Configuration incomplete: {missing_reason}",
                 "status_code": None,
                 "checked_at": checked_at,
             }
-        probe_path = (self.lookup_path or "/v1/lookup").strip().lstrip("/")
+        probe_path = getattr(settings, "NIPOST_HEALTH_PATH", "/v1/assembly/assemble").strip().lstrip("/")
         probe_url = f"{self.base_url}/{probe_path}"
+        sample_segments = {"state": "EK", "lga": "01", "district": "A03", "area": "FK", "building_unit": "01"}
         try:
             with httpx.Client(transport=self.transport, timeout=min(self.timeout, 3.0)) as http_client:
-                resp = http_client.get(
+                resp = http_client.post(
                     probe_url,
-                    params={self.query_param: "100001"},
+                    json=sample_segments,
                     headers=self._get_headers(),
                 )
-                if resp.status_code in (200, 404):
+                if resp.status_code == 200:
                     self._last_connectivity_healthy = True
                     self._last_authentication_verified = True
                     try:
                         payload = resp.json()
-                        adapted_status, _, _ = self._adapt_nipost_payload(payload, "100001")
-                        self._last_contract_verified = adapted_status in (
-                            NIPOSTLookupStatus.FOUND,
-                            NIPOSTLookupStatus.NOT_FOUND,
+                        inner = payload.get("data") if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else payload
+                        self._last_contract_verified = bool(
+                            isinstance(inner, dict) and (inner.get("postcode") or inner.get("code"))
                         )
                     except Exception:
                         self._last_contract_verified = False
+                    self._persist_health_telemetry()
                     return {
                         "healthy": True,
-                        "reason": "Authenticated lookup probe accepted",
+                        "reason": "Authenticated Assembly probe accepted",
                         "status_code": resp.status_code,
                         "checked_at": checked_at,
                     }
@@ -202,6 +241,7 @@ class NIPOSTClient:
                     self._last_connectivity_healthy = True
                     self._last_authentication_verified = False
                     self._last_contract_verified = False
+                    self._persist_health_telemetry()
                     return {
                         "healthy": False,
                         "reason": "Authentication failed (invalid or rejected credentials)",
@@ -209,9 +249,11 @@ class NIPOSTClient:
                         "checked_at": checked_at,
                     }
                 else:
-                    self._last_connectivity_healthy = False
+                    # Generic 404 or 5xx is never accepted as proof of authentication
+                    self._last_connectivity_healthy = resp.status_code < 500
                     self._last_authentication_verified = False
                     self._last_contract_verified = False
+                    self._persist_health_telemetry()
                     return {
                         "healthy": False,
                         "reason": f"Unexpected upstream status: {resp.status_code}",
@@ -222,6 +264,7 @@ class NIPOSTClient:
             self._last_connectivity_healthy = False
             self._last_authentication_verified = False
             self._last_contract_verified = False
+            self._persist_health_telemetry()
             logger.warning(f"NIPOST upstream health probe failed: {type(err).__name__}")
             return {
                 "healthy": False,

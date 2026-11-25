@@ -8,7 +8,7 @@ PostcodeLink bridges the gap between unstructured customer addresses (often desc
 1. **Nigerian Postcode Intelligence & Directory Lookup**: High-performance querying of legacy 6-digit postal codes and 11-character national digital postcodes with decoupled existence validation (`Validator`) and address retrieval (`Autofill`) service contracts.
 2. **Address Verification & Cleansing**: Algorithmic landmark extraction, administrative entity normalization (State, LGA, District, Ward), and structured address standardisation.
 3. **Building-Level Digital Postcode Disambiguation**: Strict structural validation and component decomposition of the 5-component national standard (`SS-LL-DDD-AA-BB`: State, LGA, District, Area, Building Unit).
-4. **Developer API & Enterprise Platform**: REST API with API-key authentication, monthly tiered quota metering, anti-spoofing sliding-window rate limiting, and webhook integration.
+4. **Developer API & Enterprise Platform**: REST API with API-key authentication, monthly tiered quota metering, anti-spoofing sliding-window rate limiting (webhook integration is **Planned**).
 5. **Last-Mile Logistics & Dispatch Module**: Integrated downstream operational module providing merchant dispatch queues, courier fleet assignment, rider manifests, live radar dispatch tracking, and tamper-evident 6-digit PIN Proof-of-Delivery (POD).
 
 ---
@@ -50,7 +50,7 @@ graph TD
 
 1. **Shared Postcode Intelligence Foundation**: Core national address register, two-stage NIPOST gateway integration, spatial classification, cryptographic evidence generation, and distributed caching/rate-limiting infrastructure.
 2. **Developer Platform**: Independent commercial API product offering self-service registration, API key provisioning, versioned key rotation, monthly quota management, usage analytics, and interactive integration guides for enterprise software, fintech, and banking systems.
-3. **Postcode Intelligence & Address Validation**: Standalone web explorer, CSV bulk validation, address standardisation, and e-commerce checkout widgets for data verification without logistics overhead.
+3. **Postcode Intelligence & Address Validation**: Standalone web explorer and address standardisation today (CSV bulk postcode validation and e-commerce checkout widgets are **Planned**).
 4. **Last-Mile Logistics Operations**: Specialized delivery dispatch, courier fleet workload management, real-time customer tracking portal, and fraud-proof recipient PIN verification.
 
 ---

@@ -771,6 +771,12 @@ def cleanse_address(
                 addr_metadata_source=addr_metadata_source,
                 is_sandbox=is_sandbox,
             )
+            if is_sandbox and effective_strict:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Strict production verification failed closed: NIPOST client is configured with a sandbox (nipost_test_) credential, which cannot provide authoritative production verification.",
+                )
+
             if effective_strict and not evidence_persisted:
                 if db is None:
                     raise HTTPException(
@@ -818,10 +824,10 @@ def cleanse_address(
                 verification_status=ver_status,
                 provenance=prov_text,
                 dataset_version=upstream_ver,
-                source_owner="NIPOST" if evidence_persisted else "PostcodeLink",
-                source_type="official_national_directory" if evidence_persisted else "local_reference",
+                source_owner="NIPOST Sandbox" if is_sandbox else ("NIPOST" if evidence_persisted else "PostcodeLink"),
+                source_type="nipost_sandbox" if is_sandbox else ("official_national_directory" if evidence_persisted else "local_reference"),
                 evidence_id=ev_id,
-                verification_method=ver_method if evidence_persisted else "unverified_fallback",
+                verification_method=ver_method if (evidence_persisted or is_sandbox) else "unverified_fallback",
                 address_metadata_source=addr_metadata_source,
                 valid_until=ev_valid_until,
             )
@@ -830,6 +836,10 @@ def cleanse_address(
                 p_status = "conflict"
                 conf = 0.50
                 disp_conf = 0.45
+            elif is_sandbox:
+                p_status = "local_match"
+                conf = 0.75
+                disp_conf = 0.75
             elif not evidence_persisted:
                 p_status = "local_match"
                 conf = 0.75
@@ -886,16 +896,16 @@ def cleanse_address(
                 address_consistent=address_consistent,
                 upstream_contacted=True,
                 dispatch_confidence=disp_conf,
-                source="live_nipost_api" if evidence_persisted else "local_reference_fallback",
+                source="nipost_sandbox" if is_sandbox else ("live_nipost_api" if evidence_persisted else "local_reference_fallback"),
                 matched_record=matched_schema,
                 changes_made=changes_msg,
                 provenance=prov_text,
-                source_owner="NIPOST" if evidence_persisted else "PostcodeLink",
-                source_type="official_national_directory" if evidence_persisted else "local_reference",
+                source_owner="NIPOST Sandbox" if is_sandbox else ("NIPOST" if evidence_persisted else "PostcodeLink"),
+                source_type="nipost_sandbox" if is_sandbox else ("official_national_directory" if evidence_persisted else "local_reference"),
                 checked_against_nipost=True,
-                is_live_nipost=bool(evidence_persisted),
-                verification_source="live_nipost_api" if evidence_persisted else "local_nipost_reference_dataset",
-                fallback_used=bool(not evidence_persisted),
+                is_live_nipost=bool(evidence_persisted and not is_sandbox),
+                verification_source="nipost_sandbox" if is_sandbox else ("live_nipost_api" if evidence_persisted else "local_nipost_reference_dataset"),
+                fallback_used=bool(not evidence_persisted and not is_sandbox),
                 dataset_version=upstream_ver,
                 api_integration_version="2026.1",
                 evidence_id=ev_id,

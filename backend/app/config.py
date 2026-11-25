@@ -3,8 +3,8 @@ import os
 import math
 import secrets
 from collections import Counter
-from typing import List, Any, Optional, Dict, ClassVar, Set
-from pydantic import model_validator
+from typing import List, Any, Optional, Dict, ClassVar, Set, Union
+from pydantic import model_validator, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -120,11 +120,24 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:///./postcodelink.db"
     
     # CORS
-    CORS_ORIGINS: List[str] = [
+    CORS_ORIGINS: Union[List[str], str] = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "https://postcodelink.ng",
     ]
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def _parse_cors_origins(cls, v: Any) -> List[str]:
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+        if isinstance(v, str):
+            s = v.strip()
+            if s.startswith("["):
+                import json
+                return [str(x).strip() for x in json.loads(s) if str(x).strip()]
+            return [x.strip() for x in s.split(",") if x.strip()]
+        return []
     
     # Security & JWT Token Auth with Versioned Key Rotation
     SECRET_KEY: str = os.getenv("SECRET_KEY", "postcodelink_dev_secret_key_32_characters_minimum")

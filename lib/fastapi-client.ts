@@ -267,6 +267,7 @@ export interface CoverageReport {
     base_url_set: boolean;
     credentials_set: boolean;
     auth_scheme: string;
+    upstream_environment?: string;
     connectivity_healthy?: boolean;
     authentication_verified?: boolean;
     contract_verified?: boolean;
@@ -625,6 +626,28 @@ export const fastApiClient = {
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || 'Failed to fetch coverage report');
+    }
+    return await res.json();
+  },
+
+  async triggerNipostHealthCheck(): Promise<{
+    healthy: boolean;
+    connectivity_healthy: boolean;
+    authentication_verified: boolean;
+    contract_verified: boolean;
+    production_authorized: boolean;
+    upstream_environment: string;
+    last_checked_at: string | null;
+    status: string;
+  }> {
+    const res = await fetch(`${API_V1}/postcodes/integration/health-check`, {
+      method: 'POST',
+      headers: getHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Health check failed (requires administrator privileges)');
     }
     return await res.json();
   },

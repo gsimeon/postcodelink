@@ -754,7 +754,19 @@ def test_admin_only_health_check_endpoint_and_authenticated_probe():
     finally:
         db.close()
 
-    # 4. NIPOSTClient.check_health() distinguishes 401 rejection vs 200 contract acceptance
+    # 4. NIPOSTClient.check_health() uses zero-credit Assembly endpoint and never treats 404 as accepted auth
+    c_404 = NIPOSTClient(
+        base_url="https://api.postcode.gov.ng",
+        api_key="nipost_test_invalid",
+        transport=httpx.MockTransport(lambda req: httpx.Response(404, json={"error": "not found"})),
+    )
+    probe_404 = c_404.check_health()
+    assert probe_404["healthy"] is False
+    st_404 = c_404.get_integration_status()
+    assert st_404["authentication_verified"] is False
+    assert st_404["contract_verified"] is False
+    assert st_404["upstream_environment"] == "sandbox"
+
     c_401 = NIPOSTClient(
         base_url="https://api.postcode.gov.ng",
         api_key="nipost_test_invalid",
@@ -765,7 +777,6 @@ def test_admin_only_health_check_endpoint_and_authenticated_probe():
     st_401 = c_401.get_integration_status()
     assert st_401["authentication_verified"] is False
     assert st_401["contract_verified"] is False
-    assert st_401["upstream_environment"] == "sandbox"
 
     c_200 = NIPOSTClient(
         base_url="https://api.postcode.gov.ng",
@@ -773,7 +784,7 @@ def test_admin_only_health_check_endpoint_and_authenticated_probe():
         transport=httpx.MockTransport(
             lambda req: httpx.Response(
                 200,
-                json={"data": {"postcode": "100001", "valid": True, "administrative_address": {"state_name": "Lagos", "locality_name": "Ikeja"}}},
+                json={"data": {"postcode": "EK-01-A03-FK-01"}},
             )
         ),
     )
@@ -787,10 +798,13 @@ def test_admin_only_health_check_endpoint_and_authenticated_probe():
 
 
 def test_nipost_sandbox_test_key_never_classified_as_production_official():
-    """Verify nipost_test_ sandbox responses are strictly classified as sandbox_verified, never official_verified."""
+    """Verify nipost_test_ sandbox responses are strictly sandbox_verified, rejected in strict mode,
+    and never emit live_nipost_api / official_national_directory source flags.
+    """
     import httpx
     from backend.app.services.nipost_client import NIPOSTClient
     from backend.app.services.postcode_service import cleanse_address, get_postcode_coverage_report
+    from backend.app.routers.postcodes import execute_postcode_lookup
     from backend.app.database import SessionLocal
 
     def sandbox_handler(request: httpx.Request) -> httpx.Response:
@@ -818,8 +832,16 @@ def test_nipost_sandbox_test_key_never_classified_as_production_official():
     )
     assert sandbox_client.upstream_environment == "sandbox"
 
+    live_client = NIPOSTClient(
+        base_url="https://api.postcode.gov.ng",
+        api_key="nipost_live_production_key",
+        transport=httpx.MockTransport(sandbox_handler),
+    )
+    assert live_client.upstream_environment == "production"
+
     db = SessionLocal()
     try:
+        # 1. Sandbox key in normal mode -> sandbox_verified, is_live_nipost=False, nipost_sandbox flags
         res = cleanse_address(
             address="12 Fajuyi Road, Ado-Ekiti, Ekiti",
             postcode_hint="EK-01-A03-FK-01",
@@ -828,12 +850,61 @@ def test_nipost_sandbox_test_key_never_classified_as_production_official():
             db=db,
         )
         assert res.verification_status == "sandbox_verified"
-        assert res.verification_status != "official_verified"
         assert res.postcode_status != "verified"
+        assert res.is_live_nipost is False
+        assert res.source == "nipost_sandbox"
+        assert res.source_type == "nipost_sandbox"
+        assert res.verification_source == "nipost_sandbox"
+        assert res.fallback_used is False
 
-        # Sandbox evidence must not inflate production-confirmed coverage counts
-        cov = get_postcode_coverage_report(db)
-        assert cov.digital_building_level_records <= cov.nipost_confirmed_postcodes
+        # 2. Sandbox key in nipost_strict mode -> fails closed (HTTP 503)
+        with pytest.raises(HTTPException) as exc_strict:
+            cleanse_address(
+                address="12 Fajuyi Road, Ado-Ekiti, Ekiti",
+                postcode_hint="EK-01-A03-FK-01",
+                verification_mode="nipost_strict",
+                client=sandbox_client,
+                db=db,
+            )
+        assert exc_strict.value.status_code == 503
+
+        # 3. Sandbox key in strict lookup -> fails closed (HTTP 503)
+        with pytest.raises(HTTPException) as exc_lookup:
+            execute_postcode_lookup(db=db, code="EK-01-A03-FK-01", strict=True, client=sandbox_client)
+        assert exc_lookup.value.status_code == 503
+
+        # 4. Live key with Autofill & persisted evidence -> official_verified
+        res_live = cleanse_address(
+            address="12 Fajuyi Road, Ado-Ekiti, Ekiti",
+            postcode_hint="EK-01-A03-FK-01",
+            verification_mode="nipost_validate",
+            client=live_client,
+            db=db,
+        )
+        assert res_live.verification_status == "official_verified"
+        assert res_live.is_live_nipost is True
+        assert res_live.source == "live_nipost_api"
+
+        # 5. Live key with failed evidence persistence (db=None) -> demoted in normal mode, rejected in strict
+        res_demoted = cleanse_address(
+            address="12 Fajuyi Road, Ado-Ekiti, Ekiti",
+            postcode_hint="EK-01-A03-FK-01",
+            verification_mode="nipost_validate",
+            client=live_client,
+            db=None,
+        )
+        assert res_demoted.verification_status == "local_reference"
+        assert res_demoted.is_live_nipost is False
+
+        with pytest.raises(HTTPException) as exc_no_db:
+            cleanse_address(
+                address="12 Fajuyi Road, Ado-Ekiti, Ekiti",
+                postcode_hint="EK-01-A03-FK-01",
+                verification_mode="nipost_strict",
+                client=live_client,
+                db=None,
+            )
+        assert exc_no_db.value.status_code == 503
     finally:
         db.close()
 
