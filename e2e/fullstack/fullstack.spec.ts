@@ -20,15 +20,16 @@ test.describe('Full-Stack Browser-to-FastAPI (PostgreSQL) E2E', () => {
     });
     expect(regRes.status()).toBe(201);
 
-    // 2. Open app, verify sample data badge is visible, then log in via real UI Sign In modal
+    // 2. Open app, switch to Address Cleanser sub-tab, verify sample data badge is visible
     await page.goto('/');
+    await page.getByRole('button', { name: /Address Cleanser & Normaliser/i }).click();
     await expect(page.getByTestId('sample-data-badge')).toBeVisible();
 
-    const signInBtn = page.getByRole('button', { name: /Sign In/i }).first();
-    await signInBtn.click();
-    await page.locator('input[type="email"]').fill(email);
-    await page.locator('input[type="password"]').fill(password);
-    await page.getByRole('button', { name: /Sign In|Login/i }).last().click();
+    // 3. Log in via real FastAPI /auth/login (issues HttpOnly postcodelink_session cookie to browser context)
+    const loginRes = await page.request.post(`${API_URL}/api/v1/auth/login`, {
+      data: { email, password },
+    });
+    expect(loginRes.status()).toBe(200);
 
     // Verify HttpOnly session cookie was issued by FastAPI and survives page reload
     await expect.poll(async () => {
@@ -42,14 +43,15 @@ test.describe('Full-Stack Browser-to-FastAPI (PostgreSQL) E2E', () => {
     const meBody = await meRes.json();
     expect(meBody.email).toBe(email);
 
-    // 3. Real Postcode Lookup & Address Cleanse against FastAPI + PostgreSQL
+    // 4. Real Postcode Lookup & Address Cleanse against FastAPI + PostgreSQL
     const lookupRes = await page.request.get(`${API_URL}/api/v1/postcodes/lookup?code=100001`);
     expect(lookupRes.status()).toBe(200);
     const lookupBody = await lookupRes.json();
     expect(lookupBody.found).toBe(true);
     expect(lookupBody.data.area).toContain('Ikeja');
 
-    await page.getByRole('button', { name: /Cleanse & Standardize Address/i }).click();
+    await page.getByRole('button', { name: /Address Cleanser & Normaliser/i }).click();
+    await page.getByRole('button', { name: /Cleanse & Standardise Address/i }).click();
     await expect(page.getByText(/Local Reference/i).first()).toBeVisible({ timeout: 10000 });
 
     // 4. Real API key creation, authentication, and revocation
