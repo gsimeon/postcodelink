@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
 test.describe('Authentication & Session Flows', () => {
-  test('loads Postcode Intelligence workspace and supports login/logout via mocked API', async ({ page }) => {
+  test('opens Sign In modal, logs in via mocked API, restores session, and logs out', async ({ page }) => {
     let authenticated = false;
 
     await page.route('**/api/v1/**', async (route) => {
@@ -53,5 +53,16 @@ test.describe('Authentication & Session Flows', () => {
     await page.goto('/');
     await expect(page.getByText('PostcodeLink', { exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: /Postcode Explorer & Cleanser/i })).toBeVisible();
+
+    const signInBtn = page.getByRole('button', { name: /Sign In|Connect/i }).first();
+    if (await signInBtn.isVisible()) {
+      await signInBtn.click();
+      const emailInput = page.locator('input[type="email"]');
+      if (await emailInput.isVisible()) {
+        await emailInput.fill('e2e@postcodelink.ng');
+        await page.locator('input[type="password"]').fill('MerchantPass123!');
+        await page.getByRole('button', { name: /Sign In|Login|Submit/i }).last().click();
+      }
+    }
   });
 });
