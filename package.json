@@ -12,6 +12,7 @@
     "start": "next start",
     "test": "node scripts/run-tests.mjs",
     "test:e2e": "playwright test",
+    "test:e2e:fullstack": "playwright test --config=playwright.fullstack.config.ts",
     "lint": "eslint"
   },
   "dependencies": {

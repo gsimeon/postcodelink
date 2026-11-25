@@ -174,9 +174,27 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
 
       {/* Address Input Form */}
       <div style={{ marginBottom: "16px" }}>
-        <label style={{ display: "block", fontSize: "12px", fontWeight: 700, color: "#334155", marginBottom: "6px" }}>
-          RAW ADDRESS TEXT
-        </label>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px", gap: "8px", flexWrap: "wrap" }}>
+          <label style={{ display: "block", fontSize: "12px", fontWeight: 700, color: "#334155" }}>
+            RAW ADDRESS TEXT
+          </label>
+          {rawAddressInput === "Plot 14 Admiralty Way, Lekki Phase 1, Lagos State" && (
+            <span
+              data-testid="sample-data-badge"
+              style={{
+                fontSize: "11px",
+                fontWeight: 600,
+                color: "#92400e",
+                background: "#fef3c7",
+                border: "1px solid #fde68a",
+                padding: "2px 8px",
+                borderRadius: "4px",
+              }}
+            >
+              Sample Data (Pre-filled Example — not a verified customer record)
+            </span>
+          )}
+        </div>
         <textarea
           rows={3}
           value={rawAddressInput}
