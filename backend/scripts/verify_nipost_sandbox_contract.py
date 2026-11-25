@@ -76,8 +76,8 @@ def main() -> int:
         f"lookup_status={bad_lookup.status.value}({bad_lookup.http_status}) rejected={unauthorized_handled}"
     )
 
-    orch_status, _, orch_err, orch_method = client.orchestrated_verify("EK-01-A03-FK-01")
-    print(f"3. Orchestrated Verify (EK-01-A03-FK-01): status={orch_status.value} method={orch_method} err={orch_err}")
+    orch_status, _, orch_err, orch_method = client.orchestrated_verify(probe_code)
+    print(f"3. Orchestrated Verify ({probe_code}): status={orch_status.value} method={orch_method} err={orch_err}")
     print(
         f"   Summary: assembly_contract_verified={bool(status['contract_verified'])} "
         f"lookup_contract_state={lookup_contract_state} "

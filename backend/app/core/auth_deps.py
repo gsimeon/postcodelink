@@ -43,9 +43,15 @@ def get_current_user(
         origin = request.headers.get("origin")
         referer = request.headers.get("referer")
         source_url = origin or referer
-        if source_url:
+        from backend.app.config import settings
+        if not source_url:
+            if settings.ENVIRONMENT == "production":
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Origin or Referer header required for cookie-authenticated requests in production.",
+                )
+        else:
             from urllib.parse import urlparse
-            from backend.app.config import settings
             parsed = urlparse(source_url)
             req_origin = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
             allowed = {o.rstrip("/") for o in settings.CORS_ORIGINS}

@@ -1309,6 +1309,16 @@ def test_httponly_cookie_auth_csrf_and_logout():
     )
     assert evil_origin.status_code == 403
 
+    # Cookie-authenticated state-changing POST without Origin/Referer in production -> 403 CSRF blocked
+    from backend.app.config import settings as app_settings
+    with patch.object(app_settings, "ENVIRONMENT", "production"):
+        missing_origin_prod = test_client.post(
+            "/api/v1/api-keys/",
+            headers={"X-Requested-With": "XMLHttpRequest"},
+            json={"name": "Missing Origin Prod Key", "monthly_quota": 100},
+        )
+        assert missing_origin_prod.status_code == 403
+
     # With X-Requested-With and allowed Origin -> succeeds
     csrf_ok = test_client.post(
         "/api/v1/api-keys/",
