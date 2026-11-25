@@ -47,8 +47,9 @@ test.describe('Full-Stack Browser-to-FastAPI (PostgreSQL) E2E', () => {
     const lookupRes = await page.request.get(`${API_URL}/api/v1/postcodes/lookup?code=100001`);
     expect(lookupRes.status()).toBe(200);
     const lookupBody = await lookupRes.json();
-    expect(lookupBody.found).toBe(true);
-    expect(lookupBody.data.area).toContain('Ikeja');
+    expect(lookupBody.count).toBeGreaterThan(0);
+    expect(lookupBody.matches[0].code).toBe('100001');
+    expect(lookupBody.verification_status).toBe('local_reference');
 
     await page.getByRole('button', { name: /Address Cleanser & Normaliser/i }).click();
     await page.getByRole('button', { name: /Cleanse & Standardise Address/i }).click();
