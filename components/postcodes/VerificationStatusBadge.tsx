@@ -5,18 +5,31 @@ interface VerificationStatusBadgeProps {
   status?: string;
   isLiveNipost?: boolean;
   isPartial?: boolean;
+  evidenceId?: string | null;
+  validUntil?: string | null;
+  fallbackUsed?: boolean;
 }
 
 export const VerificationStatusBadge: React.FC<VerificationStatusBadgeProps> = ({
   status,
   isLiveNipost,
   isPartial,
+  evidenceId,
+  validUntil,
+  fallbackUsed,
 }) => {
-  // 1. Officially Verified: requires positive official status (never broad boolean flag alone)
+  const hasExplicitEvidence = evidenceId === undefined ? true : Boolean(evidenceId);
+  const isUnexpired = !validUntil || new Date(validUntil).getTime() > Date.now();
+
+  // 1. Officially Verified: requires positive official status, valid unexpired evidence, and no fallback/partial flag
   if (
-    status === "official_verified" ||
-    status === "officially_verified" ||
-    status === "nipost_verified"
+    (status === "official_verified" ||
+      status === "officially_verified" ||
+      status === "nipost_verified") &&
+    !isPartial &&
+    !fallbackUsed &&
+    hasExplicitEvidence &&
+    isUnexpired
   ) {
     return (
       <span

@@ -97,10 +97,10 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
             />
             <div style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: 700, fontSize: "13px", color: "#0f172a" }}>
               <CheckCircle2 size={15} color="#0284c7" />
-              NIPOST Live Verify
+              Attempt Authoritative Verification
             </div>
             <p style={{ margin: "4px 0 0", fontSize: "11px", color: "#64748b" }}>
-              Verifies against live NIPOST API; gracefully falls back to local reference if gateway is unreachable.
+              Attempts live NIPOST verification; falls back to clearly labelled local reference if unavailable.
             </p>
           </label>
 
@@ -130,7 +130,7 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
             />
             <div style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: 700, fontSize: "13px", color: "#0f172a" }}>
               <Shield size={15} color="#dc2626" />
-              Strict Fail-Closed
+              Require Authoritative Verification (Strict)
             </div>
             <p style={{ margin: "4px 0 0", fontSize: "11px", color: "#64748b" }}>
               Requires live NIPOST verification; strictly fails closed if gateway is unconfigured or unavailable.

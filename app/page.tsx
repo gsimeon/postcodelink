@@ -152,6 +152,10 @@ export default function Home() {
       if (health && health.status === "healthy") {
         setIsFastAPIConnected(true);
 
+        if (!fastApiClient.isAuthenticated()) {
+          await fastApiClient.restoreSession().catch(() => null);
+        }
+
         if (fastApiClient.isAuthenticated()) {
           const [apiDeliveries, apiOperators, apiCustomers, profile] = await Promise.all([
             fastApiClient.listDeliveries().catch(() => []),

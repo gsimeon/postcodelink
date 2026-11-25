@@ -35,6 +35,9 @@ export const AddressResultCard: React.FC<AddressResultCardProps> = ({
               status={result.verification_status}
               isLiveNipost={result.is_live_nipost}
               isPartial={result.is_partial_verification}
+              evidenceId={result.evidence_id}
+              validUntil={result.valid_until}
+              fallbackUsed={result.fallback_used}
             />
           </div>
           <div style={{ fontSize: "12px", color: "#64748b" }}>

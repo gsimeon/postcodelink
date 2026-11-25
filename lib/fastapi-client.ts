@@ -8,6 +8,7 @@ const FASTAPI_BASE_URL = process.env.NEXT_PUBLIC_FASTAPI_URL || process.env.NEXT
 const API_V1 = `${FASTAPI_BASE_URL}/api/v1`;
 
 let authToken: string | null = null;
+let sessionAuthenticated = false;
 
 export interface FastAPIProfile {
   id: string;
@@ -287,6 +288,17 @@ function getHeaders(extraHeaders: Record<string, string> = {}): Record<string, s
   return headers;
 }
 
+function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  return fetch(input, {
+    credentials: 'include',
+    ...init,
+    headers: {
+      ...getHeaders(),
+      ...(init.headers as Record<string, string> | undefined),
+    },
+  });
+}
+
 export interface FastAPIApiKey {
   id: string;
   name: string;
@@ -313,6 +325,7 @@ export const fastApiClient = {
     // Keep token in memory only (never localStorage) to protect against XSS token theft;
     // FastAPI also sets an HttpOnly SameSite=Lax session cookie on login/register.
     authToken = token;
+    sessionAuthenticated = !!token;
   },
 
   getToken(): string | null {
@@ -320,9 +333,10 @@ export const fastApiClient = {
   },
 
   async logout() {
-    this.setToken(null);
+    authToken = null;
+    sessionAuthenticated = false;
     if (typeof window !== 'undefined') {
-      await fetch(`${API_V1}/auth/logout`, {
+      await apiFetch(`${API_V1}/auth/logout`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'X-Requested-With': 'XMLHttpRequest' },
@@ -331,11 +345,27 @@ export const fastApiClient = {
   },
 
   isAuthenticated(): boolean {
-    return !!this.getToken();
+    return !!this.getToken() || sessionAuthenticated;
+  },
+
+  async restoreSession(): Promise<FastAPIProfile | null> {
+    if (typeof window === 'undefined') return null;
+    try {
+      const res = await apiFetch(`${API_V1}/auth/me`, { cache: 'no-store' });
+      if (!res.ok) {
+        sessionAuthenticated = false;
+        return null;
+      }
+      const profile = (await res.json()) as FastAPIProfile;
+      sessionAuthenticated = true;
+      return profile;
+    } catch {
+      return null;
+    }
   },
 
   async login(email: string, password: string): Promise<{ access_token: string; profile: FastAPIProfile }> {
-    const res = await fetch(`${API_V1}/auth/login`, {
+    const res = await apiFetch(`${API_V1}/auth/login`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
@@ -357,7 +387,7 @@ export const fastApiClient = {
     phone?: string;
     business_name?: string;
   }): Promise<{ access_token: string; profile: FastAPIProfile }> {
-    const res = await fetch(`${API_V1}/auth/register`, {
+    const res = await apiFetch(`${API_V1}/auth/register`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
@@ -387,7 +417,7 @@ export const fastApiClient = {
     if (status) params.append('status', status);
     if (search) params.append('search', search);
 
-    const res = await fetch(`${API_V1}/deliveries/?${params.toString()}`, {
+    const res = await apiFetch(`${API_V1}/deliveries/?${params.toString()}`, {
       headers: getHeaders(),
       cache: 'no-store',
     });
@@ -396,7 +426,7 @@ export const fastApiClient = {
   },
 
   async getDelivery(id: string): Promise<FastAPIDelivery> {
-    const res = await fetch(`${API_V1}/deliveries/${encodeURIComponent(id)}`, {
+    const res = await apiFetch(`${API_V1}/deliveries/${encodeURIComponent(id)}`, {
       headers: getHeaders(),
       cache: 'no-store',
     });
@@ -405,7 +435,7 @@ export const fastApiClient = {
   },
 
   async getPublicTracking(identifier: string): Promise<FastAPIPublicTracking> {
-    const res = await fetch(`${API_V1}/deliveries/${encodeURIComponent(identifier)}/tracking`, {
+    const res = await apiFetch(`${API_V1}/deliveries/${encodeURIComponent(identifier)}/tracking`, {
       cache: 'no-store',
     });
     if (!res.ok) throw new Error(`Tracking record not found: ${res.statusText}`);
@@ -424,7 +454,7 @@ export const fastApiClient = {
     fee?: number;
     pickup_address?: string;
   }): Promise<FastAPIDeliveryCreateResult> {
-    const res = await fetch(`${API_V1}/deliveries/`, {
+    const res = await apiFetch(`${API_V1}/deliveries/`, {
       method: 'POST',
       headers: getHeaders(),
       body: JSON.stringify(payload),
@@ -447,7 +477,7 @@ export const fastApiClient = {
     package_description: string;
     fee?: number;
   }>): Promise<FastAPIDelivery[]> {
-    const res = await fetch(`${API_V1}/deliveries/bulk`, {
+    const res = await apiFetch(`${API_V1}/deliveries/bulk`, {
       method: 'POST',
       headers: getHeaders(),
       body: JSON.stringify(items),
@@ -460,7 +490,7 @@ export const fastApiClient = {
   },
 
   async deleteDelivery(deliveryId: string): Promise<void> {
-    const res = await fetch(`${API_V1}/deliveries/${encodeURIComponent(deliveryId)}`, {
+    const res = await apiFetch(`${API_V1}/deliveries/${encodeURIComponent(deliveryId)}`, {
       method: 'DELETE',
       headers: getHeaders(),
     });
@@ -471,7 +501,7 @@ export const fastApiClient = {
   },
 
   async assignOperator(deliveryId: string, operatorId: string): Promise<FastAPIDelivery> {
-    const res = await fetch(`${API_V1}/deliveries/${encodeURIComponent(deliveryId)}/assign`, {
+    const res = await apiFetch(`${API_V1}/deliveries/${encodeURIComponent(deliveryId)}/assign`, {
       method: 'POST',
       headers: getHeaders(),
       body: JSON.stringify({ operator_id: operatorId }),
@@ -484,7 +514,7 @@ export const fastApiClient = {
   },
 
   async updateStatus(deliveryId: string, newStatus: string, note?: string): Promise<FastAPIDelivery> {
-    const res = await fetch(`${API_V1}/deliveries/${encodeURIComponent(deliveryId)}/status`, {
+    const res = await apiFetch(`${API_V1}/deliveries/${encodeURIComponent(deliveryId)}/status`, {
       method: 'POST',
       headers: getHeaders(),
       body: JSON.stringify({ new_status: newStatus, note }),
@@ -497,7 +527,7 @@ export const fastApiClient = {
   },
 
   async verifyOTP(deliveryId: string, otp: string, note?: string): Promise<FastAPIDelivery> {
-    const res = await fetch(`${API_V1}/deliveries/${encodeURIComponent(deliveryId)}/verify-otp`, {
+    const res = await apiFetch(`${API_V1}/deliveries/${encodeURIComponent(deliveryId)}/verify-otp`, {
       method: 'POST',
       headers: getHeaders(),
       body: JSON.stringify({ otp, note }),
@@ -510,7 +540,7 @@ export const fastApiClient = {
   },
 
   async listOperators(): Promise<FastAPIOperator[]> {
-    const res = await fetch(`${API_V1}/operators/`, {
+    const res = await apiFetch(`${API_V1}/operators/`, {
       headers: getHeaders(),
       cache: 'no-store',
     });
@@ -520,7 +550,7 @@ export const fastApiClient = {
 
   async listCustomers(search?: string): Promise<FastAPICustomer[]> {
     const url = search ? `${API_V1}/customers/?search=${encodeURIComponent(search)}` : `${API_V1}/customers/`;
-    const res = await fetch(url, {
+    const res = await apiFetch(url, {
       headers: getHeaders(),
       cache: 'no-store',
     });
@@ -537,7 +567,7 @@ export const fastApiClient = {
     state: string;
     postcode?: string;
   }): Promise<FastAPICustomer> {
-    const res = await fetch(`${API_V1}/customers/`, {
+    const res = await apiFetch(`${API_V1}/customers/`, {
       method: 'POST',
       headers: getHeaders(),
       body: JSON.stringify(payload),
@@ -550,7 +580,7 @@ export const fastApiClient = {
   },
 
   async getAnalytics(): Promise<FastAPIAnalytics> {
-    const res = await fetch(`${API_V1}/analytics/overview`, {
+    const res = await apiFetch(`${API_V1}/analytics/overview`, {
       headers: getHeaders(),
       cache: 'no-store',
     });
@@ -559,7 +589,7 @@ export const fastApiClient = {
   },
 
   async getProfile(): Promise<FastAPIProfile> {
-    const res = await fetch(`${API_V1}/auth/me`, {
+    const res = await apiFetch(`${API_V1}/auth/me`, {
       headers: getHeaders(),
       cache: 'no-store',
     });
@@ -582,7 +612,7 @@ export const fastApiClient = {
     if (params.area && params.area.trim()) q.append('area', params.area.trim());
     if (params.strict) q.append('strict', 'true');
 
-    const res = await fetch(`${API_V1}/postcodes/lookup?${q.toString()}`, {
+    const res = await apiFetch(`${API_V1}/postcodes/lookup?${q.toString()}`, {
       headers: getHeaders(),
       cache: 'no-store',
     });
@@ -625,7 +655,7 @@ export const fastApiClient = {
           }
         : addressOrPayload;
 
-    const res = await fetch(`${API_V1}/postcodes/cleanse`, {
+    const res = await apiFetch(`${API_V1}/postcodes/cleanse`, {
       method: 'POST',
       headers: getHeaders(),
       body: JSON.stringify(payload),
@@ -638,7 +668,7 @@ export const fastApiClient = {
   },
 
   async getCoverageReport(): Promise<CoverageReport> {
-    const res = await fetch(`${API_V1}/postcodes/coverage`, {
+    const res = await apiFetch(`${API_V1}/postcodes/coverage`, {
       headers: getHeaders(),
       cache: 'no-store',
     });
@@ -659,7 +689,7 @@ export const fastApiClient = {
     last_checked_at: string | null;
     status: string;
   }> {
-    const res = await fetch(`${API_V1}/postcodes/integration/health-check`, {
+    const res = await apiFetch(`${API_V1}/postcodes/integration/health-check`, {
       method: 'POST',
       headers: getHeaders(),
       cache: 'no-store',
@@ -672,7 +702,7 @@ export const fastApiClient = {
   },
 
   async getTracking(trackingToken: string): Promise<FastAPIPublicTracking> {
-    const res = await fetch(`${API_V1}/deliveries/track/${encodeURIComponent(trackingToken)}`, {
+    const res = await apiFetch(`${API_V1}/deliveries/track/${encodeURIComponent(trackingToken)}`, {
       cache: 'no-store',
     });
     if (!res.ok) {
@@ -683,7 +713,7 @@ export const fastApiClient = {
   },
 
   async verifyRecipientChallenge(trackingToken: string, phoneLast4: string): Promise<{ success: boolean; verified: boolean; message: string; tracking_token: string; challenge_token: string; expires_in_seconds: number; status: string }> {
-    const res = await fetch(`${API_V1}/deliveries/track/${encodeURIComponent(trackingToken)}/verify-recipient`, {
+    const res = await apiFetch(`${API_V1}/deliveries/track/${encodeURIComponent(trackingToken)}/verify-recipient`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ phone_last_4: phoneLast4 }),
@@ -702,7 +732,7 @@ export const fastApiClient = {
     challengeToken: string,
     phoneLast4?: string
   ): Promise<{ success: boolean; message: string; status: string; pod_verified: boolean }> {
-    const res = await fetch(`${API_V1}/deliveries/track/${encodeURIComponent(trackingToken)}/confirm-delivery`, {
+    const res = await apiFetch(`${API_V1}/deliveries/track/${encodeURIComponent(trackingToken)}/confirm-delivery`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ otp, challenge_token: challengeToken, phone_last_4: phoneLast4 }),
@@ -716,7 +746,7 @@ export const fastApiClient = {
   },
 
   async regenerateTrackingToken(deliveryId: string): Promise<FastAPIDelivery> {
-    const res = await fetch(`${API_V1}/deliveries/${encodeURIComponent(deliveryId)}/regenerate-token`, {
+    const res = await apiFetch(`${API_V1}/deliveries/${encodeURIComponent(deliveryId)}/regenerate-token`, {
       method: 'POST',
       headers: getHeaders(),
     });
@@ -728,7 +758,7 @@ export const fastApiClient = {
   },
 
   async listApiKeys(): Promise<FastAPIApiKey[]> {
-    const res = await fetch(`${API_V1}/api-keys/`, {
+    const res = await apiFetch(`${API_V1}/api-keys/`, {
       headers: getHeaders(),
       cache: 'no-store',
     });
@@ -745,7 +775,7 @@ export const fastApiClient = {
     monthly_quota?: number;
     expires_in_days?: number;
   }): Promise<FastAPIApiKeyCreated> {
-    const res = await fetch(`${API_V1}/api-keys/`, {
+    const res = await apiFetch(`${API_V1}/api-keys/`, {
       method: 'POST',
       headers: getHeaders(),
       body: JSON.stringify(payload),
@@ -758,7 +788,7 @@ export const fastApiClient = {
   },
 
   async rotateApiKey(keyId: string): Promise<FastAPIApiKeyCreated> {
-    const res = await fetch(`${API_V1}/api-keys/${encodeURIComponent(keyId)}/rotate`, {
+    const res = await apiFetch(`${API_V1}/api-keys/${encodeURIComponent(keyId)}/rotate`, {
       method: 'POST',
       headers: getHeaders(),
     });
@@ -770,7 +800,7 @@ export const fastApiClient = {
   },
 
   async revokeApiKey(keyId: string): Promise<void> {
-    const res = await fetch(`${API_V1}/api-keys/${encodeURIComponent(keyId)}`, {
+    const res = await apiFetch(`${API_V1}/api-keys/${encodeURIComponent(keyId)}`, {
       method: 'DELETE',
       headers: getHeaders(),
     });

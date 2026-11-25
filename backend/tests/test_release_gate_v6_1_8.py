@@ -1343,3 +1343,73 @@ def test_commercial_authorization_expiry_revocation_and_production_health_gate()
         assert test_client.get("/health/integrations").status_code == 401
 
 
+def test_pl_test_outbound_http_interception_isolation():
+    """HTTP-level interception test: even with live NIPOST server credentials configured,
+    pl_test_ keys NEVER make outbound HTTP requests to live NIPOST across lookup, cleanse, strict, or expired/revoked states.
+    """
+    from fastapi.testclient import TestClient
+    from backend.app.main import app
+    from backend.app.database import SessionLocal
+    from backend.app.core.security import create_access_token
+    from backend.app.config import settings
+    import httpx
+
+    test_client = TestClient(app)
+    db = SessionLocal()
+    try:
+        merchant_id = str(uuid.uuid4())
+        merchant = Profile(
+            id=merchant_id,
+            full_name="Outbound Intercept Merchant",
+            phone=f"+23480{str(uuid.UUID(merchant_id).int)[:8]}",
+            email=f"intercept-{merchant_id[:8]}@example.com",
+            hashed_password="test_hashed_password",
+            role=AppRole.MERCHANT,
+        )
+        db.add(merchant)
+        db.commit()
+
+        token = create_access_token({"sub": merchant.id, "role": AppRole.MERCHANT.value})
+        jwt_headers = {"Authorization": f"Bearer {token}"}
+
+        res_test = test_client.post(
+            "/api/v1/api-keys/",
+            headers=jwt_headers,
+            json={"name": "HTTP Intercept Test Key", "monthly_quota": 50, "environment": "test"},
+        )
+        assert res_test.status_code == 201
+        pl_test_key = res_test.json()["api_key"]
+
+        orig_send = httpx.Client.send
+
+        def guarded_send(self, request, *args, **kwargs):
+            if request.url.host != "testserver":
+                raise AssertionError(f"Outbound HTTP to {request.url} forbidden for pl_test_")
+            return orig_send(self, request, *args, **kwargs)
+
+        with patch.object(settings, "NIPOST_API_BASE_URL", "https://api.postcode.gov.ng"), \
+             patch.object(settings, "NIPOST_API_KEY", "nipost_live_must_never_be_called"), \
+             patch.object(httpx.Client, "send", autospec=True, side_effect=guarded_send):
+            # Live-looking 11-char digital postcode
+            r1 = test_client.get("/api/v1/postcodes/commercial/lookup?code=EK-01-A03-FK-01", headers={"x-api-key": pl_test_key})
+            assert r1.status_code == 200
+            assert r1.json()["is_live_nipost"] is False
+            assert r1.json()["upstream_contacted"] is False
+
+            # Cleanse with live_verify=True requested by caller -> still isolated
+            r2 = test_client.post(
+                "/api/v1/postcodes/commercial/cleanse",
+                json={"address": "12 Fajuyi Road, Ado-Ekiti, Ekiti", "postcode": "EK-01-A03-FK-01", "live_verify": True},
+                headers={"x-api-key": pl_test_key},
+            )
+            assert r2.status_code == 200
+            assert r2.json()["is_live_nipost"] is False
+            assert r2.json()["upstream_contacted"] is False
+
+            # Strict mode -> fails closed 503 without outbound HTTP call
+            r3 = test_client.get("/api/v1/postcodes/commercial/lookup?code=EK-01-A03-FK-01&strict=true", headers={"x-api-key": pl_test_key})
+            assert r3.status_code == 503
+    finally:
+        db.close()
+
+

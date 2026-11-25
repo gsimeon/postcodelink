@@ -41,18 +41,32 @@ def main() -> int:
         "upstream_environment": status["upstream_environment"],
     })
 
-    lookup_entitlement_verified = False
-    for code in ("EK-01-A03-FK-01", "100001"):
-        res = client.lookup_postcode(code)
-        print(f"2. Lookup ({code}): status={res.status.value} http={res.http_status} msg={res.error_message}")
-        if res.status.value in ("FOUND", "NOT_FOUND", "INVALID_INPUT") and res.http_status == 200:
-            lookup_entitlement_verified = True
+    # 2. Valid 11-char digital postcode lookup: require FOUND or NOT_FOUND (never INVALID_INPUT)
+    res_digital = client.lookup_postcode("EK-01-A03-FK-01")
+    print(f"2a. Lookup (EK-01-A03-FK-01): status={res_digital.status.value} http={res_digital.http_status} msg={res_digital.error_message}")
+    lookup_entitlement_verified = res_digital.status.value in ("FOUND", "NOT_FOUND") and res_digital.http_status == 200
+
+    # 2b. Invalid legacy/malformed format check
+    res_invalid = client.lookup_postcode("100001")
+    print(f"2b. Lookup (100001): status={res_invalid.status.value} http={res_invalid.http_status} msg={res_invalid.error_message}")
+    invalid_format_handled = res_invalid.status.value in ("INVALID_INPUT", "NOT_FOUND") and res_invalid.http_status == 200
+
+    # 2c. Negative auth check (invalid key must fail closed as UNAUTHORIZED)
+    bad_client = NIPOSTClient(base_url=base_url, api_key="nipost_test_invalid_probe_key", auth_scheme=auth_scheme, lookup_path=lookup_path)
+    bad_health = bad_client.check_health()
+    unauthorized_handled = not bad_health.get("healthy") and bad_health.get("status_code") in (401, 403)
+    print(f"2c. Negative Auth Probe: healthy={bad_health.get('healthy')} status={bad_health.get('status_code')} rejected={unauthorized_handled}")
 
     orch_status, _, orch_err, orch_method = client.orchestrated_verify("EK-01-A03-FK-01")
     print(f"3. Orchestrated Verify (EK-01-A03-FK-01): status={orch_status.value} method={orch_method} err={orch_err}")
-    print(f"   Summary: assembly_contract_verified={bool(status['contract_verified'])} lookup_entitlement_verified={lookup_entitlement_verified}")
+    print(
+        f"   Summary: assembly_contract_verified={bool(status['contract_verified'])} "
+        f"lookup_entitlement_verified={lookup_entitlement_verified} "
+        f"invalid_format_handled={invalid_format_handled} "
+        f"unauthorized_handled={unauthorized_handled}"
+    )
 
-    return 0 if (health.get("healthy") and lookup_entitlement_verified) else 1
+    return 0 if (health.get("healthy") and lookup_entitlement_verified and invalid_format_handled and unauthorized_handled) else 1
 
 
 if __name__ == "__main__":
