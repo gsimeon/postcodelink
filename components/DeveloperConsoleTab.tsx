@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from "react";
-import { fastApiClient, FastAPIApiKey } from "@/lib/fastapi-client";
+import { fastApiClient, FastAPIApiKey, FASTAPI_BASE_URL } from "@/lib/fastapi-client";
 import {
   Key,
   Plus,
@@ -103,7 +103,7 @@ export function DeveloperConsoleTab() {
   };
 
   const filteredKeys = keys.filter((k) => envFilter === "all" || (k.environment || "live") === envFilter);
-  const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+  const apiBase = FASTAPI_BASE_URL;
   const sampleKey = revealedSecret?.apiKey || "pl_test_your_api_key_here";
 
   const snippets = {

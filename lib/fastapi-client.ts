@@ -4,7 +4,7 @@
  * Strict security: NO hardcoded credentials. Explicit user authentication only.
  */
 
-const FASTAPI_BASE_URL = process.env.NEXT_PUBLIC_FASTAPI_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+export const FASTAPI_BASE_URL = process.env.NEXT_PUBLIC_FASTAPI_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 const API_V1 = `${FASTAPI_BASE_URL}/api/v1`;
 
 let authToken: string | null = null;

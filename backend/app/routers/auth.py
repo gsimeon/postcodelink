@@ -30,12 +30,7 @@ MAX_LOGIN_ATTEMPTS = 5
 LOCKOUT_DURATION_MINUTES = 15
 
 
-def cleanup_expired_login_attempts(db: Session, retention_days: int = 30) -> int:
-    """Purge login attempt audit records older than retention_days (Retention Policy)."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-    deleted = db.query(LoginAttempt).filter(LoginAttempt.attempted_at < cutoff).delete()
-    db.commit()
-    return deleted
+from backend.app.services.maintenance_service import cleanup_expired_login_attempts
 
 
 def _set_session_cookie(response: Response, token: str) -> None:

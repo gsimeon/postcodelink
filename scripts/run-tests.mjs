@@ -418,6 +418,10 @@ test('Delivery Status Mapping: bi-directional mapping preserves all states inclu
   assert.ok(smSource.includes('Unsupported postcode status'), 'lib/state-machine.ts must throw on unknown postcode status');
   assert.ok(smSource.includes('Unsupported actor role'), 'lib/state-machine.ts must throw on unknown actor role');
   assert.ok(!smSource.includes("default:\n      return 'draft'") && !smSource.includes("default:\r\n      return 'draft'"), 'lib/state-machine.ts must not fall back to draft');
+
+  const devConsoleSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'components', 'DeveloperConsoleTab.tsx'), 'utf8');
+  assert.ok(devConsoleSource.includes('FASTAPI_BASE_URL'), 'DeveloperConsoleTab.tsx must use shared FASTAPI_BASE_URL');
+  assert.ok(!devConsoleSource.includes('NEXT_PUBLIC_API_URL'), 'DeveloperConsoleTab.tsx must not read NEXT_PUBLIC_API_URL directly');
 });
 
 // 7. Canonical Postcode Format & 5-Tier Trust Classification

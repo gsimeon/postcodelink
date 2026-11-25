@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from backend.app.database import SessionLocal
 from backend.app.config import settings
 from backend.app.services.delivery_service import process_notification_outbox
-from backend.app.routers.auth import cleanup_expired_login_attempts
+from backend.app.services.maintenance_service import cleanup_expired_login_attempts
 
 logger = logging.getLogger("outbox_worker")
 
