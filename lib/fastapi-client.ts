@@ -290,6 +290,27 @@ function getHeaders(extraHeaders: Record<string, string> = {}): Record<string, s
   return headers;
 }
 
+export interface FastAPIApiKey {
+  id: string;
+  name: string;
+  environment: 'test' | 'live' | string;
+  key_prefix: string;
+  monthly_quota: number;
+  current_period: string;
+  period_usage_count: number;
+  usage_count: number;
+  rate_limit_per_minute: number;
+  is_active: boolean;
+  is_revoked: boolean;
+  created_at: string;
+  expires_at?: string | null;
+  last_used_at?: string | null;
+}
+
+export interface FastAPIApiKeyCreated extends FastAPIApiKey {
+  api_key: string;
+}
+
 export const fastApiClient = {
   setToken(token: string | null) {
     authToken = token;
@@ -706,5 +727,58 @@ export const fastApiClient = {
       throw new Error(err.detail || 'Failed to regenerate tracking token');
     }
     return await res.json();
+  },
+
+  async listApiKeys(): Promise<FastAPIApiKey[]> {
+    const res = await fetch(`${API_V1}/api-keys/`, {
+      headers: getHeaders(),
+      cache: 'no-store',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to load API keys');
+    }
+    return await res.json();
+  },
+
+  async createApiKey(payload: {
+    name: string;
+    environment: 'test' | 'live';
+    monthly_quota?: number;
+    expires_in_days?: number;
+  }): Promise<FastAPIApiKeyCreated> {
+    const res = await fetch(`${API_V1}/api-keys/`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to create API key');
+    }
+    return await res.json();
+  },
+
+  async rotateApiKey(keyId: string): Promise<FastAPIApiKeyCreated> {
+    const res = await fetch(`${API_V1}/api-keys/${encodeURIComponent(keyId)}/rotate`, {
+      method: 'POST',
+      headers: getHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to rotate API key');
+    }
+    return await res.json();
+  },
+
+  async revokeApiKey(keyId: string): Promise<void> {
+    const res = await fetch(`${API_V1}/api-keys/${encodeURIComponent(keyId)}`, {
+      method: 'DELETE',
+      headers: getHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to revoke API key');
+    }
   },
 };

@@ -15,7 +15,8 @@ import {
   Navigation,
   Compass,
   BarChart3,
-  Upload
+  Upload,
+  Key
 } from "lucide-react";
 
 export type TabKey =
@@ -24,6 +25,7 @@ export type TabKey =
   | "map"
   | "tracking"
   | "postcodes"
+  | "developer"
   | "operators"
   | "customers"
   | "analytics"
@@ -91,6 +93,14 @@ export function Sidebar({
         onClick={() => setActiveTab("postcodes")}
       >
         <MapPin size={17} /> Postcode Explorer & Cleanser
+      </button>
+
+      <button
+        type="button"
+        className={`nav ${activeTab === "developer" ? "active" : ""}`}
+        onClick={() => setActiveTab("developer")}
+      >
+        <Key size={17} /> Developer API Console
       </button>
 
       {/* Decoupled Downstream Logistics Module */}

@@ -53,6 +53,13 @@ def upgrade() -> None:
         op.create_index("ix_consumed_challenge_nonces_tracking_token", "consumed_challenge_nonces", ["tracking_token"])
         op.create_index("ix_consumed_challenge_nonces_expires_at", "consumed_challenge_nonces", ["expires_at"])
 
+    if "api_keys" in existing_tables:
+        api_key_cols = [c["name"] for c in inspector.get_columns("api_keys")]
+        if "environment" not in api_key_cols:
+            with op.batch_alter_table("api_keys") as batch_op:
+                batch_op.add_column(sa.Column("environment", sa.String(length=16), nullable=False, server_default="live"))
+                batch_op.create_index("ix_api_keys_environment", ["environment"])
+
     if dialect_name == "postgresql":
         op.execute("""
         CREATE OR REPLACE FUNCTION prevent_verification_evidence_tampering()

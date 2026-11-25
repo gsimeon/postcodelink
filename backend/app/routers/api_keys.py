@@ -2,7 +2,7 @@
 import secrets
 import hashlib
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional
+from typing import List, Optional, Literal
 from fastapi import APIRouter, Depends, HTTPException, status, Header
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
@@ -24,6 +24,10 @@ class CreateApiKeyRequest(BaseModel):
         min_length=1,
         max_length=100,
         description="Descriptive name for the API key (1-100 characters)",
+    )
+    environment: Literal["test", "live"] = Field(
+        default="live",
+        description="Developer key environment: 'test' (pl_test_) or 'live' (pl_live_)",
     )
     monthly_quota: int = Field(
         default=10000,
@@ -50,6 +54,7 @@ class CreateApiKeyRequest(BaseModel):
 class ApiKeyResponse(BaseModel):
     id: str
     name: str
+    environment: str = "live"
     key_prefix: str
     monthly_quota: int
     current_period: str
@@ -159,7 +164,8 @@ def api_create_api_key(
 ):
     """Generate a new secure API key with prefix indexing and monthly request quota."""
     raw_token = secrets.token_urlsafe(32)
-    raw_key = f"pl_live_{raw_token}"
+    env = req.environment
+    raw_key = f"pl_{env}_{raw_token}"
     prefix = raw_key[:12]
     hashed = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
@@ -169,6 +175,7 @@ def api_create_api_key(
     key_obj = ApiKey(
         merchant_id=current_user.id,
         name=req.name,
+        environment=env,
         key_prefix=prefix,
         hashed_key=hashed,
         monthly_quota=req.monthly_quota,
@@ -187,6 +194,7 @@ def api_create_api_key(
     resp_dict = {
         "id": key_obj.id,
         "name": key_obj.name,
+        "environment": key_obj.environment,
         "key_prefix": key_obj.key_prefix,
         "monthly_quota": key_obj.monthly_quota,
         "current_period": key_obj.current_period,
@@ -238,9 +246,10 @@ def api_rotate_api_key(
 
     old_key = db.query(ApiKey).filter(ApiKey.id == key_id).first()
 
-    # Generate fresh key
+    # Generate fresh key preserving environment (pl_test_ or pl_live_)
+    env = getattr(old_key, "environment", "live") or "live"
     raw_token = secrets.token_urlsafe(32)
-    raw_key = f"pl_live_{raw_token}"
+    raw_key = f"pl_{env}_{raw_token}"
     prefix = raw_key[:12]
     hashed = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
@@ -252,6 +261,7 @@ def api_rotate_api_key(
     new_key = ApiKey(
         merchant_id=current_user.id,
         name=f"{old_key.name} (Rotated)",
+        environment=env,
         key_prefix=prefix,
         hashed_key=hashed,
         monthly_quota=old_key.monthly_quota,
@@ -270,6 +280,7 @@ def api_rotate_api_key(
     resp_dict = {
         "id": new_key.id,
         "name": new_key.name,
+        "environment": new_key.environment,
         "key_prefix": new_key.key_prefix,
         "monthly_quota": new_key.monthly_quota,
         "current_period": new_key.current_period,

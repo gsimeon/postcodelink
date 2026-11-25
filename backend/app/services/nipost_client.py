@@ -63,6 +63,7 @@ class NIPOSTClient:
         timeout: Optional[float] = None,
         transport: Optional[httpx.BaseTransport] = None,
         lookup_path: Optional[str] = None,
+        validate_path: Optional[str] = None,
         auth_scheme: Optional[str] = None,
         query_param: Optional[str] = None,
     ):
@@ -72,6 +73,7 @@ class NIPOSTClient:
         self.timeout = timeout or getattr(settings, "NIPOST_TIMEOUT_SECONDS", 5.0)
         self.transport = transport
         self.lookup_path = lookup_path or getattr(settings, "NIPOST_LOOKUP_PATH", "/v1/lookup")
+        self.validate_path = (validate_path if validate_path is not None else getattr(settings, "NIPOST_VALIDATE_PATH", "")).strip()
         raw_scheme = (auth_scheme or getattr(settings, "NIPOST_AUTH_SCHEME", "x-api-key")).lower().strip()
         supported_schemes = {"bearer", "api_key", "x-api-key", "api_key_header", "both", "none"}
         if raw_scheme not in supported_schemes:
@@ -211,7 +213,7 @@ class NIPOSTClient:
             }
         probe_path = getattr(settings, "NIPOST_HEALTH_PATH", "/v1/assembly/assemble").strip().lstrip("/")
         probe_url = f"{self.base_url}/{probe_path}"
-        sample_segments = {"state": "EK", "lga": "01", "district": "A03", "area": "FK", "building_unit": "01"}
+        sample_segments = {"state": "EK", "lga": "01", "district": "A03", "area": "FK", "unit": "01"}
         try:
             with httpx.Client(transport=self.transport, timeout=min(self.timeout, 3.0)) as http_client:
                 resp = http_client.post(
@@ -660,7 +662,7 @@ class NIPOSTClient:
             )
 
         clean_code = code.strip().upper()
-        path = getattr(settings, "NIPOST_VALIDATE_PATH", "/v1/validate").strip().lstrip("/")
+        path = (self.validate_path or "/v1/validate").strip().lstrip("/")
         url = f"{self.base_url}/{path}"
         params = {"code": clean_code}
 
@@ -774,30 +776,40 @@ class NIPOSTClient:
                 "failed",
             )
 
-        # Stage 1: Existence check via Validator
-        val_res = self.validate_postcode(clean_code)
+        # Stage 1: Existence check via Validator (only if NIPOST_VALIDATE_PATH is configured)
+        if self.validate_path:
+            val_res = self.validate_postcode(clean_code)
 
-        # Fail closed immediately if Stage 1 does not return FOUND
-        if val_res.status != NIPOSTLookupStatus.FOUND:
-            ret_data = val_res.data if val_res.status == NIPOSTLookupStatus.INVALID_INPUT else None
-            return val_res.status, ret_data, val_res.error_message, "validator"
+            # Fail closed immediately if Stage 1 does not return FOUND
+            if val_res.status != NIPOSTLookupStatus.FOUND:
+                ret_data = val_res.data if val_res.status == NIPOSTLookupStatus.INVALID_INPUT else None
+                return val_res.status, ret_data, val_res.error_message, "validator"
 
-        # Stage 2: Metadata retrieval via Autofill (ONLY invoked after Validator confirms existence)
+            # Stage 2: Metadata retrieval via Autofill (ONLY invoked after Validator confirms existence)
+            lookup_res = self.lookup_postcode(clean_code)
+            if lookup_res.status == NIPOSTLookupStatus.FOUND and lookup_res.data:
+                data = dict(lookup_res.data)
+                if data.get("area") and data.get("state"):
+                    data["service"] = "autofill"
+                    data["verification_method"] = "validator_autofill_pipeline"
+                    return NIPOSTLookupStatus.FOUND, data, None, "validator_autofill_pipeline"
+
+            # Validator confirmed existence, but Autofill did not return complete metadata -> Partial Verification
+            data = dict(val_res.data or {"code": clean_code})
+            data["service"] = "validator"
+            data["verification_method"] = "validator"
+            data["valid"] = True
+            return NIPOSTLookupStatus.FOUND, data, None, "validator"
+
+        # Unified /v1/lookup contract (e.g. api.postcode.gov.ng where /v1/validate is not separate)
         lookup_res = self.lookup_postcode(clean_code)
-
-        if lookup_res.status == NIPOSTLookupStatus.FOUND and lookup_res.data:
-            data = dict(lookup_res.data)
-            if data.get("area") and data.get("state"):
-                data["service"] = "autofill"
-                data["verification_method"] = "validator_autofill_pipeline"
-                return NIPOSTLookupStatus.FOUND, data, None, "validator_autofill_pipeline"
-
-        # Validator confirmed existence, but Autofill did not return complete metadata -> Partial Verification
-        data = dict(val_res.data or {"code": clean_code})
-        data["service"] = "validator"
-        data["verification_method"] = "validator"
-        data["valid"] = True
-        return NIPOSTLookupStatus.FOUND, data, None, "validator"
+        if lookup_res.status != NIPOSTLookupStatus.FOUND or not lookup_res.data:
+            ret_data = lookup_res.data if lookup_res.status == NIPOSTLookupStatus.INVALID_INPUT else None
+            return lookup_res.status, ret_data, lookup_res.error_message, "validator_autofill_pipeline"
+        data = dict(lookup_res.data)
+        data["service"] = "autofill"
+        data["verification_method"] = "validator_autofill_pipeline"
+        return NIPOSTLookupStatus.FOUND, data, None, "validator_autofill_pipeline"
 
 
     def validate_address(

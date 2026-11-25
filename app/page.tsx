@@ -45,6 +45,7 @@ import { DeliveriesTab } from "@/components/DeliveriesTab";
 import { DispatchMapTab } from "@/components/DispatchMapTab";
 import { TrackingPortalTab } from "@/components/TrackingPortalTab";
 import { PostcodeLookupTab } from "@/components/PostcodeLookupTab";
+import { DeveloperConsoleTab } from "@/components/DeveloperConsoleTab";
 import { OperatorsTab } from "@/components/OperatorsTab";
 import { CustomersTab } from "@/components/CustomersTab";
 import { AnalyticsTab } from "@/components/AnalyticsTab";
@@ -700,6 +701,8 @@ export default function Home() {
               onStartDeliveryWithAddress={handleStartDeliveryWithAddress}
             />
           )}
+
+          {activeTab === "developer" && <DeveloperConsoleTab />}
 
           {activeTab === "operators" && (
             <OperatorsTab

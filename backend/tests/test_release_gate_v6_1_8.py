@@ -909,3 +909,123 @@ def test_nipost_sandbox_test_key_never_classified_as_production_official():
         db.close()
 
 
+def test_api_keys_support_test_and_live_environments_and_preserve_on_rotate():
+    """Verify P2 developer environments: pl_test_ vs pl_live_ prefixes and preservation on rotate."""
+    from fastapi.testclient import TestClient
+    from backend.app.main import app
+    from backend.app.database import SessionLocal
+    from backend.app.core.security import create_access_token
+
+    test_client = TestClient(app)
+    db = SessionLocal()
+    try:
+        merchant_id = str(uuid.uuid4())
+        merchant = Profile(
+            id=merchant_id,
+            full_name="Dev Console Merchant",
+            phone=f"+23480{str(uuid.UUID(merchant_id).int)[:8]}",
+            email=f"dev-{merchant_id[:8]}@example.com",
+            hashed_password="test_hashed_password",
+            role=AppRole.MERCHANT,
+        )
+        db.add(merchant)
+        db.commit()
+
+        token = create_access_token({"sub": str(merchant.id), "role": AppRole.MERCHANT.value})
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # Create a test key
+        res_test = test_client.post(
+            "/api/v1/api-keys/",
+            headers=headers,
+            json={"name": "Sandbox CI Key", "monthly_quota": 500, "environment": "test"},
+        )
+        assert res_test.status_code == 201
+        test_data = res_test.json()
+        assert test_data["environment"] == "test"
+        assert test_data["api_key"].startswith("pl_test_")
+        assert test_data["key_prefix"].startswith("pl_test_")
+
+        # Create a live key
+        res_live = test_client.post(
+            "/api/v1/api-keys/",
+            headers=headers,
+            json={"name": "Production Key", "monthly_quota": 5000, "environment": "live"},
+        )
+        assert res_live.status_code == 201
+        live_data = res_live.json()
+        assert live_data["environment"] == "live"
+        assert live_data["api_key"].startswith("pl_live_")
+
+        # Rotate the test key -> must preserve environment="test" and pl_test_ prefix
+        res_rot = test_client.post(
+            f"/api/v1/api-keys/{test_data['id']}/rotate",
+            headers=headers,
+        )
+        assert res_rot.status_code == 201
+        rot_data = res_rot.json()
+        assert rot_data["environment"] == "test"
+        assert rot_data["api_key"].startswith("pl_test_")
+        assert rot_data["api_key"] != test_data["api_key"]
+
+        # List keys includes environment metadata
+        res_list = test_client.get("/api/v1/api-keys/", headers=headers)
+        assert res_list.status_code == 200
+        envs = {k["id"]: k["environment"] for k in res_list.json()}
+        assert envs[rot_data["id"]] == "test"
+        assert envs[live_data["id"]] == "live"
+    finally:
+        db.close()
+
+
+def test_nipost_client_unified_lookup_and_assembly_unit_contract():
+    """Verify P1 live NIPOST contract: unified /v1/lookup when validate_path='' and 'unit' in assembly."""
+    import json
+    import httpx
+    from backend.app.services.nipost_client import NIPOSTClient, NIPOSTLookupStatus
+
+    seen_requests: list[tuple[str, str, dict | None]] = []
+
+    def unified_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode()) if request.content else None
+        seen_requests.append((request.method, str(request.url), body))
+        if "/v1/assembly/assemble" in str(request.url):
+            assert body is not None and "unit" in body and "building_unit" not in body
+            return httpx.Response(
+                200,
+                json={"data": {"compact": "EK01A03FK01", "display": "EK 01 A03 FK 01", "postcode": "EK-01-A03-FK-01"}},
+            )
+        if "/v1/lookup" in str(request.url):
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "postcode": "EK-01-A03-FK-01",
+                        "valid": True,
+                        "status": "valid",
+                        "verified": True,
+                        "administrative_address": {"state_name": "Ekiti", "lga_name": "Ado-Ekiti", "locality_name": "Fajuyi"},
+                    }
+                },
+            )
+        return httpx.Response(404, text="404 page not found")
+
+    client_unified = NIPOSTClient(
+        base_url="https://api.postcode.gov.ng",
+        api_key="nipost_test_contract_check",
+        validate_path="",
+        transport=httpx.MockTransport(unified_handler),
+    )
+
+    health = client_unified.check_health()
+    assert health["healthy"] is True
+    assert client_unified._last_contract_verified is True
+
+    status, data, err, method = client_unified.orchestrated_verify("EK-01-A03-FK-01")
+    assert status == NIPOSTLookupStatus.FOUND
+    assert err is None
+    assert data is not None and data["valid"] is True
+    assert method == "validator_autofill_pipeline"
+    assert not any("/v1/validate" in url for _, url, _ in seen_requests)
+
+
