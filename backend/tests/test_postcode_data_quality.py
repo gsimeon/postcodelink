@@ -59,6 +59,14 @@ def test_no_unexplained_coordinate_duplication():
             )
 
 
+def test_101241_and_105102_reconciled_distinct():
+    r_101241 = next((r for r in LEGACY_POSTAL_REFERENCES if r["code"] == "101241"), None)
+    r_105102 = next((r for r in LEGACY_POSTAL_REFERENCES if r["code"] == "105102"), None)
+    assert r_101241 is not None and r_105102 is not None
+    assert r_101241["area"] != r_105102["area"]
+    assert (r_101241["lat"], r_101241["lng"]) != (r_105102["lat"], r_105102["lng"])
+
+
 def test_dataset_metadata_completeness():
     assert DATASET_METADATA.get("version")
     assert DATASET_METADATA.get("publication_date")

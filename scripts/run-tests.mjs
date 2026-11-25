@@ -415,6 +415,8 @@ test('Delivery Status Mapping: bi-directional mapping preserves all states inclu
   // Ensure lib/state-machine.ts itself fails closed on unknown backend statuses
   const smSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'state-machine.ts'), 'utf8');
   assert.ok(smSource.includes('Unsupported backend delivery status'), 'lib/state-machine.ts must throw on unknown backend status');
+  assert.ok(smSource.includes('Unsupported postcode status'), 'lib/state-machine.ts must throw on unknown postcode status');
+  assert.ok(smSource.includes('Unsupported actor role'), 'lib/state-machine.ts must throw on unknown actor role');
   assert.ok(!smSource.includes("default:\n      return 'draft'") && !smSource.includes("default:\r\n      return 'draft'"), 'lib/state-machine.ts must not fall back to draft');
 });
 

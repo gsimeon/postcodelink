@@ -55,7 +55,7 @@ LEGACY_POSTAL_REFERENCES: List[Dict[str, Any]] = [
     {"code": "101241", "area": "Lekki Phase 1", "state": "Lagos", "lga": "Eti-Osa", "lat": 6.4474, "lng": 3.4723},
     {"code": "101233", "area": "Victoria Island (VI)", "state": "Lagos", "lga": "Eti-Osa", "lat": 6.4281, "lng": 3.4219},
     {"code": "101245", "area": "Ikoyi / Banana Island", "state": "Lagos", "lga": "Eti-Osa", "lat": 6.4549, "lng": 3.4357},
-    {"code": "105102", "area": "Lekki Phase 1", "state": "Lagos", "lga": "Eti-Osa", "lat": 6.4474, "lng": 3.4723},
+    {"code": "105102", "area": "Lekki Phase 1 (Admiralty Corridor)", "state": "Lagos", "lga": "Eti-Osa", "lat": 6.4492, "lng": 3.4810},
     {"code": "105101", "area": "Chevron / Lekki Phase 2 / Ajah", "state": "Lagos", "lga": "Eti-Osa", "lat": 6.4382, "lng": 3.5321},
     {"code": "101212", "area": "Yaba / Sabo Tech Hub", "state": "Lagos", "lga": "Lagos Mainland", "lat": 6.5095, "lng": 3.3711},
     {"code": "101283", "area": "Surulere / Bode Thomas", "state": "Lagos", "lga": "Surulere", "lat": 6.4969, "lng": 3.3533},
@@ -231,7 +231,7 @@ LEGACY_POSTAL_REFERENCES: List[Dict[str, Any]] = [
     },
 ]
 
-# Backward-compatible alias for existing imports
+# Deprecated backward-compatible alias; use LEGACY_POSTAL_REFERENCES (local pilot records are not NIPOST-verified)
 OFFICIAL_POSTCODES = LEGACY_POSTAL_REFERENCES
 
 

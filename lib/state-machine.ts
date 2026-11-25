@@ -1,4 +1,4 @@
-import { DeliveryStatus } from './types';
+import { DeliveryEvent, DeliveryStatus, PostcodeStatus } from './types';
 
 /**
  * Valid state transitions for PostcodeLink delivery lifecycle:
@@ -95,6 +95,37 @@ export function mapBackendToFrontendStatus(apiStatus: string): DeliveryStatus {
       return 'failed';
     default:
       throw new Error(`Unsupported backend delivery status: ${apiStatus}`);
+  }
+}
+
+export function mapPostcodeStatus(raw: string | null | undefined): PostcodeStatus {
+  switch ((raw || 'unverified').toLowerCase()) {
+    case 'verified':
+      return 'verified';
+    case 'unverified':
+      return 'unverified';
+    case 'unavailable':
+      return 'unavailable';
+    case 'invalid':
+      return 'invalid';
+    default:
+      throw new Error(`Unsupported postcode status: ${raw}`);
+  }
+}
+
+export function mapActorRole(raw: string | null | undefined): DeliveryEvent['actorRole'] {
+  switch ((raw || 'merchant').toLowerCase()) {
+    case 'merchant':
+      return 'merchant';
+    case 'operator':
+      return 'operator';
+    case 'rider':
+      return 'rider';
+    case 'system':
+    case 'admin':
+      return 'system';
+    default:
+      throw new Error(`Unsupported actor role: ${raw}`);
   }
 }
 
