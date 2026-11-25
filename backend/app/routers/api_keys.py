@@ -54,7 +54,7 @@ class CreateApiKeyRequest(BaseModel):
 class ApiKeyResponse(BaseModel):
     id: str
     name: str
-    environment: str = "live"
+    environment: str = "unclassified"
     key_prefix: str
     monthly_quota: int
     current_period: str
@@ -154,8 +154,15 @@ def get_api_key_merchant(
             detail=f"Monthly API key quota of {key_record.monthly_quota} requests exceeded for period {now_period}.",
         )
 
+    key_env = getattr(key_record, "environment", None) or "unclassified"
+    if key_env not in ("test", "live"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="API key has an unclassified environment and cannot authenticate. Rotate or issue a pl_test_ or authorized pl_live_ key.",
+        )
+
     if request is not None:
-        request.state.api_key_environment = getattr(key_record, "environment", "live") or "live"
+        request.state.api_key_environment = key_env
         request.state.api_key_id = key_record.id
     return key_record.merchant
 

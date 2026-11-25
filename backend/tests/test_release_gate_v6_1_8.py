@@ -1385,6 +1385,54 @@ def test_alembic_api_key_migration_classifies_existing_keys_safely(tmp_path):
         assert rows["k_ambig"] == ("unclassified", 0)
 
 
+def test_unclassified_api_key_rejected_at_authentication_boundary():
+    """Verify unclassified API keys are rejected with 403 at get_api_key_merchant even if marked active."""
+    from fastapi.testclient import TestClient
+    from backend.app.main import app
+    from backend.app.database import SessionLocal
+    from backend.app.models.api_key import ApiKey
+    import hashlib
+
+    test_client = TestClient(app)
+    db = SessionLocal()
+    try:
+        m_id = str(uuid.uuid4())
+        db.add(
+            Profile(
+                id=m_id,
+                full_name="Unclassified Key Merchant",
+                phone=f"+23480{str(uuid.UUID(m_id).int)[:8]}",
+                email=f"unclass-{m_id[:8]}@example.com",
+                hashed_password="pw",
+                role=AppRole.MERCHANT,
+            )
+        )
+        raw_unclass = f"pkl_legacy_{uuid.uuid4().hex}"
+        db.add(
+            ApiKey(
+                merchant_id=m_id,
+                name="Active Unclassified Legacy Key",
+                environment="unclassified",
+                key_prefix=raw_unclass[:12],
+                hashed_key=hashlib.sha256(raw_unclass.encode()).hexdigest(),
+                monthly_quota=100,
+                current_period=datetime.now(timezone.utc).strftime("%Y-%m"),
+                is_active=True,
+                is_revoked=False,
+            )
+        )
+        db.commit()
+
+        res = test_client.get(
+            "/api/v1/postcodes/commercial/lookup?state=Lagos",
+            headers={"x-api-key": raw_unclass},
+        )
+        assert res.status_code == 403
+        assert "unclassified" in res.json()["detail"].lower()
+    finally:
+        db.close()
+
+
 def test_commercial_authorization_expiry_revocation_and_production_health_gate():
     """Verify expired/revoked commercial auth fails closed and detailed health endpoints require ADMIN in production."""
     from fastapi.testclient import TestClient

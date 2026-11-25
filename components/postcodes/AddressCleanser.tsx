@@ -57,7 +57,7 @@ export const AddressCleanser: React.FC<AddressCleanserProps> = ({
           Address Standardisation & NIPOST Verification
         </h2>
         <p style={{ margin: "4px 0 0", fontSize: "12px", color: "#64748b" }}>
-          Cleanse, normalise, and verify Nigerian delivery addresses against official national postcode infrastructure.
+          Cleanse and normalise Nigerian delivery addresses, and attempt official verification when an authorised NIPOST connection is configured.
         </p>
       </div>
 
