@@ -24,7 +24,7 @@ export const CoverageDashboard: React.FC<CoverageDashboardProps> = ({
             Postcode Coverage & Data Quality
           </h2>
           <p style={{ margin: "4px 0 0", fontSize: "12px", color: "#64748b" }}>
-            Coverage across Nigeria&apos;s 36 states + FCT (37 total), dataset freshness, and upstream gateway status.
+            Explore the currently available postcode dataset, its geographic coverage, data sources, verification levels and freshness. Coverage figures reflect the records currently available, not national completeness.
           </p>
         </div>
         <button
@@ -103,10 +103,9 @@ export const CoverageDashboard: React.FC<CoverageDashboardProps> = ({
                 STATES COVERED
               </div>
               <div style={{ fontSize: "24px", fontWeight: 800, color: "#0f172a", marginTop: "4px" }}>
-                {coverageReport.scope_states_count}{" "}
-                <span style={{ fontSize: "14px", fontWeight: 600, color: "#64748b" }}>/ 37</span>
+                {coverageReport.scope_states_count}
               </div>
-              <small style={{ fontSize: "11px", color: "#64748b" }}>Active regional directories</small>
+              <small style={{ fontSize: "11px", color: "#64748b" }}>States in loaded dataset</small>
             </div>
 
             <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "8px", padding: "16px" }}>

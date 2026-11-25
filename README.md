@@ -15,7 +15,7 @@ PostcodeLink bridges the gap between unstructured customer addresses (often desc
 
 ## Strategic Product Architecture & Modularity
 
-PostcodeLink is architected as two decoupled, enterprise-ready product modules sharing a unified digital address intelligence foundation:
+PostcodeLink is architected as three product domains within a modular application sharing one postcode intelligence foundation:
 
 ```mermaid
 graph TD
@@ -94,7 +94,7 @@ To prevent fabricated test fixtures or local reference data from being misrepres
 | **Dispatch Topology Map** | **Experimental / Simulated** | Simulated hub topology; hardware GPS telemetry is not connected. |
 | **Developer Console UI** | **Shipped (Preview)** | Self-service `pl_test_` / `pl_live_` key creation, rotation, revocation & quota progress (`pl_live_` gated on commercial authorization). |
 | **Webhooks, Usage History & Bulk CSV Postcode Validation** | **Planned** | Deferred pending NIPOST commercial authorization and customer demand. |
-| **Legacy 6-Digit Postal Codes** | Traditional regional sorting codes (e.g. `100001` Lagos Island, `900001` Garki Abuja). | `local_match` (or `verified` when verified upstream) | Regional routing (`[1-9]\d{5}`) |
+| **Legacy 6-Digit Postal Codes** | Traditional regional sorting codes (e.g. `100001` Ikeja Central / Alausa, `900001` Garki Abuja). | `local_match` (or `verified` when verified upstream) | Regional routing (`[1-9]\d{5}`) |
 | **Demonstration Reference Fixtures** | Sample 11-character format demonstration codes (e.g. `FC-02-A09-DB-09`, `LA-01-A04-IK-02`). | `local_reference` (`postcode_status: "local_match"`) | `source_type: "demonstration_fixture"`, `source_owner: "PostcodeLink"` |
 
 ### 2. Verification Mode Precedence & Validation Matrix
@@ -508,9 +508,7 @@ Interactive OpenAPI documentation is live at **`http://127.0.0.1:8000/docs`** an
 - **ORM & Data Layer**: SQLAlchemy 2.0 (SQLite / PostgreSQL compatible)
 - **Data Validation**: Pydantic v2, Pydantic-Settings
 - **Testing**: Node Test Runner (Frontend/Lib) & Pytest (FastAPI endpoints)
-- **Database Schema**: Supabase PostgreSQL migration ready in `supabase/migrations/`
-  - `0001_initial_schema.sql` (Tables & Types)
-  - `0002_role_based_rls_policies.sql` (Role-based RLS Policies)
+- **Database Schema**: SQLAlchemy + Alembic (`backend/alembic/`) is the active schema authority (`supabase/migrations/` is retained as historical DDL reference only).
 
 ---
 
@@ -557,7 +555,7 @@ Interactive OpenAPI documentation is live at **`http://127.0.0.1:8000/docs`** an
    # Or: backend/venv/Scripts/python -m backend.app.seed
    ```
 
-3. Run FastAPI automated security & API test suite (188/188 tests passing across PostgreSQL & SQLite):
+3. Run FastAPI automated security & API test suite (320+ automated tests passing across PostgreSQL & SQLite):
    ```bash
    npm run backend:test
    # Or: backend/venv/Scripts/python -m pytest backend/tests -v

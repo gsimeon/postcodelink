@@ -1,6 +1,7 @@
 """Dedicated regression tests for API-key environment migration & auth ordering."""
 from datetime import datetime, timezone
 import hashlib
+import os
 import sqlite3
 import uuid
 from unittest.mock import patch
@@ -8,6 +9,9 @@ from unittest.mock import patch
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
+import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine.url import make_url
 
 from backend.app.config import settings
 from backend.app.core.security import create_access_token
@@ -85,6 +89,94 @@ def test_api_key_environment_migration_exact_prefixes_and_idempotency(tmp_path):
         conn.close()
 
     assert rows_after == rows
+
+
+def test_api_key_environment_migration_exact_prefixes_postgres():
+    """Verify exact SUBSTR prefix classification, quarantine, and idempotency on PostgreSQL when configured."""
+    base_db_url = os.getenv("DATABASE_URL", "")
+    if not base_db_url.startswith("postgresql"):
+        pytest.skip("PostgreSQL DATABASE_URL not configured")
+
+    parsed = make_url(base_db_url)
+    admin_url = parsed.set(database="postgres")
+    test_db_name = f"postcodelink_key_mig_{uuid.uuid4().hex[:8]}"
+    test_db_url = parsed.set(database=test_db_name).render_as_string(hide_password=False)
+
+    admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
+    with admin_engine.connect() as conn:
+        conn.execute(text(f'CREATE DATABASE "{test_db_name}"'))
+
+    try:
+        cfg = Config("alembic.ini")
+        cfg.set_main_option("sqlalchemy.url", test_db_url)
+        with patch.object(settings, "DATABASE_URL", test_db_url):
+            command.upgrade(cfg, "c3d4e5f6a7b8")
+
+            test_engine = create_engine(test_db_url)
+            try:
+                with test_engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            "INSERT INTO profiles (id, full_name, role, email, hashed_password, created_at, updated_at) "
+                            "VALUES ('m_mig_pg', 'PG Migration Merchant', 'MERCHANT', 'mig-pg@test.ng', 'pw', NOW(), NOW())"
+                        )
+                    )
+                    cases = [
+                        ("k_test", "pl_test_abc123", "h_test"),
+                        ("k_live", "pl_live_abc123", "h_live"),
+                        ("k_other", "pl_other_abc123", "h_other"),
+                        ("k_xtest", "plXtest_abc123", "h_xtest"),
+                        ("k_xlive", "plXlive_abc123", "h_xlive"),
+                        ("k_unknown", "unknown_abc123", "h_unknown"),
+                        ("k_empty", "", "h_empty"),
+                    ]
+                    for key_id, prefix, hashed in cases:
+                        conn.execute(
+                            text(
+                                "INSERT INTO api_keys "
+                                "(id, merchant_id, name, key_prefix, hashed_key, monthly_quota, current_period, "
+                                "period_usage_count, usage_count, rate_limit_per_minute, is_active, is_revoked, created_at) "
+                                "VALUES (:id, 'm_mig_pg', :name, :prefix, :hashed, 100, '2026-11', 0, 0, 60, TRUE, FALSE, NOW())"
+                            ),
+                            {"id": key_id, "name": f"Key {key_id}", "prefix": prefix, "hashed": hashed},
+                        )
+
+                command.upgrade(cfg, "d4e5f6a7b8c9")
+
+                with test_engine.connect() as conn:
+                    rows = {
+                        r[0]: (r[1], bool(r[2]))
+                        for r in conn.execute(text("SELECT id, environment, is_active FROM api_keys"))
+                    }
+
+                assert rows["k_test"] == ("test", True)
+                assert rows["k_live"] == ("live", True)
+                assert rows["k_other"] == ("unclassified", False)
+                assert rows["k_xtest"] == ("unclassified", False)
+                assert rows["k_xlive"] == ("unclassified", False)
+                assert rows["k_unknown"] == ("unclassified", False)
+                assert rows["k_empty"] == ("unclassified", False)
+
+                command.upgrade(cfg, "head")
+                with test_engine.connect() as conn:
+                    rows_after = {
+                        r[0]: (r[1], bool(r[2]))
+                        for r in conn.execute(text("SELECT id, environment, is_active FROM api_keys"))
+                    }
+                assert rows_after == rows
+            finally:
+                test_engine.dispose()
+    finally:
+        with admin_engine.connect() as conn:
+            conn.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = :db AND pid <> pg_backend_pid()"
+                ),
+                {"db": test_db_name},
+            )
+            conn.execute(text(f'DROP DATABASE IF EXISTS "{test_db_name}"'))
+        admin_engine.dispose()
 
 
 def test_quarantined_and_unclassified_keys_auth_quota_and_rotation():
