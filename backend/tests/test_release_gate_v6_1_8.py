@@ -1439,6 +1439,13 @@ def test_unclassified_api_key_rejected_at_authentication_boundary():
         )
         assert res.status_code == 403
         assert "unclassified" in res.json()["detail"].lower()
+
+        db.expire_all()
+        key_after = db.query(ApiKey).filter(ApiKey.merchant_id == m_id).first()
+        assert key_after is not None
+        assert key_after.period_usage_count == 0
+        assert key_after.usage_count == 0
+        assert key_after.last_used_at is None
     finally:
         db.close()
 

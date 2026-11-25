@@ -98,6 +98,13 @@ def get_api_key_merchant(
             headers={"WWW-Authenticate": "ApiKey"},
         )
 
+    key_env = getattr(key_record, "environment", None) or "unclassified"
+    if key_env not in ("test", "live"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="API key has an unclassified environment and cannot authenticate. Rotate or issue a pl_test_ or authorized pl_live_ key.",
+        )
+
     now = datetime.now(timezone.utc)
     if key_record.expires_at:
         exp = key_record.expires_at
@@ -152,13 +159,6 @@ def get_api_key_merchant(
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Monthly API key quota of {key_record.monthly_quota} requests exceeded for period {now_period}.",
-        )
-
-    key_env = getattr(key_record, "environment", None) or "unclassified"
-    if key_env not in ("test", "live"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="API key has an unclassified environment and cannot authenticate. Rotate or issue a pl_test_ or authorized pl_live_ key.",
         )
 
     if request is not None:
