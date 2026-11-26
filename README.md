@@ -9,7 +9,7 @@ PostcodeLink bridges the gap between unstructured customer addresses (often desc
 2. **Address Verification & Cleansing**: Algorithmic landmark extraction, administrative entity normalization (State, LGA, District, Ward), and structured address standardisation.
 3. **Building-Level Digital Postcode Disambiguation**: Strict structural validation and component decomposition of the 5-component national standard (`SS-LL-DDD-AA-BB`: State, LGA, District, Area, Building Unit).
 4. **Developer API & Enterprise Platform**: REST API with API-key authentication, monthly tiered quota metering, anti-spoofing sliding-window rate limiting (webhook integration is **Planned**).
-5. **Last-Mile Logistics & Dispatch Module**: Integrated downstream operational module providing merchant dispatch queues, courier fleet assignment, rider manifests, live radar dispatch tracking, and tamper-evident 6-digit PIN Proof-of-Delivery (POD).
+5. **Last-Mile Logistics & Dispatch Module**: Integrated downstream operational module providing merchant dispatch queues, courier fleet assignment, rider manifests, live order-status tracking, a simulated dispatch topology radar (no live hardware GPS telemetry), and tamper-evident 6-digit PIN Proof-of-Delivery (POD).
 
 ---
 
@@ -39,7 +39,7 @@ graph TD
 
     subgraph Domain3 [Domain 3: Last-Mile Logistics Operations]
         ORDER_DISP[Durable Outbox Dispatch & Fleet Assignment]
-        COURIER_APP[Rider Manifest, Waybills & Live Dispatch Radar]
+        COURIER_APP[Rider Manifest, Waybills & Simulated Dispatch Radar]
         POD[6-Digit OTP Proof-of-Delivery Verification]
     end
 
