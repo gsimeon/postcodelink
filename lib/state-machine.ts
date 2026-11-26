@@ -1,4 +1,4 @@
-import { DeliveryStatus } from './types';
+import { DeliveryEvent, DeliveryStatus, PostcodeStatus } from './types';
 
 /**
  * Valid state transitions for PostcodeLink delivery lifecycle:
@@ -49,4 +49,84 @@ export function validateStateTransition(
 
   return { valid: true };
 }
+
+export function mapFrontendToBackendStatus(status: DeliveryStatus): string {
+  switch (status) {
+    case 'pending':
+    case 'pending_assignment':
+    case 'draft':
+      return 'pending';
+    case 'assigned':
+      return 'assigned';
+    case 'picked_up':
+      return 'picked_up';
+    case 'in_transit':
+      return 'in_transit';
+    case 'out_for_delivery':
+      return 'out_for_delivery';
+    case 'delivered':
+      return 'delivered';
+    case 'cancelled':
+      return 'cancelled';
+    case 'failed':
+      return 'failed';
+    default:
+      throw new Error(`Unsupported delivery status: ${status}`);
+  }
+}
+
+export function mapBackendToFrontendStatus(apiStatus: string): DeliveryStatus {
+  switch (apiStatus) {
+    case 'pending':
+      return 'pending_assignment';
+    case 'assigned':
+      return 'assigned';
+    case 'picked_up':
+      return 'picked_up';
+    case 'in_transit':
+      return 'in_transit';
+    case 'out_for_delivery':
+      return 'out_for_delivery';
+    case 'delivered':
+      return 'delivered';
+    case 'cancelled':
+      return 'cancelled';
+    case 'failed':
+      return 'failed';
+    default:
+      throw new Error(`Unsupported backend delivery status: ${apiStatus}`);
+  }
+}
+
+export function mapPostcodeStatus(raw: string | null | undefined): PostcodeStatus {
+  switch ((raw || 'unverified').toLowerCase()) {
+    case 'verified':
+      return 'verified';
+    case 'unverified':
+      return 'unverified';
+    case 'unavailable':
+      return 'unavailable';
+    case 'invalid':
+      return 'invalid';
+    default:
+      throw new Error(`Unsupported postcode status: ${raw}`);
+  }
+}
+
+export function mapActorRole(raw: string | null | undefined): DeliveryEvent['actorRole'] {
+  switch ((raw || 'merchant').toLowerCase()) {
+    case 'merchant':
+      return 'merchant';
+    case 'operator':
+      return 'operator';
+    case 'rider':
+      return 'rider';
+    case 'system':
+    case 'admin':
+      return 'system';
+    default:
+      throw new Error(`Unsupported actor role: ${raw}`);
+  }
+}
+
 

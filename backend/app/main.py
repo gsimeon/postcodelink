@@ -2,13 +2,16 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from backend.app.config import settings
 from backend.app.database import engine, Base, get_db
+from backend.app.core.auth_deps import require_roles
+from backend.app.models.enums import AppRole
 from backend.app.seed import seed_database
 from backend.app.workers.outbox_worker import run_outbox_worker_loop
 from backend.app.routers import (
@@ -27,13 +30,14 @@ logger = logging.getLogger("uvicorn")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager running startup database checks, development seeding, and background outbox worker."""
-    if settings.ENVIRONMENT == "production":
+    if settings.ENVIRONMENT in ("production", "staging"):
         logger.info(
-            "Production environment: Skipping automatic DDL. Schema managed strictly via Alembic migrations ('alembic upgrade head')."
+            f"{settings.ENVIRONMENT.capitalize()} environment: Skipping automatic DDL. "
+            "Schema managed strictly via Alembic migrations ('alembic upgrade head')."
         )
         if settings.SEED_DEMO_DATA or settings.SEED_DEMO_ACCOUNTS:
             raise RuntimeError(
-                "Fatal Security Error: SEED_DEMO_DATA and SEED_DEMO_ACCOUNTS cannot be enabled in production environment."
+                f"Fatal Security Error: SEED_DEMO_DATA and SEED_DEMO_ACCOUNTS cannot be enabled in {settings.ENVIRONMENT} environment."
             )
     else:
         logger.info("Development/Test environment: Initializing local tables if not existing...")
@@ -86,6 +90,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def request_correlation_middleware(request, call_next):
+    import time
+    import uuid
+    from backend.app.core.logging_config import reset_request_id, set_request_id
+
+    req_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:16]
+    request.state.request_id = req_id
+    token = set_request_id(req_id)
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+        duration_ms = round((time.perf_counter() - start) * 1000, 2)
+        response.headers["X-Request-ID"] = req_id
+        logger.info(
+            f"http_request method={request.method} path={request.url.path} "
+            f"status={response.status_code} duration_ms={duration_ms}"
+        )
+        return response
+    finally:
+        reset_request_id(token)
+
 # Register routers under /api/v1
 app.include_router(auth.router, prefix=settings.API_V1_STR)
 app.include_router(deliveries.router, prefix=settings.API_V1_STR)
@@ -117,3 +144,357 @@ def health(db: Session = Depends(get_db)):
         "database": "connected",
         "engine": engine.name,
     }
+
+
+@app.get("/health/live", tags=["system"])
+def health_live():
+    """Liveness probe: verifies application process is running."""
+    return {
+        "status": "alive",
+        "service": "PostcodeLink Nigeria API",
+        "version": settings.VERSION,
+        "environment": settings.ENVIRONMENT,
+    }
+
+
+@app.get("/health/ready", tags=["system"])
+def health_ready(db: Session = Depends(get_db)):
+    """Readiness probe: verifies database connectivity and core tables.
+    
+    Returns HTTP 200 when database connectivity succeeds.
+    Returns HTTP 503 Service Unavailable when database check fails, omitting internal stack traces.
+    """
+    try:
+        db.execute(text("SELECT 1"))
+        return {
+            "status": "ready",
+            "database": "connected",
+            "engine": engine.name,
+        }
+    except Exception as e:
+        logger.error(f"Readiness check failed: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "status": "unready",
+                "database": "disconnected",
+                "error": "Database service is unavailable.",
+            },
+        )
+
+
+def _require_admin_in_production(request: Request, db: Session = Depends(get_db)):
+    """Require ADMIN authentication for detailed operational health endpoints in production."""
+    if settings.ENVIRONMENT != "production":
+        return None
+    from backend.app.core.auth_deps import get_current_user, security_bearer
+    auth_header = request.headers.get("authorization")
+    bearer_creds = None
+    if auth_header and auth_header.lower().startswith("bearer "):
+        from fastapi.security import HTTPAuthorizationCredentials
+        bearer_creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=auth_header.split(" ", 1)[1].strip())
+    user = get_current_user(request=request, credentials=bearer_creds, db=db)
+    if user.role != AppRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator role required for detailed operational diagnostics in production.",
+        )
+    return user
+
+
+@app.get("/health/worker", tags=["system"])
+def health_worker(
+    db: Session = Depends(get_db),
+    _admin=Depends(_require_admin_in_production),
+):
+    """Worker monitoring: checks persistent cross-process worker heartbeats, lifecycle states, and queue backlog."""
+    from backend.app.models.notification_outbox import NotificationOutbox
+    from backend.app.models.worker_heartbeat import WorkerHeartbeat
+    from backend.app.services.notification_service import NotificationDeliveryStatus
+    from sqlalchemy import func
+    from datetime import datetime, timezone
+
+    pending_count = db.query(func.count(NotificationOutbox.id)).filter(
+        NotificationOutbox.status.in_([
+            NotificationDeliveryStatus.QUEUED,
+            NotificationDeliveryStatus.FAILED,
+            NotificationDeliveryStatus.DISPATCHING,
+        ])
+    ).scalar() or 0
+
+    reconciliation_count = db.query(func.count(NotificationOutbox.id)).filter(
+        NotificationOutbox.status == NotificationDeliveryStatus.RECONCILIATION_REQUIRED
+    ).scalar() or 0
+
+    now = datetime.now(timezone.utc)
+    threshold = getattr(settings, "OUTBOX_WORKER_HEARTBEAT_THRESHOLD_SECONDS", 120)
+
+    heartbeats = db.query(WorkerHeartbeat).all()
+    active_workers = []
+    stale_workers = []
+    stopped_workers = []
+    latest_hb = None
+    latest_success_process_at = None
+
+    for hb in heartbeats:
+        hb_time = hb.last_heartbeat_at
+        if hb_time.tzinfo is None:
+            hb_time = hb_time.replace(tzinfo=timezone.utc)
+        age = max(0, int((now - hb_time).total_seconds()))
+
+        if latest_hb is None:
+            latest_hb = hb
+        else:
+            latest_time = latest_hb.last_heartbeat_at
+            if latest_time.tzinfo is None:
+                latest_time = latest_time.replace(tzinfo=timezone.utc)
+            if hb_time > latest_time:
+                latest_hb = hb
+
+        if hb.last_successful_process_at:
+            proc_time = hb.last_successful_process_at
+            if proc_time.tzinfo is None:
+                proc_time = proc_time.replace(tzinfo=timezone.utc)
+            if latest_success_process_at is None or proc_time > latest_success_process_at:
+                latest_success_process_at = proc_time
+
+        if hb.status == "stopped":
+            stopped_workers.append({"worker_id": hb.worker_id, "stop_reason": hb.stop_reason})
+        elif age > threshold:
+            stale_workers.append({"worker_id": hb.worker_id, "seconds_since_heartbeat": age})
+        else:
+            active_workers.append({"worker_id": hb.worker_id, "process_id": hb.process_id, "seconds_since_heartbeat": age})
+
+    worker_status = "operational"
+    heartbeat_str = None
+    seconds_since = None
+    worker_pid = None
+    worker_id = None
+
+    if latest_hb:
+        worker_id = latest_hb.worker_id
+        worker_pid = latest_hb.process_id
+        hb_time = latest_hb.last_heartbeat_at
+        if hb_time.tzinfo is None:
+            hb_time = hb_time.replace(tzinfo=timezone.utc)
+        heartbeat_str = hb_time.isoformat()
+        seconds_since = max(0, int((now - hb_time).total_seconds()))
+
+        if seconds_since > threshold or len(stale_workers) > 0:
+            worker_status = "degraded"
+        else:
+            worker_status = "operational"
+    else:
+        worker_status = "idle"
+
+    return {
+        "status": worker_status,
+        "process_role": settings.PROCESS_ROLE,
+        "worker_enabled": settings.OUTBOX_WORKER_ENABLED,
+        "active_worker_id": worker_id,
+        "active_worker_pid": worker_pid,
+        "last_heartbeat": heartbeat_str,
+        "seconds_since_last_heartbeat": seconds_since,
+        "last_successful_process_at": latest_success_process_at.isoformat() if latest_success_process_at else None,
+        "active_workers": active_workers,
+        "stale_workers": stale_workers,
+        "stopped_workers": stopped_workers,
+        "poll_interval_seconds": settings.OUTBOX_WORKER_INTERVAL_SECONDS,
+        "lease_timeout_minutes": settings.OUTBOX_LEASE_TIMEOUT_MINUTES,
+        "outbox_pending_count": pending_count,
+        "outbox_reconciliation_required_count": reconciliation_count,
+        "outbox_backlog": pending_count + reconciliation_count,
+        "reconciliation_alert": reconciliation_count > 0,
+    }
+
+
+@app.get("/health/rate-limiter", tags=["system"])
+def health_rate_limiter(_admin=Depends(_require_admin_in_production)):
+    """Rate limiter monitoring: inspects active backend (Redis vs in-memory), fail-closed policy, and connection health."""
+    from backend.app.core.rate_limiter import get_rate_limiter_status
+    return get_rate_limiter_status()
+
+
+_sms_probe_cache: dict = {}
+
+
+def _probe_sms_gateway(force_probe: bool = False) -> dict:
+    """Return SMS gateway health; only probes external providers when force_probe=True (admin-triggered)."""
+    import httpx
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    provider = settings.SMS_PROVIDER
+    if provider == "simulated":
+        return {
+            "provider": provider,
+            "configured": True,
+            "reachable": True,
+            "authenticated": True,
+            "last_successful_check": now.isoformat(),
+            "last_error_category": None,
+        }
+
+    if provider == "termii":
+        configured = bool(settings.TERMII_API_KEY and settings.TERMII_SENDER_ID)
+    elif provider == "twilio":
+        configured = bool(settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN and settings.TWILIO_FROM_NUMBER)
+    else:
+        configured = False
+
+    if not configured:
+        return {
+            "provider": provider,
+            "configured": False,
+            "reachable": False,
+            "authenticated": False,
+            "last_successful_check": None,
+            "last_error_category": "unconfigured",
+        }
+
+    cached = _sms_probe_cache.get(provider)
+    if not force_probe:
+        if cached:
+            return cached
+        return {
+            "provider": provider,
+            "configured": True,
+            "reachable": False,
+            "authenticated": False,
+            "last_successful_check": None,
+            "last_error_category": "awaiting_admin_probe",
+        }
+
+    reachable = False
+    authenticated = False
+    last_check = None
+    error_category = None
+    try:
+        if provider == "termii":
+            resp = httpx.get(
+                "https://api.ng.termii.com/api/get-balance",
+                params={"api_key": settings.TERMII_API_KEY},
+                timeout=1.5,
+            )
+        else:
+            resp = httpx.get(
+                f"https://api.twilio.com/2010-04-01/Accounts/{settings.TWILIO_ACCOUNT_SID}.json",
+                auth=(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN),
+                timeout=1.5,
+            )
+        reachable = True
+        if resp.status_code == 200:
+            authenticated = True
+            last_check = now.isoformat()
+        elif resp.status_code in (401, 403):
+            authenticated = False
+            error_category = "authentication_failed"
+        else:
+            authenticated = False
+            error_category = f"unexpected_http_{resp.status_code}"
+    except (httpx.ConnectError, httpx.TimeoutException):
+        error_category = "network_unreachable_or_timeout"
+    except Exception:
+        error_category = "probe_exception"
+
+    result = {
+        "provider": provider,
+        "configured": True,
+        "reachable": reachable,
+        "authenticated": authenticated,
+        "last_successful_check": last_check,
+        "last_error_category": error_category,
+    }
+    _sms_probe_cache[provider] = result
+    return result
+
+
+@app.get("/health/integrations", tags=["system"])
+def health_integrations(_admin=Depends(_require_admin_in_production)):
+    """Integration health: returns consolidated cached NIPOST and SMS telemetry without triggering unauthenticated external probes."""
+    from backend.app.services.nipost_client import get_nipost_client
+
+    nipost_client = get_nipost_client()
+    nipost_status = nipost_client.get_integration_status()
+    nipost_configured = bool(nipost_status.get("configuration_complete"))
+    nipost_reachable = bool(nipost_status.get("connectivity_healthy"))
+    nipost_authenticated = bool(nipost_status.get("authentication_verified"))
+    nipost_last_check = nipost_status.get("last_checked_at")
+    if not nipost_configured:
+        nipost_error_category = "unconfigured"
+    elif not nipost_authenticated and nipost_last_check is not None:
+        nipost_error_category = "authentication_failed"
+    elif not nipost_reachable and nipost_last_check is not None:
+        nipost_error_category = "network_unreachable_or_timeout"
+    else:
+        nipost_error_category = None
+
+    sms_info = _probe_sms_gateway(force_probe=False)
+    sms_configured = sms_info["configured"]
+    sms_reachable = sms_info["reachable"]
+    sms_authenticated = sms_info["authenticated"]
+    sms_last_check = sms_info["last_successful_check"]
+    sms_error_category = sms_info["last_error_category"]
+
+    from backend.app.core.rate_limiter import get_rate_limiter_status
+    rate_limiter_info = get_rate_limiter_status()
+
+    overall_status = "operational"
+    if settings.ENVIRONMENT == "production":
+        if not sms_configured or settings.SMS_PROVIDER == "simulated" or not sms_authenticated:
+            overall_status = "degraded"
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "status": overall_status,
+                    "error": "Production SMS gateway is not operational or failed authentication.",
+                    "nipost": {
+                        "configured": nipost_configured,
+                        "reachable": nipost_reachable,
+                        "authenticated": nipost_authenticated,
+                        "last_successful_check": nipost_last_check,
+                        "last_error_category": nipost_error_category,
+                    },
+                    "sms_gateway": {
+                        "provider": settings.SMS_PROVIDER,
+                        "configured": sms_configured,
+                        "reachable": sms_reachable,
+                        "authenticated": sms_authenticated,
+                        "last_successful_check": sms_last_check,
+                        "last_error_category": sms_error_category,
+                    },
+                    "rate_limiter": rate_limiter_info,
+                },
+            )
+
+    return {
+        "status": overall_status,
+        "nipost": {
+            "configured": nipost_configured,
+            "reachable": nipost_reachable,
+            "authenticated": nipost_authenticated,
+            "last_successful_check": nipost_last_check,
+            "last_error_category": nipost_error_category,
+        },
+        "sms_gateway": {
+            "provider": settings.SMS_PROVIDER,
+            "configured": sms_configured,
+            "reachable": sms_reachable,
+            "authenticated": sms_authenticated,
+            "last_successful_check": sms_last_check,
+            "last_error_category": sms_error_category,
+        },
+        "rate_limiter": rate_limiter_info,
+    }
+
+
+@app.post("/api/v1/health/integrations/probe", tags=["system"])
+def admin_probe_integrations(
+    current_user=Depends(require_roles([AppRole.ADMIN])),
+):
+    """Admin-only live probe for NIPOST (Assembly) and SMS gateway; updates cached telemetry."""
+    from backend.app.services.nipost_client import get_nipost_client
+
+    nipost_probe = get_nipost_client().check_health()
+    sms_probe = _probe_sms_gateway(force_probe=True)
+    return {"nipost": nipost_probe, "sms_gateway": sms_probe}

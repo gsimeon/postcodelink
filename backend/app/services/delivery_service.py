@@ -3,8 +3,9 @@ import secrets
 import logging
 import uuid
 import hashlib
+import re
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
@@ -16,6 +17,7 @@ from backend.app.models.delivery_event import DeliveryEvent
 from backend.app.models.operator import Operator
 from backend.app.models.profile import Profile
 from backend.app.models.notification_outbox import NotificationOutbox
+from backend.app.models.worker_heartbeat import WorkerHeartbeat
 from backend.app.models.enums import DeliveryStatus, PostcodeStatus, AppRole
 from backend.app.schemas.delivery import (
     DeliveryCreateRequest,
@@ -27,7 +29,10 @@ from backend.app.schemas.delivery import (
     NotificationDispatchPayload,
     DeliveryResponse,
     PublicTrackingEvent,
+    PublicDeliveryConfirmOTPRequest,
+    PublicDeliveryConfirmOTPResponse,
 )
+from backend.app.core.rate_limiter import check_client_ip_rate_limit
 from backend.app.services.state_machine import can_transition
 from backend.app.services.postcode_service import cleanse_address, normalize_string
 from backend.app.core.security import (
@@ -35,6 +40,7 @@ from backend.app.core.security import (
     verify_otp_hash,
     encrypt_authenticated_pin,
     decrypt_authenticated_pin,
+    migrate_legacy_transit_pin,
 )
 from backend.app.services.notification_service import (
     notification_provider,
@@ -44,46 +50,14 @@ from backend.app.services.notification_service import (
 
 logger = logging.getLogger("delivery_service")
 
-ACTIVE_WORKLOAD_STATUSES = {
-    DeliveryStatus.ASSIGNED,
-    DeliveryStatus.PICKED_UP,
-    DeliveryStatus.IN_TRANSIT,
-    DeliveryStatus.OUT_FOR_DELIVERY,
-}
+WORKER_LAST_HEARTBEAT: Optional[datetime] = None
 
-
-def adjust_operator_workload_count(operator: Operator, old_status: DeliveryStatus, new_status: DeliveryStatus) -> None:
-    """Change the active workload count only when a delivery crosses the active boundary."""
-    was_active = old_status in ACTIVE_WORKLOAD_STATUSES
-    is_active = new_status in ACTIVE_WORKLOAD_STATUSES
-    if was_active and not is_active:
-        operator.active_deliveries_count = max(0, operator.active_deliveries_count - 1)
-    elif not was_active and is_active:
-        operator.active_deliveries_count += 1
-
-
-def encrypt_transit_pin(pin: str, secret_key: Optional[str] = None, delivery_id: Optional[str] = None) -> str:
-    """Authenticated encryption for transit PIN using standard AES-256-GCM AEAD envelope."""
-    key = secret_key or getattr(settings, "OUTBOX_ENCRYPTION_KEY", None) or settings.SECRET_KEY
-    return encrypt_authenticated_pin(pin, master_key=key, delivery_id=delivery_id)
-
-
-def decrypt_transit_pin(token: str, secret_key: Optional[str] = None, delivery_id: Optional[str] = None) -> Optional[str]:
-    """Decrypts and verifies authenticated transit PIN envelope using AES-256-GCM and key rotation."""
-    if secret_key:
-        res = decrypt_authenticated_pin(token, master_key=secret_key, delivery_id=delivery_id)
-        if res is not None:
-            return res
-    outbox_key = getattr(settings, "OUTBOX_ENCRYPTION_KEY", None)
-    if outbox_key and outbox_key != secret_key:
-        res = decrypt_authenticated_pin(token, master_key=outbox_key, delivery_id=delivery_id)
-        if res is not None:
-            return res
-    if settings.SECRET_KEY != secret_key and settings.SECRET_KEY != outbox_key:
-        res = decrypt_authenticated_pin(token, master_key=settings.SECRET_KEY, delivery_id=delivery_id)
-        if res is not None:
-            return res
-    return None
+from backend.app.services.deliveries.security import (
+    ACTIVE_WORKLOAD_STATUSES,
+    adjust_operator_workload_count,
+    decrypt_transit_pin,
+    encrypt_transit_pin,
+)
 
 
 def generate_reference(db: Session) -> str:
@@ -340,11 +314,19 @@ def update_delivery_status(db: Session, delivery_id: str, request: DeliveryStatu
     if not delivery:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delivery order not found.")
 
+    # Cross-tenant authorization check:
+    # Merchants may only modify deliveries belonging to their own merchant account
+    is_merchant_owner = delivery.merchant_id == current_user.id
+    if current_user.role == AppRole.MERCHANT and not is_merchant_owner:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Merchants cannot modify deliveries belonging to another merchant."
+        )
+
     # Idempotency check: no duplicate event if status is unchanged
     if delivery.status == request.new_status:
         return delivery
 
-    is_merchant_owner = delivery.merchant_id == current_user.id
     is_assigned_operator = False
     if current_user.role == AppRole.OPERATOR and delivery.operator_id:
         op = db.query(Operator).filter(Operator.profile_id == current_user.id).first()
@@ -352,6 +334,13 @@ def update_delivery_status(db: Session, delivery_id: str, request: DeliveryStatu
             is_assigned_operator = True
 
     # ROLE PERMISSION MATRIX (Enforce authorization prior to state progression)
+    # 0. ASSIGNED: Rejection rule - ASSIGNED status requires the dedicated courier assignment endpoint
+    if request.new_status == DeliveryStatus.ASSIGNED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ASSIGNED status can only be achieved via the dedicated courier assignment endpoint."
+        )
+
     # 1. DELIVERED: Rejection rule - DELIVERED status requires PIN verification endpoint
     if request.new_status == DeliveryStatus.DELIVERED:
         raise HTTPException(
@@ -562,22 +551,194 @@ def mask_recipient_name(name: str) -> str:
     return " ".join(masked_parts)
 
 
-def get_public_tracking(db: Session, identifier: str) -> DeliveryPublicTrackingResponse:
-    """Format delivery for public recipient tracking strictly by cryptographically random tracking token.
+TRACKING_TOKEN_REGEX = re.compile(r"^[A-Za-z0-9_-]{32}$")
+CHALLENGE_TTL_SECONDS = 600
+_CONSUMED_CHALLENGE_NONCES: Dict[str, int] = {}
+
+
+def _get_challenge_signing_key() -> bytes:
+    """Derive a dedicated HMAC key for public recipient challenge tokens.
     
-    Enforces strict privacy:
-    - Rejects lookup by predictable human-readable delivery ID (returns 404).
-    - Masks recipient name and phone.
-    - Hides exact street address, coordinates, parcel description, fees, and internal actor notes.
+    Uses CHALLENGE_SECRET_KEY or domain-separated derivation from OTP_SECRET_KEY.
+    Never falls back to JWT SECRET_KEY.
     """
-    token = identifier.strip()
-    if token.startswith("PL-") or len(token) < 20:
+    explicit = (getattr(settings, "CHALLENGE_SECRET_KEY", "") or "").strip()
+    if explicit:
+        return hashlib.sha256(b"postcodelink-challenge-v1:" + explicit.encode("utf-8")).digest()
+    otp_sec = (getattr(settings, "OTP_SECRET_KEY", "") or "").strip()
+    if otp_sec:
+        return hashlib.sha256(b"postcodelink-challenge-otp-derived-v1:" + otp_sec.encode("utf-8")).digest()
+    if settings.ENVIRONMENT == "production":
+        raise RuntimeError("Fatal Security Error: CHALLENGE_SECRET_KEY or OTP_SECRET_KEY must be configured in production.")
+    return hashlib.sha256(b"postcodelink-dev-challenge-only-secret-v1").digest()
+
+
+def purge_expired_challenge_nonces(db: Session, batch_size: int = 500) -> int:
+    """Batch-purge expired ConsumedChallengeNonce rows outside the customer request path."""
+    from backend.app.models.consumed_challenge_nonce import ConsumedChallengeNonce
+    now = datetime.now(timezone.utc)
+    expired_nonces = (
+        db.query(ConsumedChallengeNonce.nonce)
+        .filter(ConsumedChallengeNonce.expires_at < now)
+        .limit(batch_size)
+        .all()
+    )
+    if not expired_nonces:
+        return 0
+    nonce_ids = [row[0] for row in expired_nonces]
+    deleted = (
+        db.query(ConsumedChallengeNonce)
+        .filter(ConsumedChallengeNonce.nonce.in_(nonce_ids))
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return int(deleted or 0)
+
+
+def _is_and_mark_nonce_consumed(
+    nonce: str,
+    exp: int,
+    consume: bool = False,
+    db: Optional[Session] = None,
+    tracking_token: str = "",
+) -> bool:
+    """Distributed atomic check-and-consume for one-time recipient challenge nonces.
+    
+    Uses Redis atomic `SET ... NX EX` when available, and falls back to an atomic
+    database INSERT into `consumed_challenge_nonces` (unique primary key constraint)
+    so concurrent requests across multiple API instances cannot replay the same challenge.
+    """
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    ttl = max(60, exp - now_ts)
+
+    # 1. Distributed Redis atomic check/consume
+    try:
+        from backend.app.core.rate_limiter import _get_redis_client
+        r_client = _get_redis_client()
+        if r_client is not None:
+            r_key = f"pubchal_nonce:{nonce}"
+            if consume:
+                # SET NX returns True if key was set (first use), None/False if already exists (replay)
+                acquired = r_client.set(r_key, "1", ex=ttl, nx=True)
+                if not acquired:
+                    return True
+            else:
+                if r_client.exists(r_key):
+                    return True
+    except Exception as exc:
+        logger.warning(f"Redis challenge nonce check fallback to DB: {type(exc).__name__}")
+
+    # 2. Database-backed atomic unique-constraint check/consume (cross-process safe)
+    if db is not None:
+        from backend.app.models.consumed_challenge_nonce import ConsumedChallengeNonce
+        if not consume:
+            existing = db.query(ConsumedChallengeNonce).filter(ConsumedChallengeNonce.nonce == nonce).first()
+            return existing is not None
+        try:
+            with db.begin_nested():
+                db.add(
+                    ConsumedChallengeNonce(
+                        nonce=nonce,
+                        tracking_token=tracking_token,
+                        expires_at=datetime.fromtimestamp(exp, tz=timezone.utc),
+                        consumed_at=datetime.now(timezone.utc),
+                    )
+                )
+                db.flush()
+            return False
+        except IntegrityError:
+            return True
+
+    # 3. Last-resort in-memory fallback (unit tests without db/redis)
+    if len(_CONSUMED_CHALLENGE_NONCES) > 5000:
+        expired_keys = [k for k, v in _CONSUMED_CHALLENGE_NONCES.items() if v < now_ts]
+        for k in expired_keys:
+            _CONSUMED_CHALLENGE_NONCES.pop(k, None)
+    if nonce in _CONSUMED_CHALLENGE_NONCES:
+        return True
+    if consume:
+        _CONSUMED_CHALLENGE_NONCES[nonce] = exp
+    return False
+
+
+def _issue_recipient_challenge_token(tracking_token: str) -> str:
+    """Issue a short-lived HMAC-SHA256 challenge proof bound to the exact tracking_token."""
+    import hmac
+    exp = int(datetime.now(timezone.utc).timestamp()) + CHALLENGE_TTL_SECONDS
+    nonce = secrets.token_hex(12)
+    payload = f"{tracking_token}.{exp}.{nonce}"
+    key = _get_challenge_signing_key()
+    sig = hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{payload}.{sig}"
+
+
+def _verify_recipient_challenge_token(
+    challenge_token: str,
+    expected_tracking_token: str,
+    consume: bool = False,
+    db: Optional[Session] = None,
+) -> None:
+    """Verify HMAC signature, tracking_token binding, expiry, and distributed one-time nonce consumption."""
+    import hmac
+    parts = (challenge_token or "").strip().split(".")
+    if len(parts) != 4:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Public tracking requires a valid 32-character tracking token. Human-readable delivery IDs cannot be used for public tracking."
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid or malformed recipient challenge proof. Complete phone verification first.",
+        )
+    tok, exp_str, nonce, sig = parts
+    if not hmac.compare_digest(tok, expected_tracking_token):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Recipient challenge proof is not bound to this tracking token.",
+        )
+    try:
+        exp = int(exp_str)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid recipient challenge proof expiration.",
+        )
+    payload = f"{tok}.{exp_str}.{nonce}"
+    key = _get_challenge_signing_key()
+    expected_sig = hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected_sig):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Recipient challenge proof signature verification failed.",
+        )
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    if now_ts > exp:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Recipient challenge proof has expired. Please re-verify the last 4 digits of your phone number.",
+        )
+    if _is_and_mark_nonce_consumed(nonce, exp, consume=consume, db=db, tracking_token=expected_tracking_token):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Recipient challenge proof has already been consumed (replay rejected). Please re-verify your phone digits.",
         )
 
-    delivery = db.query(Delivery).filter(Delivery.tracking_token == token).first()
+
+def get_public_tracking(db: Session, identifier: str) -> DeliveryPublicTrackingResponse:
+    """Format delivery for public recipient tracking strictly by cryptographically random 32-character tracking token.
+    
+    Enforces strict privacy:
+    - Rejects lookup by predictable human-readable delivery ID or malformed tokens (returns 404).
+    - Masks recipient name and phone.
+    - Omits internal delivery IDs, exact street address, coordinates, parcel description, fees, and OTP attempt counters.
+    """
+    token = identifier.strip()
+    if not TRACKING_TOKEN_REGEX.match(token):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Public tracking requires an exact 32-character tracking token. Human-readable delivery IDs cannot be used for public tracking."
+        )
+
+    delivery = db.query(Delivery).filter(
+        Delivery.tracking_token == token,
+        Delivery.is_deleted == False,
+    ).first()
     if not delivery:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -610,7 +771,7 @@ def get_public_tracking(db: Session, identifier: str) -> DeliveryPublicTrackingR
     ]
 
     return DeliveryPublicTrackingResponse(
-        id=delivery.id,
+        tracking_token=delivery.tracking_token,
         recipient_name_masked=masked_name,
         recipient_phone_masked=masked_phone,
         destination_general_location=general_location,
@@ -618,8 +779,6 @@ def get_public_tracking(db: Session, identifier: str) -> DeliveryPublicTrackingR
         verified_postcode=delivery.verified_postcode,
         status=delivery.status,
         requires_pin_confirmation=True,
-        otp_attempts=delivery.otp_attempts,
-        otp_max_attempts=delivery.otp_max_attempts,
         is_locked=is_locked,
         lockout_remaining_minutes=lockout_rem,
         pod_verified=delivery.pod_verified,
@@ -628,6 +787,211 @@ def get_public_tracking(db: Session, identifier: str) -> DeliveryPublicTrackingR
         assigned_operator_name=operator_name,
         timeline=public_timeline,
     )
+
+
+def verify_recipient_challenge(
+    db: Session,
+    identifier: str,
+    phone_last_4: str,
+    client_ip: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Verify recipient phone challenge server-side strictly against the delivery record.
+    
+    Issues a short-lived HMAC-signed challenge_token bound to the tracking_token.
+    Rate-limits challenge attempts by both client IP and tracking_token (10 requests/minute each).
+    """
+    token = identifier.strip()
+    if not TRACKING_TOKEN_REGEX.match(token):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Public tracking requires an exact 32-character tracking token."
+        )
+
+    # Dual rate limiting: by IP and by tracking_token
+    if client_ip and client_ip != "testclient":
+        check_client_ip_rate_limit(f"pubchal_ip_{client_ip}", limit_per_minute=10)
+    check_client_ip_rate_limit(f"pubchal_tok_{token}", limit_per_minute=10)
+
+    delivery = db.query(Delivery).filter(
+        Delivery.tracking_token == token,
+        Delivery.is_deleted == False,
+    ).first()
+    if not delivery:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Delivery tracking record not found. Please provide a valid 32-character tracking token."
+        )
+
+    clean_phone = re.sub(r"\D", "", delivery.recipient_phone or "")
+    actual_last_4 = clean_phone[-4:] if len(clean_phone) >= 4 else ""
+
+    if phone_last_4.strip() != actual_last_4:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Identity challenge failed: Provided 4 digits do not match the recipient phone number on record."
+        )
+
+    challenge_token = _issue_recipient_challenge_token(delivery.tracking_token)
+    return {
+        "success": True,
+        "verified": True,
+        "message": "Recipient identity verified successfully.",
+        "tracking_token": delivery.tracking_token,
+        "challenge_token": challenge_token,
+        "expires_in_seconds": CHALLENGE_TTL_SECONDS,
+        "status": delivery.status,
+    }
+
+
+def public_confirm_delivery_otp(
+    db: Session,
+    tracking_token: str,
+    request: PublicDeliveryConfirmOTPRequest,
+    client_ip: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Recipient public proof-of-delivery confirmation endpoint via 6-digit confirmation PIN.
+    
+    Requires a valid, unexpired server-issued challenge_token bound to the exact 32-char tracking_token.
+    Enforces dual rate limiting (IP + tracking_token), lockout, and single-use revocation.
+    """
+    token = tracking_token.strip()
+    if not TRACKING_TOKEN_REGEX.match(token):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Public delivery confirmation requires an exact 32-character tracking token."
+        )
+
+    # Dual rate limiting (10 req/min per IP and per tracking_token)
+    if client_ip and client_ip != "testclient":
+        check_client_ip_rate_limit(f"pubotp_ip_{client_ip}", limit_per_minute=10)
+    check_client_ip_rate_limit(f"pubotp_tok_{token}", limit_per_minute=10)
+
+    # Enforce mandatory server-side challenge proof bound to this tracking token
+    _verify_recipient_challenge_token(request.challenge_token, token, consume=False, db=db)
+
+    delivery = db.query(Delivery).filter(
+        Delivery.tracking_token == token,
+        Delivery.is_deleted == False,
+    ).with_for_update().first()
+    if not delivery:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Delivery order not found. Please verify the 32-character tracking token."
+        )
+
+    # Check if already delivered
+    if delivery.status == DeliveryStatus.DELIVERED or delivery.pod_verified:
+        return {
+            "success": True,
+            "message": "Delivery has already been confirmed as delivered.",
+            "status": delivery.status,
+            "pod_verified": True,
+        }
+
+    # Optional phone verification
+    if request.phone_last_4:
+        clean_phone = re.sub(r"\D", "", delivery.recipient_phone or "")
+        if clean_phone[-4:] != request.phone_last_4.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Recipient phone verification failed. Digits do not match record."
+            )
+
+    now = datetime.now(timezone.utc)
+
+    # Check lockout
+    if delivery.otp_locked_until:
+        locked_until = delivery.otp_locked_until
+        if locked_until.tzinfo is None:
+            locked_until = locked_until.replace(tzinfo=timezone.utc)
+        if now < locked_until:
+            rem_secs = int((locked_until - now).total_seconds())
+            rem_mins = max(1, (rem_secs + 59) // 60)
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"PIN verification is locked due to multiple failed attempts. Try again in {rem_mins} minute(s)."
+            )
+        else:
+            delivery.otp_attempts = 0
+            delivery.otp_locked_until = None
+
+    # Check expiry
+    if delivery.otp_expires_at:
+        expires_at = delivery.otp_expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if now > expires_at:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Delivery confirmation PIN has expired. Contact dispatch for assistance."
+            )
+
+    # Check PIN match
+    if verify_otp_hash(request.otp, delivery.otp_hash):
+        # Atomically consume the one-time challenge nonce across Redis/DB so it cannot be replayed
+        _verify_recipient_challenge_token(request.challenge_token, token, consume=True, db=db)
+        delivery.pod_verified = True
+        delivery.status = DeliveryStatus.DELIVERED
+        delivery.otp_attempts = 0
+        delivery.otp_locked_until = None
+        # Single-use revocation
+        delivery.otp_hash = "REVOKED_AND_VERIFIED"
+        delivery.pod_note = request.note or "Verified by recipient via public tracking portal PIN."
+        delivery.version += 1
+
+        if delivery.operator_id:
+            op = db.query(Operator).filter(Operator.id == delivery.operator_id).first()
+            if op:
+                from backend.app.services.delivery_service import adjust_operator_workload_count
+                adjust_operator_workload_count(op, DeliveryStatus.OUT_FOR_DELIVERY, DeliveryStatus.DELIVERED)
+                op.completed_deliveries += 1
+
+        event = DeliveryEvent(
+            delivery_id=delivery.id,
+            status=DeliveryStatus.DELIVERED,
+            actor_name="Recipient",
+            actor_role="public_recipient",
+            note=delivery.pod_note,
+            occurred_at=now,
+        )
+        db.add(event)
+        db.commit()
+        db.refresh(delivery)
+        return {
+            "success": True,
+            "message": "Proof of delivery confirmed successfully. Delivery is marked delivered.",
+            "status": delivery.status,
+            "pod_verified": True,
+        }
+
+    # PIN Mismatch
+    delivery.otp_attempts += 1
+    delivery.version += 1
+    remaining = delivery.otp_max_attempts - delivery.otp_attempts
+
+    if remaining <= 0:
+        delivery.otp_locked_until = now + timedelta(minutes=settings.OTP_LOCKOUT_MINUTES)
+        lock_event = DeliveryEvent(
+            delivery_id=delivery.id,
+            status=delivery.status,
+            actor_name="Security Guard",
+            actor_role="system",
+            note=f"Public portal brute force protection triggered: 3 failed PIN attempts. Locked for {settings.OTP_LOCKOUT_MINUTES} minutes.",
+            occurred_at=now,
+        )
+        db.add(lock_event)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Invalid delivery PIN. Maximum attempts exceeded. Verification locked for {settings.OTP_LOCKOUT_MINUTES} minutes."
+        )
+
+    db.commit()
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"Invalid delivery PIN. {remaining} attempt(s) remaining."
+    )
+
 
 
 def regenerate_tracking_token(db: Session, delivery_id: str, current_user: Profile) -> Delivery:
@@ -746,10 +1110,85 @@ def resend_delivery_pin(db: Session, delivery_id: str, current_user: Profile) ->
     )
 
 
+def record_worker_heartbeat(
+    db: Session,
+    worker_id: str,
+    status: str = "active",
+    processed_count: int = 0,
+    worker_role: str = "outbox_worker",
+    stop_reason: Optional[str] = None,
+) -> None:
+    """Record or update persistent worker heartbeat in the database for cross-process health monitoring."""
+    import os
+    import socket
+    now = datetime.now(timezone.utc)
+    try:
+        hb = db.query(WorkerHeartbeat).filter(WorkerHeartbeat.worker_id == worker_id).first()
+        if not hb:
+            hb = WorkerHeartbeat(
+                worker_id=worker_id,
+                process_id=os.getpid(),
+                worker_role=worker_role,
+                hostname=socket.gethostname(),
+                last_heartbeat_at=now,
+                status=status,
+                active_jobs_count=0,
+                processed_count=processed_count,
+                last_successful_process_at=now if processed_count > 0 else None,
+                stop_reason=stop_reason,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(hb)
+        else:
+            hb.process_id = os.getpid()
+            hb.last_heartbeat_at = now
+            hb.status = status
+            hb.hostname = socket.gethostname()
+            hb.processed_count += processed_count
+            if processed_count > 0:
+                hb.last_successful_process_at = now
+            if stop_reason:
+                hb.stop_reason = stop_reason
+            hb.updated_at = now
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.warning(f"Failed to record worker heartbeat: {exc}")
+
+
+def record_worker_shutdown(
+    db: Session,
+    worker_id: str,
+    reason: str = "graceful_shutdown",
+) -> None:
+    """Record clean worker termination in worker_heartbeats."""
+    now = datetime.now(timezone.utc)
+    try:
+        hb = db.query(WorkerHeartbeat).filter(WorkerHeartbeat.worker_id == worker_id).first()
+        if hb:
+            hb.status = "stopped"
+            hb.stop_reason = reason
+            hb.last_heartbeat_at = now
+            hb.updated_at = now
+            db.commit()
+            logger.info(f"[Worker Heartbeat] Recorded graceful shutdown for worker '{worker_id}' (reason: {reason}).")
+    except Exception as exc:
+        db.rollback()
+        logger.warning(f"Failed to record worker shutdown: {exc}")
+
+
 def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Optional[str] = None) -> int:
     """Process pending/queued outbox notification items with row-level leasing, backoff, and error classification."""
+    global WORKER_LAST_HEARTBEAT
     now = datetime.now(timezone.utc)
+    WORKER_LAST_HEARTBEAT = now
     assigned_worker = worker_id or f"worker-{secrets.token_hex(4)}"
+    record_worker_heartbeat(db, assigned_worker, status="active", processed_count=0)
+    try:
+        purge_expired_challenge_nonces(db, batch_size=500)
+    except Exception:
+        db.rollback()
 
     # Determine dialect for SKIP LOCKED support
     bind = db.get_bind()
@@ -759,7 +1198,11 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
     query = (
         db.query(NotificationOutbox)
         .filter(
-            NotificationOutbox.status.in_([NotificationDeliveryStatus.QUEUED, NotificationDeliveryStatus.FAILED]),
+            NotificationOutbox.status.in_([
+                NotificationDeliveryStatus.QUEUED,
+                NotificationDeliveryStatus.FAILED,
+                NotificationDeliveryStatus.DISPATCHING,
+            ]),
             NotificationOutbox.retry_count < NotificationOutbox.max_retries,
             or_(
                 NotificationOutbox.next_attempt_at.is_(None),
@@ -787,11 +1230,23 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
         item.retry_count += 1
         item.updated_at = now
 
-        # Idempotent reconciliation guard:
-        # If the item already has a provider_message_id recorded (e.g. from previous dispatch attempt
-        # where the provider accepted the SMS but local database commit crashed), reconcile to SENT
-        # immediately without re-dispatching a duplicate SMS to the customer.
-        if getattr(item, "provider_message_id", None):
+        # Select provider based on item configuration early for idempotent cache checks
+        provider_name = item.provider if item.provider in ["termii", "twilio", "simulated"] else settings.SMS_PROVIDER
+        active_provider = get_notification_provider(provider_name)
+
+        # Ensure unique idempotency key is assigned for provider deduplication
+        if not getattr(item, "idempotency_key", None):
+            item.idempotency_key = f"outbox_{item.id}_{item.delivery_version}_{item.retry_count}"
+
+        # Persist lease acquisition immediately before external dispatch or reconciliation
+        db.commit()
+
+        # Idempotent crash recovery guard:
+        # If the item already has a provider_message_id recorded from prior provider acceptance before a DB crash,
+        # reconcile to SENT immediately without duplicate dispatch.
+        # Note: When an item is manually requeued, api_reconcile_outbox_item explicitly clears provider_message_id = None
+        # and moves the old ID to last_failed_provider_message_id, ensuring a requeued item is always re-dispatched cleanly.
+        if getattr(item, "provider_message_id", None) and item.provider_message_id.strip():
             logger.info(
                 f"[Outbox Worker] Item {item.id} already has provider_message_id '{item.provider_message_id}'. "
                 "Reconciling to SENT without duplicate dispatch."
@@ -801,12 +1256,61 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
             item.sent_at = item.sent_at or now
             item.locked_at = None
             item.locked_by = None
+            db.commit()
             processed += 1
             continue
 
-        # Select provider based on item configuration
-        provider_name = item.provider if item.provider in ["termii", "twilio", "simulated"] else settings.SMS_PROVIDER
-        active_provider = get_notification_provider(provider_name)
+        # Crash-window recovery: if worker crashed while actively dispatching (DISPATCHING state)
+        if item.status == NotificationDeliveryStatus.DISPATCHING and item.retry_count > 1:
+            logger.warning(
+                f"[Outbox Worker] Item {item.id} found in DISPATCHING state from prior worker crash. "
+                "Checking provider status for crash recovery."
+            )
+            # 1. Attempt automated provider reconciliation
+            reconciled_res = None
+            if active_provider and hasattr(active_provider, "check_message_status"):
+                try:
+                    reconciled_res = active_provider.check_message_status(
+                        idempotency_key=item.idempotency_key,
+                        provider_message_id=getattr(item, "provider_message_id", None),
+                        recipient_phone=getattr(item, "recipient_phone", None),
+                        delivery_id=getattr(item, "delivery_id", None),
+                    )
+                except Exception as exc:
+                    logger.warning(f"[Outbox Worker] Provider status check failed for item {item.id}: {exc}")
+
+            if reconciled_res and reconciled_res.status in [NotificationDeliveryStatus.SENT, NotificationDeliveryStatus.SIMULATED]:
+                logger.info(f"[Outbox Worker] Item {item.id} confirmed accepted/sent by provider during crash recovery.")
+                item.status = reconciled_res.status
+                item.provider_message_id = reconciled_res.message_id or item.provider_message_id
+                item.status_reconciled_at = now
+                item.sent_at = item.sent_at or now
+                item.locked_at = None
+                item.locked_by = None
+                db.commit()
+                processed += 1
+                continue
+            elif reconciled_res and reconciled_res.status == NotificationDeliveryStatus.FAILED:
+                logger.info(f"[Outbox Worker] Item {item.id} confirmed rejected/failed by provider during crash recovery.")
+                item.status = NotificationDeliveryStatus.FAILED
+                item.failure_classification = "provider_rejection"
+                item.error_details = reconciled_res.error_details or "Provider rejected message."
+                item.locked_at = None
+                item.locked_by = None
+                db.commit()
+                processed += 1
+                continue
+
+            # 2. If unconfirmed whether provider accepted or sent the SMS, route to RECONCILIATION_REQUIRED
+            # to prevent duplicate SMS (at-least-once dispatch with duplicate prevention)
+            item.status = NotificationDeliveryStatus.RECONCILIATION_REQUIRED
+            item.failure_classification = "unconfirmed_crash_window"
+            item.error_details = "Worker crashed during HTTP dispatch; provider status could not be verified automatically. Flagged for administrator reconciliation."
+            item.locked_at = None
+            item.locked_by = None
+            db.commit()
+            processed += 1
+            continue
 
         dispatch_res = None
         # Handle PIN notification types
@@ -824,18 +1328,37 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
                 item.error_details = "Delivery is in terminal status (delivered/cancelled) or not found."
                 item.locked_at = None
                 item.locked_by = None
+                db.commit()
                 processed += 1
                 continue
 
             target_pin = None
             if item.message_payload:
-                target_pin = decrypt_transit_pin(item.message_payload, settings.OUTBOX_ENCRYPTION_KEY, delivery_id=item.delivery_id)
+                target_pin = decrypt_transit_pin(
+                    item.message_payload,
+                    settings.OUTBOX_ENCRYPTION_KEY,
+                    delivery_id=item.delivery_id,
+                    allow_legacy=False,
+                )
+                if not target_pin and (item.message_payload.startswith("v1:") or not item.message_payload.startswith("v2:")):
+                    # Explicit controlled migration path for unmigrated legacy outbox items
+                    migrated_pin, upgraded_envelope = migrate_legacy_transit_pin(
+                        item.message_payload,
+                        delivery_id=item.delivery_id,
+                        master_key=settings.OUTBOX_ENCRYPTION_KEY,
+                    )
+                    if migrated_pin and upgraded_envelope:
+                        target_pin = migrated_pin
+                        item.message_payload = upgraded_envelope
+                        db.flush()
+
                 if not target_pin:
                     item.status = NotificationDeliveryStatus.FAILED
                     item.failure_classification = "invalid_pin_payload"
                     item.error_details = "PIN payload could not be decrypted or failed authentication verification."
                     item.locked_at = None
                     item.locked_by = None
+                    db.commit()
                     processed += 1
                     continue
 
@@ -846,10 +1369,11 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
                     item.error_details = f"PIN payload does not match current delivery OTP hash (delivery version: {deliv.version}); superseded."
                     item.locked_at = None
                     item.locked_by = None
+                    db.commit()
                     processed += 1
                     continue
             else:
-                # Fresh PIN generation when payload is absent (e.g. zero-knowledge PIN rotation on dispatch)
+                # Fresh PIN generation when payload is absent (e.g. dynamic PIN rotation on dispatch)
                 target_pin = generate_otp()
                 deliv.otp_hash = hash_otp(target_pin)
                 deliv.otp_attempts = 0
@@ -859,19 +1383,30 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
                 item.message_payload = encrypt_transit_pin(target_pin, settings.OUTBOX_ENCRYPTION_KEY, delivery_id=deliv.id)
                 db.flush()
 
+            # Persist DISPATCHING intent state to disk before executing external HTTP network call
+            item.status = NotificationDeliveryStatus.DISPATCHING
+            item.updated_at = now
+            db.commit()
+
             dispatch_res = active_provider.send_delivery_pin(
                 recipient_phone=item.recipient_phone,
                 recipient_name=item.recipient_name or deliv.recipient_name,
                 delivery_id=item.delivery_id,
                 pin=target_pin,
+                idempotency_key=item.idempotency_key,
             )
         else:
             status_text = item.message_payload or f"Update for delivery {item.delivery_id}"
+            item.status = NotificationDeliveryStatus.DISPATCHING
+            item.updated_at = now
+            db.commit()
+
             dispatch_res = active_provider.send_status_alert(
                 recipient_phone=item.recipient_phone,
                 recipient_name=item.recipient_name or "Recipient",
                 delivery_id=item.delivery_id,
                 status_message=status_text,
+                idempotency_key=item.idempotency_key,
             )
 
         # Inspect provider response
@@ -879,6 +1414,7 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
         item.provider = dispatch_res.provider
         if getattr(dispatch_res, "message_id", None):
             item.provider_message_id = dispatch_res.message_id
+            item.status_reconciled_at = datetime.now(timezone.utc)
 
         if dispatch_res.status in [NotificationDeliveryStatus.SENT, NotificationDeliveryStatus.SIMULATED]:
             item.sent_at = now
@@ -905,10 +1441,10 @@ def process_notification_outbox(db: Session, max_items: int = 10, worker_id: Opt
                 backoff_seconds = 30 * (2 ** (item.retry_count - 1))
                 item.next_attempt_at = now + timedelta(seconds=backoff_seconds)
 
-        # Release lease
+        # Release lease and persist immediately per item to eliminate crash window
         item.locked_at = None
         item.locked_by = None
+        db.commit()
         processed += 1
-
-    db.commit()
+    record_worker_heartbeat(db, assigned_worker, status="idle" if processed == 0 else "active", processed_count=processed)
     return processed

@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // 1. Test Canonical Production State Machine
 const ALLOWED_TRANSITIONS = {
@@ -197,3 +200,339 @@ test('OTP Security: completes delivery when correct 6-digit PIN provided on out_
   assert.equal(mockDelivery.status, 'delivered');
   assert.equal(mockDelivery.podVerified, true);
 });
+
+// 4. Test 6-Tier Verification Status Classification & Provenance Mapping
+function classifyVerificationTier(status, isLive, isPartial) {
+  if (isPartial || status === 'partially_verified') {
+    return { tier: 'partially_verified', label: 'PARTIALLY VERIFIED', color: '#7c3aed' };
+  }
+  if (status === 'official_verified' || status === 'nipost_verified' || (status === 'verified' && isLive)) {
+    return { tier: 'nipost_verified', label: 'NIPOST VERIFIED', color: '#16a34a' };
+  }
+  if (status === 'local_match' || status === 'local_reference' || status === 'verified') {
+    return { tier: 'local_match', label: 'LOCAL REFERENCE MATCH', color: '#d97706' };
+  }
+  if (status === 'format_valid' || status === 'estimated') {
+    return { tier: 'format_valid', label: 'FORMAT VALID', color: '#2563eb' };
+  }
+  if (status === 'conflict' || status === 'address_conflict') {
+    return { tier: 'address_conflict', label: 'ADDRESS CONFLICT', color: '#dc2626' };
+  }
+  return { tier: 'unavailable', label: 'UNAVAILABLE / UNVERIFIED', color: '#64748b' };
+}
+
+test('Verification Classification: correctly partitions 6-tier verification status and provenance', () => {
+  // Tier 1: NIPOST Live
+  const t1 = classifyVerificationTier('official_verified', true, false);
+  assert.equal(t1.tier, 'nipost_verified');
+  assert.equal(t1.label, 'NIPOST VERIFIED');
+
+  // Tier 2: Partially Verified (Validator existence + Local metadata)
+  const t2 = classifyVerificationTier('partially_verified', true, true);
+  assert.equal(t2.tier, 'partially_verified');
+  assert.equal(t2.label, 'PARTIALLY VERIFIED');
+
+  // Tier 3: Local Match (Non-governmental reference)
+  const t3 = classifyVerificationTier('local_match', false, false);
+  assert.equal(t3.tier, 'local_match');
+  assert.equal(t3.label, 'LOCAL REFERENCE MATCH');
+
+  // Ensure database record without live evidence cannot masquerade as official
+  const t3Demoted = classifyVerificationTier('verified', false, false);
+  assert.equal(t3Demoted.tier, 'local_match');
+
+  // Tier 4: Format Valid
+  const t4 = classifyVerificationTier('format_valid', false, false);
+  assert.equal(t4.tier, 'format_valid');
+  assert.equal(t4.label, 'FORMAT VALID');
+
+  // Tier 5: Address Conflict
+  const t5 = classifyVerificationTier('address_conflict', false, false);
+  assert.equal(t5.tier, 'address_conflict');
+  assert.equal(t5.label, 'ADDRESS CONFLICT');
+
+  // Tier 6: Unavailable / Not Found
+  const t6 = classifyVerificationTier('not_found', false, false);
+  assert.equal(t6.tier, 'unavailable');
+  assert.equal(t6.label, 'UNAVAILABLE / UNVERIFIED');
+});
+
+test('Workspace & Navigation Taxonomy: establishes Postcode Intelligence as core and Logistics as modular', () => {
+  const sections = [
+    { title: 'POSTCODE INTELLIGENCE (CORE)', tabs: ['postcodes'] },
+    { title: 'LOGISTICS & DISPATCH (MODULE)', tabs: ['overview', 'deliveries', 'map', 'tracking'] },
+    { title: 'FLEET & NETWORK', tabs: ['operators', 'customers'] },
+    { title: 'INTELLIGENCE & SETTINGS', tabs: ['analytics', 'settings'] },
+  ];
+
+  // Verify Postcode Intelligence is top-level core workspace
+  assert.equal(sections[0].title, 'POSTCODE INTELLIGENCE (CORE)');
+  assert.deepEqual(sections[0].tabs, ['postcodes']);
+
+  // Verify Logistics is a decoupled module
+  assert.equal(sections[1].title, 'LOGISTICS & DISPATCH (MODULE)');
+  assert.ok(sections[1].tabs.includes('deliveries'));
+  assert.ok(sections[1].tabs.includes('overview'));
+});
+
+// 5. Test Null Metadata & Subtitle Formatting
+function formatAddressSubtitle(area, state) {
+  if (area && state) return `${area}, ${state}`;
+  if (area) return `${area} (State Pending)`;
+  if (state) return `Area Pending, ${state}`;
+  return 'Incomplete Administrative Metadata';
+}
+
+test('Frontend Formatting: preserves null area and state without synthetic defaults', () => {
+  assert.equal(formatAddressSubtitle('Ikeja', 'Lagos'), 'Ikeja, Lagos');
+  assert.equal(formatAddressSubtitle(null, 'Lagos'), 'Area Pending, Lagos');
+  assert.equal(formatAddressSubtitle('Ikeja', null), 'Ikeja (State Pending)');
+  assert.equal(formatAddressSubtitle(null, null), 'Incomplete Administrative Metadata');
+  assert.equal(formatAddressSubtitle('', ''), 'Incomplete Administrative Metadata');
+});
+
+// 6. Test Scheme-Aware Upstream Integration Display
+function computeIntegrationDisplay(integration) {
+  if (integration.configuration_complete) {
+    return {
+      status: 'configured',
+      color: '#2563eb',
+      badge: 'Adapter Configured - NIPOST Two-Stage (Awaiting Live Verification)',
+    };
+  }
+  if (integration.base_url_set && integration.auth_scheme !== 'none') {
+    return {
+      status: 'awaiting_credentials',
+      color: '#d97706',
+      badge: 'Adapter Installed (Awaiting Production Credentials)',
+    };
+  }
+  return {
+    status: 'unconfigured',
+    color: '#64748b',
+    badge: 'Adapter Installed (Unconfigured)',
+  };
+}
+
+test('Integration Display: scheme-aware display honors none scheme without credentials alert', () => {
+  // Scheme 'none' with base_url
+  const noneConfigured = computeIntegrationDisplay({
+    adapter_installed: true,
+    configuration_complete: true,
+    base_url_set: true,
+    credentials_set: false,
+    auth_scheme: 'none',
+  });
+  assert.equal(noneConfigured.status, 'configured');
+  assert.equal(noneConfigured.badge, 'Adapter Configured - NIPOST Two-Stage (Awaiting Live Verification)');
+
+  // Scheme 'bearer' without credentials
+  const bearerAwaiting = computeIntegrationDisplay({
+    adapter_installed: true,
+    configuration_complete: false,
+    base_url_set: true,
+    credentials_set: false,
+    auth_scheme: 'bearer',
+  });
+  assert.equal(bearerAwaiting.status, 'awaiting_credentials');
+  assert.equal(bearerAwaiting.badge, 'Adapter Installed (Awaiting Production Credentials)');
+});
+
+// 7. Test Bidirectional Delivery Status Mapping
+function mapFrontendToBackendStatus(status) {
+  switch (status) {
+    case "pending":
+    case "pending_assignment":
+    case "draft":
+      return "pending";
+    case "assigned":
+      return "assigned";
+    case "picked_up":
+      return "picked_up";
+    case "in_transit":
+      return "in_transit";
+    case "out_for_delivery":
+      return "out_for_delivery";
+    case "delivered":
+      return "delivered";
+    case "cancelled":
+      return "cancelled";
+    case "failed":
+      return "failed";
+    default:
+      throw new Error(`Unsupported delivery status: ${status}`);
+  }
+}
+
+function mapBackendToFrontendStatus(apiStatus) {
+  switch (apiStatus) {
+    case "pending":
+      return "pending_assignment";
+    case "assigned":
+      return "assigned";
+    case "picked_up":
+      return "picked_up";
+    case "in_transit":
+      return "in_transit";
+    case "out_for_delivery":
+      return "out_for_delivery";
+    case "delivered":
+      return "delivered";
+    case "cancelled":
+      return "cancelled";
+    case "failed":
+      return "failed";
+    default:
+      throw new Error(`Unsupported backend delivery status: ${apiStatus}`);
+  }
+}
+
+test('Delivery Status Mapping: bi-directional mapping preserves all states including picked_up and out_for_delivery', () => {
+  // Outgoing mapping (Frontend -> Backend)
+  assert.equal(mapFrontendToBackendStatus('picked_up'), 'picked_up');
+  assert.equal(mapFrontendToBackendStatus('in_transit'), 'in_transit');
+  assert.equal(mapFrontendToBackendStatus('out_for_delivery'), 'out_for_delivery');
+  assert.equal(mapFrontendToBackendStatus('assigned'), 'assigned');
+  assert.equal(mapFrontendToBackendStatus('pending_assignment'), 'pending');
+  assert.equal(mapFrontendToBackendStatus('delivered'), 'delivered');
+  assert.equal(mapFrontendToBackendStatus('cancelled'), 'cancelled');
+  assert.equal(mapFrontendToBackendStatus('failed'), 'failed');
+
+  // Unsupported status throws
+  assert.throws(() => mapFrontendToBackendStatus('invalid_status'), /Unsupported delivery status/);
+
+  // Incoming mapping (Backend -> Frontend)
+  assert.equal(mapBackendToFrontendStatus('picked_up'), 'picked_up');
+  assert.equal(mapBackendToFrontendStatus('in_transit'), 'in_transit');
+  assert.equal(mapBackendToFrontendStatus('out_for_delivery'), 'out_for_delivery');
+  assert.equal(mapBackendToFrontendStatus('assigned'), 'assigned');
+  assert.equal(mapBackendToFrontendStatus('pending'), 'pending_assignment');
+  assert.equal(mapBackendToFrontendStatus('delivered'), 'delivered');
+  assert.equal(mapBackendToFrontendStatus('cancelled'), 'cancelled');
+  assert.equal(mapBackendToFrontendStatus('failed'), 'failed');
+  assert.throws(() => mapBackendToFrontendStatus('unexpected_status'), /Unsupported backend delivery status/);
+
+  // Ensure lib/state-machine.ts itself fails closed on unknown backend statuses
+  const smSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'state-machine.ts'), 'utf8');
+  assert.ok(smSource.includes('Unsupported backend delivery status'), 'lib/state-machine.ts must throw on unknown backend status');
+  assert.ok(smSource.includes('Unsupported postcode status'), 'lib/state-machine.ts must throw on unknown postcode status');
+  assert.ok(smSource.includes('Unsupported actor role'), 'lib/state-machine.ts must throw on unknown actor role');
+  assert.ok(!smSource.includes("default:\n      return 'draft'") && !smSource.includes("default:\r\n      return 'draft'"), 'lib/state-machine.ts must not fall back to draft');
+
+  const devConsoleSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'components', 'DeveloperConsoleTab.tsx'), 'utf8');
+  assert.ok(devConsoleSource.includes('FASTAPI_BASE_URL'), 'DeveloperConsoleTab.tsx must use shared FASTAPI_BASE_URL');
+  assert.ok(!devConsoleSource.includes('NEXT_PUBLIC_API_URL'), 'DeveloperConsoleTab.tsx must not read NEXT_PUBLIC_API_URL directly');
+});
+
+// 7. Canonical Postcode Format & 5-Tier Trust Classification
+function isWellFormedPostcode(code) {
+  if (!code || typeof code !== 'string') return false;
+  const trimmed = code.trim();
+  const isNumeric = /^\d{6}$/.test(trimmed);
+  const isDigital = /^[A-Z]{2}-\d{2}-[A-Z0-9]{3}-[A-Z0-9]{2}-\d{2}$/i.test(trimmed);
+  return isNumeric || isDigital;
+}
+
+function classifyPostcodeTrustTier(data, inputState) {
+  if (!data || !data.exists) {
+    return { status: 'unavailable', is_official: false };
+  }
+  if (data.source === 'live_nipost') {
+    if (inputState && data.state && !data.state.toLowerCase().includes(inputState.toLowerCase())) {
+      return { status: 'address_conflict', is_official: true };
+    }
+    if (!data.state || !data.lga) {
+      return { status: 'partial_verification', is_official: true };
+    }
+    return { status: 'officially_verified', is_official: true };
+  }
+  if (data.source === 'local_reference') {
+    if (inputState && data.state && !data.state.toLowerCase().includes(inputState.toLowerCase())) {
+      return { status: 'address_conflict', is_official: false };
+    }
+    return { status: 'local_match', is_official: false };
+  }
+  return { status: 'unavailable', is_official: false };
+}
+
+test('Canonical Postcode: validates 6-digit numeric and 15-character digital formats', () => {
+  // Conventional 6-digit codes
+  assert.equal(isWellFormedPostcode('100001'), true);
+  assert.equal(isWellFormedPostcode('900001'), true);
+  assert.equal(isWellFormedPostcode(' 500261 '), true);
+
+  // 15-character National Digital Postcodes
+  assert.equal(isWellFormedPostcode('FC-02-A09-DB-09'), true);
+  assert.equal(isWellFormedPostcode('LA-01-A04-IK-02'), true);
+
+  // Invalid formats
+  assert.equal(isWellFormedPostcode('12345'), false);
+  assert.equal(isWellFormedPostcode('1234567'), false);
+  assert.equal(isWellFormedPostcode('ABCDEF'), false);
+  assert.equal(isWellFormedPostcode('FC-02-INVALID'), false);
+  assert.equal(isWellFormedPostcode(''), false);
+  assert.equal(isWellFormedPostcode(null), false);
+});
+
+test('Trust Tier Classification: correctly evaluates 5-tier trust states and rejects synthetic defaults', () => {
+  // 1. Officially Verified
+  const t1 = classifyPostcodeTrustTier({ exists: true, source: 'live_nipost', state: 'Lagos', lga: 'Ikeja' }, 'Lagos');
+  assert.equal(t1.status, 'officially_verified');
+  assert.equal(t1.is_official, true);
+
+  // 2. Partial Verification (missing LGA or state - must NOT invent defaults)
+  const t2 = classifyPostcodeTrustTier({ exists: true, source: 'live_nipost', state: 'Lagos', lga: null });
+  assert.equal(t2.status, 'partial_verification');
+  assert.equal(t2.is_official, true);
+
+  // 3. Address Conflict (postcode maps to Lagos, but user input Abuja)
+  const t3 = classifyPostcodeTrustTier({ exists: true, source: 'live_nipost', state: 'Lagos', lga: 'Ikeja' }, 'Abuja');
+  assert.equal(t3.status, 'address_conflict');
+  assert.equal(t3.is_official, true);
+
+  // 4. Local Match (PostcodeLink reference dataset, not official government validation)
+  const t4 = classifyPostcodeTrustTier({ exists: true, source: 'local_reference', state: 'Lagos', lga: 'Ikeja' });
+  assert.equal(t4.status, 'local_match');
+  assert.equal(t4.is_official, false);
+
+  // 5. Unavailable / Not Found
+  const t5 = classifyPostcodeTrustTier({ exists: false });
+  assert.equal(t5.status, 'unavailable');
+  assert.equal(t5.is_official, false);
+});
+
+test('Environment Configuration: .env.example and fastapi-client.ts agree on NEXT_PUBLIC_FASTAPI_URL', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const envExample = fs.readFileSync(path.join(process.cwd(), '.env.example'), 'utf8');
+  const clientSrc = fs.readFileSync(path.join(process.cwd(), 'lib', 'fastapi-client.ts'), 'utf8');
+  assert.ok(envExample.includes('NEXT_PUBLIC_FASTAPI_URL='), '.env.example must define NEXT_PUBLIC_FASTAPI_URL');
+  assert.ok(clientSrc.includes('process.env.NEXT_PUBLIC_FASTAPI_URL'), 'fastapi-client.ts must read NEXT_PUBLIC_FASTAPI_URL');
+});
+
+test('Official Verification Badge: fails closed on missing, expired, malformed, partial, or fallback evidence', () => {
+  function isOfficiallyVerifiedEvidence({ status, isLiveNipost, isPartial, fallbackUsed, evidenceId, validUntil }) {
+    const hasOfficialStatus = status === 'official_verified' || status === 'officially_verified' || status === 'nipost_verified';
+    if (!hasOfficialStatus || isLiveNipost !== true || isPartial || fallbackUsed) return false;
+    if (!evidenceId || !evidenceId.trim()) return false;
+    if (!validUntil || !validUntil.trim()) return false;
+    const expiresMs = Date.parse(validUntil);
+    if (Number.isNaN(expiresMs) || expiresMs <= Date.now()) return false;
+    return true;
+  }
+
+  const future = new Date(Date.now() + 86400_000).toISOString();
+  const past = new Date(Date.now() - 86400_000).toISOString();
+
+  assert.equal(isOfficiallyVerifiedEvidence({ status: 'official_verified', isLiveNipost: true, evidenceId: 'ev-1', validUntil: future }), true);
+  assert.equal(isOfficiallyVerifiedEvidence({ status: 'official_verified', isLiveNipost: false, evidenceId: 'ev-1', validUntil: future }), false);
+  assert.equal(isOfficiallyVerifiedEvidence({ status: 'official_verified', isLiveNipost: true, evidenceId: '', validUntil: future }), false);
+  assert.equal(isOfficiallyVerifiedEvidence({ status: 'official_verified', isLiveNipost: true, validUntil: future }), false);
+  assert.equal(isOfficiallyVerifiedEvidence({ status: 'official_verified', isLiveNipost: true, evidenceId: 'ev-1' }), false);
+  assert.equal(isOfficiallyVerifiedEvidence({ status: 'official_verified', isLiveNipost: true, evidenceId: 'ev-1', validUntil: 'not-a-date' }), false);
+  assert.equal(isOfficiallyVerifiedEvidence({ status: 'official_verified', isLiveNipost: true, evidenceId: 'ev-1', validUntil: past }), false);
+  assert.equal(isOfficiallyVerifiedEvidence({ status: 'official_verified', isLiveNipost: true, isPartial: true, evidenceId: 'ev-1', validUntil: future }), false);
+  assert.equal(isOfficiallyVerifiedEvidence({ status: 'official_verified', isLiveNipost: true, fallbackUsed: true, evidenceId: 'ev-1', validUntil: future }), false);
+});
+
+

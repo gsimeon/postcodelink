@@ -3,7 +3,7 @@ import time
 import ipaddress
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Tuple, Optional
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
 from backend.app.config import settings
@@ -20,6 +20,7 @@ from backend.app.schemas.auth import (
 )
 from backend.app.core.security import hash_password, verify_password, create_access_token
 from backend.app.core.auth_deps import get_current_user, require_roles
+from backend.app.core.network import is_ip_in_trusted_proxy, get_trusted_client_ip
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -29,50 +30,29 @@ MAX_LOGIN_ATTEMPTS = 5
 LOCKOUT_DURATION_MINUTES = 15
 
 
-def is_ip_in_trusted_proxy(ip_str: str, trusted_spec: str) -> bool:
-    """Check if an IP string belongs to a trusted proxy host or CIDR subnet."""
-    try:
-        ip = ipaddress.ip_address(ip_str)
-        if "/" in trusted_spec:
-            return ip in ipaddress.ip_network(trusted_spec, strict=False)
-        return ip == ipaddress.ip_address(trusted_spec)
-    except ValueError:
-        return ip_str.lower() == trusted_spec.lower()
+from backend.app.services.maintenance_service import cleanup_expired_login_attempts
 
 
-def get_trusted_client_ip(request: Request) -> str:
-    """Extract real client IP only trusting X-Forwarded-For when direct request arrives via a configured trusted proxy."""
-    direct_ip = request.client.host if request.client else "127.0.0.1"
-    trusted_list = getattr(settings, "TRUSTED_PROXIES", ["127.0.0.1", "::1", "localhost", "testclient"])
-
-    # If the direct peer is NOT in trusted proxies, completely ignore X-Forwarded-For to defeat header spoofing
-    is_trusted = any(is_ip_in_trusted_proxy(direct_ip, proxy) for proxy in trusted_list)
-    if not is_trusted:
-        return direct_ip
-
-    # Peer is a trusted proxy: parse X-Forwarded-For chain from right to left
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        ips = [ip.strip() for ip in forwarded.split(",") if ip.strip()]
-        for ip in reversed(ips):
-            if not any(is_ip_in_trusted_proxy(ip, proxy) for proxy in trusted_list):
-                return ip
-        if ips:
-            return ips[0]
-
-    return direct_ip
-
-
-def cleanup_expired_login_attempts(db: Session, retention_days: int = 30) -> int:
-    """Purge login attempt audit records older than retention_days (Retention Policy)."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-    deleted = db.query(LoginAttempt).filter(LoginAttempt.attempted_at < cutoff).delete()
-    db.commit()
-    return deleted
+def _set_session_cookie(response: Response, token: str) -> None:
+    """Persist JWT in an HttpOnly cookie so browser JS cannot read it via localStorage."""
+    samesite_val = getattr(settings, "SESSION_COOKIE_SAMESITE", "lax").strip().lower()
+    if samesite_val not in ("lax", "strict", "none"):
+        samesite_val = "lax"
+    # Browsers require Secure=True when SameSite=None
+    is_secure = (settings.ENVIRONMENT == "production") or (samesite_val == "none")
+    response.set_cookie(
+        key="postcodelink_session",
+        value=token,
+        httponly=True,
+        samesite=samesite_val,
+        secure=is_secure,
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        path="/",
+    )
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-def api_register(request: UserRegisterRequest, db: Session = Depends(get_db)):
+def api_register(request: UserRegisterRequest, response: Response, db: Session = Depends(get_db)):
     """Register a new merchant account. Public registration ALWAYS defaults to MERCHANT."""
     clean_email = request.email.strip().lower()
     existing = db.query(Profile).filter(Profile.email == clean_email).first()
@@ -96,6 +76,7 @@ def api_register(request: UserRegisterRequest, db: Session = Depends(get_db)):
     db.refresh(profile)
 
     token = create_access_token({"sub": profile.id, "email": profile.email, "role": profile.role.value})
+    _set_session_cookie(response, token)
     return TokenResponse(
         access_token=token,
         token_type="bearer",
@@ -133,7 +114,7 @@ def api_admin_create_user(
 
 
 @router.post("/login", response_model=TokenResponse)
-def api_login(request: UserLoginRequest, req: Request, db: Session = Depends(get_db)):
+def api_login(request: UserLoginRequest, req: Request, response: Response, db: Session = Depends(get_db)):
     """Authenticate with email and password to receive a JWT Bearer token with trusted-proxy rate limiting."""
     clean_email = request.email.strip().lower()
     client_ip = get_trusted_client_ip(req)
@@ -246,11 +227,19 @@ def api_login(request: UserLoginRequest, req: Request, db: Session = Depends(get
     db.commit()
 
     token = create_access_token({"sub": profile.id, "email": profile.email, "role": profile.role.value})
+    _set_session_cookie(response, token)
     return TokenResponse(
         access_token=token,
         token_type="bearer",
         profile=ProfileResponse.model_validate(profile)
     )
+
+
+@router.post("/logout")
+def api_logout(response: Response):
+    """Clear the HttpOnly session cookie."""
+    response.delete_cookie(key="postcodelink_session", path="/")
+    return {"status": "logged_out"}
 
 
 @router.get("/me", response_model=ProfileResponse)

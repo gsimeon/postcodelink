@@ -3,7 +3,6 @@
 import React, { useState } from "react";
 import { Delivery, DeliveryStatus, Operator, AppSettings } from "@/lib/types";
 import { validateStateTransition } from "@/lib/state-machine";
-import { verifyDeliveryOtp } from "@/lib/storage";
 import {
   X,
   MapPin,
@@ -30,6 +29,7 @@ interface DeliveryDetailModalProps {
   onClose: () => void;
   onUpdateStatus: (deliveryId: string, newStatus: DeliveryStatus, note: string) => void;
   onAssignOperator: (deliveryId: string, operatorId: string, operatorName: string) => void;
+  onVerifyOtp: (deliveryId: string, otp: string) => Promise<{ success: boolean; message: string }> | { success: boolean; message: string };
 }
 
 export function DeliveryDetailModal({
@@ -39,6 +39,7 @@ export function DeliveryDetailModal({
   onClose,
   onUpdateStatus,
   onAssignOperator,
+  onVerifyOtp,
 }: DeliveryDetailModalProps) {
   const [showWaybill, setShowWaybill] = useState(false);
   const [showWhatsApp, setShowWhatsApp] = useState(false);
@@ -71,11 +72,11 @@ export function DeliveryDetailModal({
     setNote("");
   };
 
-  const handleVerifyOtp = (e: React.FormEvent) => {
+  const handleVerifyOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!enteredOtp.trim()) return;
 
-    const res = verifyDeliveryOtp(delivery.id, enteredOtp.trim());
+    const res = await onVerifyOtp(delivery.id, enteredOtp.trim());
     if (!res.success) {
       setOtpError(res.message);
       return;

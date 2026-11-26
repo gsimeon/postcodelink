@@ -20,6 +20,7 @@ export function Header({ activeTab, settings, unassignedCount }: HeaderProps) {
     map: "Interactive Dispatch Radar & Fleet Map",
     tracking: "Public Customer Tracking Portal",
     postcodes: "Nigerian Postcode Directory & Cleanser",
+    developer: "Developer API Console",
     operators: "Logistics Dispatch Operators",
     customers: "Customer Directory",
     analytics: "Zone Performance & Courier SLAs",

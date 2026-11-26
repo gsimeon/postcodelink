@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import { FastAPIProfile } from "@/lib/fastapi-client";
 import {
   Activity,
   Package,
@@ -14,7 +15,8 @@ import {
   Navigation,
   Compass,
   BarChart3,
-  Upload
+  Upload,
+  Key
 } from "lucide-react";
 
 export type TabKey =
@@ -23,6 +25,7 @@ export type TabKey =
   | "map"
   | "tracking"
   | "postcodes"
+  | "developer"
   | "operators"
   | "customers"
   | "analytics"
@@ -34,6 +37,7 @@ interface SidebarProps {
   deliveriesCount: number;
   unassignedCount: number;
   availableOperatorsCount: number;
+  profile?: FastAPIProfile | null;
 }
 
 export function Sidebar({
@@ -42,7 +46,22 @@ export function Sidebar({
   deliveriesCount,
   unassignedCount,
   availableOperatorsCount,
+  profile,
 }: SidebarProps) {
+  const userInitials = profile?.full_name
+    ? profile.full_name
+        .split(" ")
+        .filter(Boolean)
+        .map((n) => n[0])
+        .join("")
+        .toUpperCase()
+        .slice(0, 2)
+    : "AU";
+
+  const workspaceInitial = profile?.business_name
+    ? profile.business_name[0].toUpperCase()
+    : "P";
+
   return (
     <aside className="sidebar">
       {/* Brand */}
@@ -58,22 +77,40 @@ export function Sidebar({
 
       {/* Workspace Switcher */}
       <div className="workspace">
-        <div className="avatar">P</div>
+        <div className="avatar">{workspaceInitial}</div>
         <div>
-          <b>Peak Stores Lagos</b>
-          <small>Merchant workspace</small>
+          <b>{profile?.business_name || "Postcode Intelligence"}</b>
+          <small>{profile?.role ? `${profile.role.toUpperCase()} Workspace` : "Postcode Intelligence Core"}</small>
         </div>
         <ChevronDown size={14} color="#94a3b8" />
       </div>
 
-      {/* Main Operations Navigation */}
-      <p className="nav-label">DISPATCH OPERATIONS</p>
+      {/* Primary Workspace Navigation: Postcode Intelligence */}
+      <p className="nav-label">POSTCODE INTELLIGENCE (CORE)</p>
+      <button
+        type="button"
+        className={`nav ${activeTab === "postcodes" ? "active" : ""}`}
+        onClick={() => setActiveTab("postcodes")}
+      >
+        <MapPin size={17} /> Postcode Explorer & Cleanser
+      </button>
+
+      <button
+        type="button"
+        className={`nav ${activeTab === "developer" ? "active" : ""}`}
+        onClick={() => setActiveTab("developer")}
+      >
+        <Key size={17} /> Developer API Console
+      </button>
+
+      {/* Decoupled Downstream Logistics Module */}
+      <p className="nav-label second">LOGISTICS & DISPATCH (MODULE)</p>
       <button
         type="button"
         className={`nav ${activeTab === "overview" ? "active" : ""}`}
         onClick={() => setActiveTab("overview")}
       >
-        <Activity size={17} /> Overview
+        <Activity size={17} /> Operations Overview
       </button>
 
       <button
@@ -101,16 +138,8 @@ export function Sidebar({
         <Compass size={17} /> Public Tracking Portal
       </button>
 
-      {/* Postcode & Fleet Tools */}
-      <p className="nav-label second">NETWORK & COURIERS</p>
-      <button
-        type="button"
-        className={`nav ${activeTab === "postcodes" ? "active" : ""}`}
-        onClick={() => setActiveTab("postcodes")}
-      >
-        <MapPin size={17} /> Postcode Registry & Cleanser
-      </button>
-
+      {/* Fleet & Network Tools */}
+      <p className="nav-label second">FLEET & NETWORK</p>
       <button
         type="button"
         className={`nav ${activeTab === "operators" ? "active" : ""}`}
@@ -124,7 +153,15 @@ export function Sidebar({
         )}
       </button>
 
-      {/* Management & Analytics */}
+      <button
+        type="button"
+        className={`nav ${activeTab === "customers" ? "active" : ""}`}
+        onClick={() => setActiveTab("customers")}
+      >
+        <Users size={17} /> Customers Directory
+      </button>
+
+      {/* Intelligence & Settings */}
       <p className="nav-label second">INTELLIGENCE & SETTINGS</p>
       <button
         type="button"
@@ -132,14 +169,6 @@ export function Sidebar({
         onClick={() => setActiveTab("analytics")}
       >
         <BarChart3 size={17} /> Zone Analytics & SLAs
-      </button>
-
-      <button
-        type="button"
-        className={`nav ${activeTab === "customers" ? "active" : ""}`}
-        onClick={() => setActiveTab("customers")}
-      >
-        <Users size={17} /> Customers Directory
       </button>
 
       <button
@@ -153,19 +182,19 @@ export function Sidebar({
       {/* Help Card */}
       <div className="help">
         <CircleHelp size={18} color="#2563eb" />
-        <b>Digital Postcodes in Nigeria</b>
-        <small>Official 6-digit codes optimize last-mile dispatch across Lagos, Abuja & major cities.</small>
+        <b>Nigerian Digital Postcodes</b>
+        <small>Validates 11-character digital codes (SS-LL-DDD-AA-BB) and legacy 6-digit references. Local pilot records are not independently NIPOST-verified.</small>
         <button type="button" onClick={() => setActiveTab("postcodes")}>
-          Open Registry <ArrowRight size={13} />
+          Open Explorer <ArrowRight size={13} />
         </button>
       </div>
 
       {/* User profile */}
       <div className="profile">
-        <div className="avatar">GS</div>
+        <div className="avatar">{userInitials}</div>
         <div>
-          <b>Godwin Simeon</b>
-          <small>Operations Admin</small>
+          <b>{profile?.full_name || "Account User"}</b>
+          <small>{profile?.role ? `${profile.role.toUpperCase()} User` : "Operations Admin"}</small>
         </div>
         <ChevronDown size={14} color="#94a3b8" />
       </div>
