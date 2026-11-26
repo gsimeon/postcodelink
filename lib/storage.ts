@@ -517,13 +517,13 @@ export function verifyDeliveryOtp(
     status: 'delivered',
     actor: 'Courier Rider (OTP Verified)',
     actorRole: 'rider',
-    note: note || `Confirmed via 4-digit recipient OTP [${enteredOtp}]. Proof of delivery authenticated.`
+    note: note || "Confirmed via demo recipient OTP. Proof of delivery authenticated."
   });
 
   updateDelivery(deliveryId, {
     status: 'delivered',
     podVerified: true,
-    podNote: note || `OTP Verified Delivery (PIN: ${enteredOtp})`,
+    podNote: note || "OTP Verified Delivery (Demo Mode)",
     otpAttempts: 0,
     otpLockedUntil: undefined,
   });

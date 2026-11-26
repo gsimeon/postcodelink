@@ -422,6 +422,13 @@ test('Delivery Status Mapping: bi-directional mapping preserves all states inclu
   const devConsoleSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'components', 'DeveloperConsoleTab.tsx'), 'utf8');
   assert.ok(devConsoleSource.includes('FASTAPI_BASE_URL'), 'DeveloperConsoleTab.tsx must use shared FASTAPI_BASE_URL');
   assert.ok(!devConsoleSource.includes('NEXT_PUBLIC_API_URL'), 'DeveloperConsoleTab.tsx must not read NEXT_PUBLIC_API_URL directly');
+
+  const verifyOtpRouteSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'app', 'api', 'deliveries', 'verify-otp', 'route.ts'), 'utf8');
+  assert.ok(!verifyOtpRouteSource.includes('@/lib/storage'), 'verify-otp route must not import browser localStorage');
+  assert.ok(verifyOtpRouteSource.includes('503'), 'verify-otp route must fail closed with HTTP 503');
+
+  const storageSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'storage.ts'), 'utf8');
+  assert.ok(!storageSource.includes('${enteredOtp}'), 'lib/storage.ts must never log or store enteredOtp in event/pod notes');
 });
 
 // 7. Canonical Postcode Format & 5-Tier Trust Classification
