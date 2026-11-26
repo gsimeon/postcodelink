@@ -68,6 +68,8 @@ export default function Home() {
     currentProfile,
     notice,
     setNotice,
+    dataStatus,
+    dataError,
     loadData,
     handleExplicitLogin,
     handleLogout,
@@ -515,6 +517,47 @@ export default function Home() {
               </button>
             </div>
           )}
+          {isFastAPIConnected && dataStatus === "error" && dataError && (
+            <div
+              role="alert"
+              style={{
+                background: "#fef2f2",
+                border: "1px solid #fecaca",
+                borderRadius: "8px",
+                padding: "10px 16px",
+                marginBottom: "16px",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: "12px",
+              }}
+            >
+              <div>
+                <strong style={{ color: "#991b1b" }}>Workspace Sync Error</strong>
+                <p style={{ margin: "4px 0 0", fontSize: "12px", color: "#b91c1c" }}>
+                  {dataError}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => loadData()}
+                style={{
+                  padding: "6px 12px",
+                  background: "#b91c1c",
+                  color: "#fff",
+                  border: "none",
+                  borderRadius: "6px",
+                  cursor: "pointer",
+                  fontSize: "12px",
+                  fontWeight: "bold",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Retry Sync
+              </button>
+            </div>
+          )}
+
           {activeTab === "overview" && (
             <OverviewTab
               deliveries={deliveries}

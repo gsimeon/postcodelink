@@ -23,6 +23,14 @@ import {
 const DEFAULT_NOTICE =
   "PostcodeLink Nigeria · Standardized Digital Postcode Dispatch Gateway";
 
+export type DataLoadStatus = "idle" | "loading" | "loaded" | "error";
+
+export interface ResourceErrors {
+  deliveries?: string;
+  operators?: string;
+  customers?: string;
+}
+
 export function useWorkspaceSession() {
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
   const [operators, setOperators] = useState<Operator[]>([]);
@@ -32,8 +40,11 @@ export function useWorkspaceSession() {
   const [isDemoMode, setIsDemoMode] = useState(false);
   const [currentProfile, setCurrentProfile] = useState<FastAPIProfile | null>(null);
   const [notice, setNotice] = useState(DEFAULT_NOTICE);
+  const [dataStatus, setDataStatus] = useState<DataLoadStatus>("idle");
+  const [dataError, setDataError] = useState<string | null>(null);
+  const [resourceErrors, setResourceErrors] = useState<ResourceErrors>({});
 
-  // Load data: Authoritative FastAPI data source with no silent split-brain
+  // Load data: Authoritative FastAPI data source with explicit loaded-empty vs API-error distinction
   const loadData = useCallback(async () => {
     try {
       const health = await fastApiClient.getHealth();
@@ -45,38 +56,84 @@ export function useWorkspaceSession() {
         }
 
         if (fastApiClient.isAuthenticated()) {
-          const [apiDeliveries, apiOperators, apiCustomers, profile] =
-            await Promise.all([
-              fastApiClient.listDeliveries().catch(() => []),
-              fastApiClient.listOperators().catch(() => []),
-              fastApiClient.listCustomers().catch(() => []),
-              fastApiClient.getProfile().catch(() => null),
+          setDataStatus("loading");
+          const [delivRes, opsRes, custRes, profileRes] =
+            await Promise.allSettled([
+              fastApiClient.listDeliveries(),
+              fastApiClient.listOperators(),
+              fastApiClient.listCustomers(),
+              fastApiClient.getProfile(),
             ]);
 
-          if (profile) {
-            setCurrentProfile(profile);
+          if (profileRes.status === "fulfilled" && profileRes.value) {
+            setCurrentProfile(profileRes.value);
           }
-          // An empty array is a valid empty database state
-          setDeliveries(apiDeliveries.map(mapFastAPIDelivery));
-          setOperators(apiOperators.map(mapFastAPIOperator));
-          setCustomers(apiCustomers.map(mapFastAPICustomer));
+
+          const errors: ResourceErrors = {};
+          if (delivRes.status === "fulfilled") {
+            setDeliveries(delivRes.value.map(mapFastAPIDelivery));
+          } else {
+            errors.deliveries =
+              delivRes.reason instanceof Error
+                ? delivRes.reason.message
+                : "Failed to load deliveries";
+          }
+
+          if (opsRes.status === "fulfilled") {
+            setOperators(opsRes.value.map(mapFastAPIOperator));
+          } else {
+            errors.operators =
+              opsRes.reason instanceof Error
+                ? opsRes.reason.message
+                : "Failed to load operators";
+          }
+
+          if (custRes.status === "fulfilled") {
+            setCustomers(custRes.value.map(mapFastAPICustomer));
+          } else {
+            errors.customers =
+              custRes.reason instanceof Error
+                ? custRes.reason.message
+                : "Failed to load customers";
+          }
+
           setSettings(getStoredSettings());
+          setResourceErrors(errors);
+
+          const failedResources = Object.keys(errors);
+          if (failedResources.length > 0) {
+            setDataStatus("error");
+            setDataError(
+              `Could not refresh ${failedResources.join(", ")} from the backend API. Existing records were preserved; retry to sync.`
+            );
+          } else {
+            setDataStatus("loaded");
+            setDataError(null);
+          }
           return;
         }
+
+        setDataStatus("idle");
+        setDataError(null);
+        setResourceErrors({});
       }
     } catch {
       // Backend offline
     }
 
     setIsFastAPIConnected(false);
+    setDataError(null);
+    setResourceErrors({});
     if (isDemoMode) {
       setDeliveries(getStoredDeliveries());
       setOperators(getStoredOperators());
       setCustomers(getStoredCustomers());
+      setDataStatus("loaded");
     } else {
       setDeliveries([]);
       setOperators([]);
       setCustomers([]);
+      setDataStatus("idle");
     }
     setSettings(getStoredSettings());
   }, [isDemoMode]);
@@ -110,6 +167,9 @@ export function useWorkspaceSession() {
   const handleLogout = useCallback(() => {
     fastApiClient.logout();
     setCurrentProfile(null);
+    setDataStatus("idle");
+    setDataError(null);
+    setResourceErrors({});
     setNotice("Logged out of dispatch session.");
     loadData();
   }, [loadData]);
@@ -130,6 +190,9 @@ export function useWorkspaceSession() {
     setCurrentProfile,
     notice,
     setNotice,
+    dataStatus,
+    dataError,
+    resourceErrors,
     loadData,
     handleExplicitLogin,
     handleLogout,
