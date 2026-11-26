@@ -1,16 +1,15 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState } from "react";
 import {
   Delivery,
   DeliveryStatus,
   Operator,
   Customer,
-  AppSettings
+  AppSettings,
 } from "@/lib/types";
 import {
   getStoredDeliveries,
-  saveDeliveries,
   addDelivery,
   bulkAddDeliveries,
   updateDelivery,
@@ -31,12 +30,9 @@ import {
 
 import {
   fastApiClient,
-  FastAPIDelivery,
-  FastAPIOperator,
-  FastAPICustomer,
-  FastAPIProfile,
 } from "@/lib/fastapi-client";
 import { mapFrontendToBackendStatus, mapBackendToFrontendStatus } from "@/lib/state-machine";
+import { useWorkspaceSession } from "@/hooks/useWorkspaceSession";
 
 import { Sidebar, TabKey } from "@/components/Sidebar";
 import { Header } from "@/components/Header";
@@ -57,92 +53,31 @@ import { mapFastAPICustomer, mapFastAPIDelivery, mapFastAPIOperator } from "@/li
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<TabKey>("postcodes");
-  const [deliveries, setDeliveries] = useState<Delivery[]>([]);
-  const [operators, setOperators] = useState<Operator[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
-  const [settings, setSettings] = useState<AppSettings>(getStoredSettings());
-  const [isFastAPIConnected, setIsFastAPIConnected] = useState(false);
-  const [isDemoMode, setIsDemoMode] = useState(false);
-  const [currentProfile, setCurrentProfile] = useState<FastAPIProfile | null>(null);
+  const {
+    deliveries,
+    setDeliveries,
+    operators,
+    setOperators,
+    customers,
+    setCustomers,
+    settings,
+    setSettings,
+    isFastAPIConnected,
+    isDemoMode,
+    setIsDemoMode,
+    currentProfile,
+    notice,
+    setNotice,
+    loadData,
+    handleExplicitLogin,
+    handleLogout,
+  } = useWorkspaceSession();
 
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [prefillAddress, setPrefillAddress] = useState("");
   const [prefillPostcode, setPrefillPostcode] = useState("");
   const [selectedInspectDelivery, setSelectedInspectDelivery] = useState<Delivery | null>(null);
-  const [notice, setNotice] = useState("PostcodeLink Nigeria · Standardized Digital Postcode Dispatch Gateway");
-
-  // Load data: Authoritative FastAPI data source with no silent split-brain
-  const loadData = useCallback(async () => {
-    try {
-      const health = await fastApiClient.getHealth();
-      if (health && health.status === "healthy") {
-        setIsFastAPIConnected(true);
-
-        if (!fastApiClient.isAuthenticated()) {
-          await fastApiClient.restoreSession().catch(() => null);
-        }
-
-        if (fastApiClient.isAuthenticated()) {
-          const [apiDeliveries, apiOperators, apiCustomers, profile] = await Promise.all([
-            fastApiClient.listDeliveries().catch(() => []),
-            fastApiClient.listOperators().catch(() => []),
-            fastApiClient.listCustomers().catch(() => []),
-            fastApiClient.getProfile().catch(() => null),
-          ]);
-
-          if (profile) {
-            setCurrentProfile(profile);
-          }
-          // An empty array is a valid empty database state
-          setDeliveries(apiDeliveries.map(mapFastAPIDelivery));
-          setOperators(apiOperators.map(mapFastAPIOperator));
-          setCustomers(apiCustomers.map(mapFastAPICustomer));
-          setSettings(getStoredSettings());
-          return;
-        }
-      }
-    } catch {
-      // Backend offline
-    }
-
-    setIsFastAPIConnected(false);
-    if (isDemoMode) {
-      setDeliveries(getStoredDeliveries());
-      setOperators(getStoredOperators());
-      setCustomers(getStoredCustomers());
-    } else {
-      setDeliveries([]);
-      setOperators([]);
-      setCustomers([]);
-    }
-    setSettings(getStoredSettings());
-  }, [isDemoMode]);
-
-  useEffect(() => {
-    loadData();
-    const handleUpdate = () => loadData();
-    window.addEventListener("postcodelink-data-updated", handleUpdate);
-    return () => window.removeEventListener("postcodelink-data-updated", handleUpdate);
-  }, [loadData]);
-
-  const handleExplicitLogin = async (email: string, pass: string) => {
-    try {
-      const res = await fastApiClient.login(email, pass);
-      setCurrentProfile(res.profile);
-      setNotice(`Authenticated as ${res.profile.full_name} (${res.profile.business_name || res.profile.role}).`);
-      await loadData();
-    } catch (err: any) {
-      setNotice(`Authentication failed: ${err.message}`);
-    }
-  };
-
-  const handleLogout = () => {
-    fastApiClient.logout();
-    setCurrentProfile(null);
-    setNotice("Logged out of dispatch session.");
-    loadData();
-  };
 
   const unassignedCount = deliveries.filter((d) => d.status === "pending_assignment").length;
   const availableOperatorsCount = operators.filter((o) => o.isAvailable).length;
